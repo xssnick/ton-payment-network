@@ -74,16 +74,35 @@ func (s *Service) IncrementStates(ctx context.Context, channelAddr string) error
 	return nil
 }
 
-func (s *Service) OpenVirtualChannel(ctx context.Context, channelAddr string, with ed25519.PublicKey, vch payments.VirtualChannel) error {
-	channel, err := s.getActiveChannel(channelAddr)
+func (s *Service) OpenVirtualChannel(ctx context.Context, with ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error {
+	if len(chain) == 0 {
+		return fmt.Errorf("chain is empty")
+	}
+
+	channels, err := s.GetActiveChannelsWithNode(ctx, with)
+	if err != nil {
+		return fmt.Errorf("failed to get active channels: %w", err)
+	}
+
+	if len(channels) == 0 {
+		return fmt.Errorf("no active channels with first node")
+	}
+	// TODO: select channel with enough balance
+
+	channel, err := s.GetActiveChannel(channels[0])
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	if err = s.proposeAction(ctx, channel, transport.OpenVirtualAction{
-		Target: with,
-		Key:    vch.Key,
-	}, vch); err != nil {
+	act := transport.OpenVirtualAction{
+		Key: vch.Key,
+	}
+
+	if err = act.SetInstructions(chain, private); err != nil {
+		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if err = s.proposeAction(ctx, channel, act, vch); err != nil {
 		return fmt.Errorf("failed to propose actions to the node: %w", err)
 	}
 	return nil
@@ -229,7 +248,7 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 }
 
 func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payments.CooperativeClose) (*payments.CooperativeClose, *db.Channel, error) {
-	channel, err := s.getActiveChannel(channelAddr)
+	channel, err := s.GetActiveChannel(channelAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -287,7 +306,7 @@ func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payme
 }
 
 func (s *Service) StartUncooperativeClose(ctx context.Context, channelAddr string) error {
-	channel, err := s.getActiveChannel(channelAddr)
+	channel, err := s.GetActiveChannel(channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}

@@ -35,7 +35,7 @@ func (s *Service) peerDiscovery() {
 				_, err := s.transport.GetChannelConfig(ctx, key)
 				cancel()
 				if err != nil {
-					log.Warn().Err(err).Hex("key", key).Msg("failed to connect with peer")
+					log.Debug().Err(err).Hex("key", key).Msg("failed to connect with peer")
 					return
 				}
 			}(k)

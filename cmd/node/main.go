@@ -15,7 +15,6 @@ import (
 	"github.com/xssnick/payment-network/internal/node/db/filedb"
 	"github.com/xssnick/payment-network/internal/node/transport"
 	"github.com/xssnick/payment-network/pkg/payments"
-	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/liteclient"
@@ -24,7 +23,9 @@ import (
 	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"golang.org/x/crypto/ed25519"
+	"math/big"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -51,7 +52,7 @@ func main() {
 
 	client := liteclient.NewConnectionPool()
 
-	tonCfg, err := liteclient.GetConfigFromUrl(context.Background(), "https://ton-blockchain.github.io/testnet-global.config.json")
+	tonCfg, err := liteclient.GetConfigFromUrl(context.Background(), "https://ton.org/testnet-global.config.json")
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to get config")
 		return
@@ -66,7 +67,7 @@ func main() {
 
 	// TODO: set secure policy
 	// initialize ton api lite connection wrapper
-	api := ton.NewAPIClient(client, ton.ProofCheckPolicyFast).WithRetry()
+	api := ton.NewAPIClient(client, ton.ProofCheckPolicyFast)
 	// api.SetTrustedBlockFromConfig(tonCfg)
 
 	sk := sha256.Sum256([]byte("adnl" + *Name))
@@ -148,6 +149,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 	tr.SetService(svc)
 
 	go func() {
+	nextCommand:
 		for {
 			var cmd string
 			fmt.Scanln(&cmd)
@@ -302,31 +304,33 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 				}
 				println("DEPLOY REQUESTED")
 			case "open":
-				println("Receiver key:")
-				var strKey string
-				fmt.Scanln(&strKey)
+				println("Receivers keys ',' separated:")
+				var strKeys string
+				fmt.Scanln(&strKeys)
 
-				btsKey, err := hex.DecodeString(strKey)
-				if err != nil {
-					println("incorrect format of key")
-					continue
+				keys := strings.Split(strings.ReplaceAll(strKeys, " ", ""), ",")
+
+				var with []byte
+				var parsedKeys [][]byte
+				for _, strKey := range keys {
+					btsKey, err := hex.DecodeString(strKey)
+					if err != nil {
+						println("incorrect format of key")
+						continue nextCommand
+					}
+					if len(btsKey) != 32 {
+						println("incorrect len of key")
+						continue nextCommand
+					}
+
+					if with == nil {
+						with = btsKey
+					}
+
+					parsedKeys = append(parsedKeys, btsKey)
 				}
-				if len(btsKey) != 32 {
-					println("incorrect len of key")
-					continue
-				}
 
-				println("Onchain channel with node addr:")
-				var strAddr string
-				fmt.Scanln(&strAddr)
-
-				addr, err := address.ParseAddr(strAddr)
-				if err != nil {
-					println("incorrect format of amount")
-					continue
-				}
-
-				println("Input amount (exclude 0.02 fee):")
+				println("Input amount (exclude fee, 0.01 per node):")
 				var strAmt string
 				fmt.Scanln(&strAmt)
 
@@ -336,17 +340,25 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				cell.BeginCell().MustStoreAddr(address.MustParseAddr("EQCajaUU1XXSAjTD-xOV7pE49fGtg4q8kF3ELCOJtGvQFQ2C")).EndCell().BeginParse()
+				var tunChain []transport.TunnelChainPart
+				for i, parsedKey := range parsedKeys {
+					tunChain = append(tunChain, transport.TunnelChainPart{
+						Target:   parsedKey,
+						Capacity: amt.Nano(),
+						Fee:      new(big.Int).Mul(tlb.MustFromTON("0.01").Nano(), big.NewInt(int64(len(parsedKeys)-i))),
+						Deadline: time.Now().Add(1*time.Hour + (30*time.Minute)*time.Duration(len(parsedKeys)-i)),
+					})
+				}
 
 				vPub, vPriv, _ := ed25519.GenerateKey(nil)
+				vc, tun, err := transport.GenerateTunnel(vPub, tunChain, 5)
+				if err != nil {
+					println("failed to generate tunnel:", err.Error())
+					continue
+				}
 
 				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-				err = svc.OpenVirtualChannel(ctx, addr.String(), btsKey, payments.VirtualChannel{
-					Key:      vPub,
-					Capacity: amt.Nano(),
-					Fee:      tlb.MustFromTON("0.02").Nano(),
-					Deadline: time.Now().Unix() + 3600,
-				})
+				err = svc.OpenVirtualChannel(ctx, with, vPriv, tun, vc)
 				cancel()
 				if err != nil {
 					log.Error().Err(err).Msg("failed to open virtual channel with node")

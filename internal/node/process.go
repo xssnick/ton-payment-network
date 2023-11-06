@@ -184,12 +184,16 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return fmt.Errorf("too short virtual channel deadline")
 		}
 
-		_, _, err = channel.Their.State.FindVirtualChannel(data.Key)
+		_, oldVC, err := channel.Their.State.FindVirtualChannel(data.Key)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
 			return fmt.Errorf("failed to find virtual channel in their prev state: %w", err)
 		}
 		if err == nil {
-			return fmt.Errorf("channel with this key is already exists")
+			if oldVC.Deadline == vch.Deadline && oldVC.Fee.Cmp(vch.Fee) == 0 && oldVC.Capacity.Cmp(vch.Capacity) == 0 {
+				// idempotency
+				return nil
+			}
+			return fmt.Errorf("channel with this key is already exists and has different configuration")
 		}
 
 		// we put our serialized condition to make sure that party is not cheated,
@@ -207,15 +211,38 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return fmt.Errorf("not enough available balance, you need %s more to do this", theirBalance.Abs(theirBalance).String())
 		}
 
-		// addr := address.NewAddress(0, 0, data.Channel.Target).String()
-		if !bytes.Equal(data.Target, s.key.Public().(ed25519.PublicKey)) {
-			// TODO: multi-node routing
+		currentInstruction, err := data.DecryptOurInstruction(s.key)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt instruction: %w", err)
+		}
 
-			if vch.Fee.Cmp(s.virtualChannelFee.Nano()) == -1 {
+		expFee := new(big.Int).SetBytes(currentInstruction.ExpectedFee)
+		expCap := new(big.Int).SetBytes(currentInstruction.ExpectedCapacity)
+
+		if expFee.Cmp(vch.Fee) != 0 || expCap.Cmp(vch.Capacity) != 0 || currentInstruction.ExpectedDeadline != vch.Deadline {
+			return fmt.Errorf("incorrect values, not equals to expected")
+		}
+
+		if !bytes.Equal(currentInstruction.NextTarget, s.key.Public().(ed25519.PublicKey)) {
+			// willing to open tunnel for a virtual channel
+
+			nextFee := new(big.Int).SetBytes(currentInstruction.NextFee)
+			nextCap := new(big.Int).SetBytes(currentInstruction.NextCapacity)
+
+			if currentInstruction.NextDeadline > vch.Deadline-s.deadlineDecreaseNextHop {
+				return fmt.Errorf("too short next deadline")
+			}
+
+			if nextCap.Cmp(vch.Capacity) == 1 {
+				return fmt.Errorf("capacity cannot increase")
+			}
+
+			ourFee := new(big.Int).Sub(vch.Fee, nextFee)
+			if ourFee.Cmp(s.virtualChannelFee.Nano()) == -1 {
 				return fmt.Errorf("min fee to open channel is %s TON", s.virtualChannelFee.String())
 			}
 
-			targetChannels, err := s.db.GetActiveChannelsWithKey(data.Target)
+			targetChannels, err := s.db.GetActiveChannelsWithKey(currentInstruction.NextTarget)
 			if err != nil {
 				return fmt.Errorf("failed to get target channel: %w", err)
 			}
@@ -232,7 +259,8 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 					return fmt.Errorf("failed to calc our channel %s balance: %w", targetChannel.Address, err)
 				}
 
-				if balance.Cmp(vch.Capacity) != -1 {
+				amt := new(big.Int).Add(nextCap, nextFee)
+				if balance.Cmp(amt) != -1 {
 					target = targetChannel
 					break
 				}
@@ -244,14 +272,11 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 
 			// we will execute it only after all checks passed, for example final signature verify
 			toExecute = func() error {
-				if err = s.proposeAction(ctx, targetChannels[0], transport.OpenVirtualAction{
-					Target: data.Target,
-					Key:    vch.Key,
-				}, payments.VirtualChannel{
+				if err = s.proposeAction(ctx, targetChannels[0], data, payments.VirtualChannel{
 					Key:      vch.Key,
-					Capacity: vch.Capacity,
-					Fee:      big.NewInt(0), // no fee for the final receiver
-					Deadline: vch.Deadline - s.deadlineDecreaseNextHop,
+					Capacity: nextCap,
+					Fee:      nextFee,
+					Deadline: currentInstruction.NextDeadline,
 				}); err != nil {
 					return fmt.Errorf("failed to propose actions to next node: %w", err)
 				}
@@ -326,7 +351,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 		// TODO: This rollback gives ability to next node + sender to scam us by throwing err and keeping state,
 		//  need to add additional logic to request seqno increment with state cancellation
 		if err = toExecute(); err != nil {
-			if rollErr := rollback(); err != nil {
+			if rollErr := rollback(); rollErr != nil {
 				log.Error().Err(rollErr).Msg("failed to rollback changes")
 			}
 			return err
@@ -368,7 +393,7 @@ func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *bi
 }
 
 func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action transport.Action) error {
-	channel, err := s.getActiveChannel(channelAddr.String())
+	channel, err := s.GetActiveChannel(channelAddr.String())
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -418,7 +443,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			}, nil, &tryTill,
 		)
 	case transport.CooperativeCloseAction:
-		// TODO: lock channel, to not accept new actions till tx confirms
+		// TODO: lock channel, to not accept new actions till tx confirms (set status closing)
 		var req payments.CooperativeClose
 		err = tlb.LoadFromCell(&req, data.SignedCloseRequest.BeginParse())
 		if err != nil {
