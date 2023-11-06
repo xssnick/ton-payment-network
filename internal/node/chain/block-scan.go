@@ -40,13 +40,12 @@ func (v *Scanner) GetLag(ctx context.Context) (uint64, error) {
 
 func (v *Scanner) Start(ctx context.Context, ch chan<- any) error {
 	master, err := v.api.GetMasterchainInfo(ctx)
-
-	taskPool := make(chan accFetchTask, 100)
-	go v.accFetcherWorker(ch, taskPool, 20)
-
 	if err != nil {
 		return fmt.Errorf("get masterchain info err: %w", err)
 	}
+
+	taskPool := make(chan accFetchTask, 100)
+	go v.accFetcherWorker(ch, taskPool, 20)
 
 	if v.lastBlock > 0 {
 		master, err = v.api.LookupBlock(ctx, master.Workchain, master.Shard, v.lastBlock)
@@ -69,16 +68,17 @@ func (v *Scanner) Start(ctx context.Context, ch chan<- any) error {
 
 	go func() {
 		for {
-			// log.Debug().Uint32("seqno", master.SeqNo).Msg("scanning master")
+			log.Debug().Uint32("seqno", master.SeqNo).Msg("scanning master")
 
+			tm := time.Now()
 			// getting information about other work-chains and shards of master block
 			currentShards, err := v.api.GetBlockShardsInfo(ctx, master)
 			if err != nil {
-				log.Error().Err(err).Uint32("master", master.SeqNo).Msg("failed to get shards on block")
+				log.Debug().Err(err).Uint32("master", master.SeqNo).Msg("failed to get shards on block")
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
-			// log.Debug().Uint32("seqno", master.SeqNo).Dur("took", time.Since(tm)).Msg("shards fetched")
+			log.Debug().Uint32("seqno", master.SeqNo).Dur("took", time.Since(tm)).Msg("shards fetched")
 
 			// shards in master block may have holes, e.g. shard seqno 2756461, then 2756463, and no 2756462 in master chain
 			// thus we need to scan a bit back in case of discovering a hole, till last seen, to fill the misses.
@@ -88,7 +88,7 @@ func (v *Scanner) Start(ctx context.Context, ch chan<- any) error {
 				for {
 					notSeen, tm, err := getNotSeenShards(ctx, v.api, shard, shardLastSeqno)
 					if err != nil {
-						log.Error().Err(err).Uint32("master", master.SeqNo).Msg("failed to get not seen shards on block")
+						log.Debug().Err(err).Uint32("master", master.SeqNo).Msg("failed to get not seen shards on block")
 						time.Sleep(500 * time.Millisecond)
 						continue
 					}
@@ -98,13 +98,13 @@ func (v *Scanner) Start(ctx context.Context, ch chan<- any) error {
 					break
 				}
 			}
-			// log.Debug().Uint32("seqno", master.SeqNo).Msg("not seen shards fetched")
+			log.Debug().Uint32("seqno", master.SeqNo).Dur("took", time.Since(tm)).Msg("not seen shards fetched")
 
 			affectedAccounts := map[string]bool{}
 
 			// for each shard block getting transactions
 			for _, shard := range newShards {
-				// log.Debug().Uint32("seqno", shard.SeqNo).Uint64("shard", uint64(shard.Shard)).Int32("wc", shard.Workchain).Msg("scanning shard")
+				log.Debug().Uint32("seqno", shard.SeqNo).Uint64("shard", uint64(shard.Shard)).Int32("wc", shard.Workchain).Msg("scanning shard")
 
 				var fetchedIDs []ton.TransactionShortInfo
 				var after *ton.TransactionID3
@@ -114,7 +114,7 @@ func (v *Scanner) Start(ctx context.Context, ch chan<- any) error {
 				for more {
 					fetchedIDs, more, err = v.api.WaitForBlock(master.SeqNo).GetBlockTransactionsV2(ctx, shard, 100, after)
 					if err != nil {
-						log.Error().Err(err).Uint32("master", master.SeqNo).Msg("failed to get tx ids on block")
+						log.Warn().Err(err).Uint32("master", master.SeqNo).Msg("failed to get tx ids on block")
 						time.Sleep(500 * time.Millisecond)
 						continue
 					}
@@ -161,7 +161,7 @@ func (v *Scanner) Start(ctx context.Context, ch chan<- any) error {
 			for {
 				nextMaster, err := v.api.WaitForBlock(master.SeqNo+1).LookupBlock(ctx, master.Workchain, master.Shard, master.SeqNo+1)
 				if err != nil {
-					log.Error().Err(err).Uint32("seqno", master.SeqNo+1).Msg("failed to get next block")
+					log.Debug().Err(err).Uint32("seqno", master.SeqNo+1).Msg("failed to get next block")
 					time.Sleep(1 * time.Second)
 					continue
 				}
@@ -198,7 +198,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, tasks chan accFetchTask, threa
 							var err error
 							ctx, err = v.api.Client().StickyContextNextNode(ctx)
 							if err != nil {
-								log.Error().Err(err).Str("addr", task.addr.String()).Msg("failed to pick next node")
+								log.Warn().Err(err).Str("addr", task.addr.String()).Msg("failed to pick next node")
 								break
 							}
 
@@ -206,7 +206,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, tasks chan accFetchTask, threa
 							acc, err = v.api.WaitForBlock(task.master.SeqNo).GetAccount(qCtx, task.master, task.addr)
 							cancel()
 							if err != nil {
-								log.Error().Err(err).Str("addr", task.addr.String()).Msg("failed to get account")
+								log.Warn().Err(err).Str("addr", task.addr.String()).Msg("failed to get account")
 								time.Sleep(100 * time.Millisecond)
 								continue
 							}
@@ -233,7 +233,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, tasks chan accFetchTask, threa
 						for z := 0; z < 20; z++ {
 							ctx, err = v.api.Client().StickyContextNextNode(ctx)
 							if err != nil {
-								log.Error().Err(err).Str("addr", task.addr.String()).Msg("failed to pick next node")
+								log.Warn().Err(err).Str("addr", task.addr.String()).Msg("failed to pick next node")
 								break
 							}
 
@@ -241,7 +241,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, tasks chan accFetchTask, threa
 							tx, err = v.api.WaitForBlock(task.master.SeqNo).GetTransaction(qCtx, task.shard, task.addr, task.lt)
 							cancel()
 							if err != nil {
-								log.Error().Err(err).Str("addr", task.addr.String()).Msg("failed to get transaction")
+								log.Warn().Err(err).Str("addr", task.addr.String()).Msg("failed to get transaction")
 								time.Sleep(200 * time.Millisecond)
 								continue
 							}

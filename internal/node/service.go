@@ -83,8 +83,8 @@ func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wa
 		updates:                 updates,
 		db:                      db,
 		key:                     key,
-		maxOutboundCapacity:     tlb.MustFromTON("2.0"),
-		virtualChannelFee:       tlb.MustFromTON("0.02"),
+		maxOutboundCapacity:     tlb.MustFromTON("5.0"),
+		virtualChannelFee:       tlb.MustFromTON("0.01"),
 		excessFee:               tlb.MustFromTON("0.01"),
 		wallet:                  wallet,
 		contractMaker:           payments.NewPaymentChannelClient(api),
@@ -324,7 +324,6 @@ func (s *Service) DebugPrintVirtualChannels() {
 		}
 		for _, kv := range ch.Their.State.Data.Conditionals.All() {
 			vch, _ := payments.ParseVirtualChannelCond(kv.Value)
-			println("CAP", vch.Capacity.String())
 
 			log.Info().
 				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
@@ -336,7 +335,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 	}
 }
 
-func (s *Service) getActiveChannel(channelAddr string) (*db.Channel, error) {
+func (s *Service) GetActiveChannel(channelAddr string) (*db.Channel, error) {
 	channel, err := s.getVerifiedChannel(channelAddr)
 	if err != nil {
 		return nil, err
