@@ -18,16 +18,18 @@ import (
 
 func init() {
 	tl.Register(Decision{}, "payments.decision agreed:Bool reason:string = payments.Decision")
+	tl.Register(ProposalDecision{}, "payments.proposalDecision agreed:Bool reason:string signedState:bytes = payments.ProposalDecision")
 	tl.Register(ChannelConfig{}, "payments.channelConfig excessFee:bytes walletAddr:int256 quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.ChannelConfig")
 	tl.Register(AuthenticateToSign{}, "payments.authenticateToSign a:int256 b:int256 timestamp:long = payments.AuthenticateToSign")
 	tl.Register(NodeAddress{}, "payments.nodeAddress adnl_addr:int256 = payments.NodeAddress")
 
 	tl.Register(ConfirmCloseAction{}, "payments.confirmCloseAction key:int256 state:bytes = payments.Action")
-	tl.Register(UnlockExpiredAction{}, "payments.unlockExpiredAction key:int256 = payments.Action")
-	tl.Register(OpenVirtualAction{}, "payments.openVirtualAction key:int256 instructions:payments.instructionsToSign signature:bytes = payments.Action")
+	tl.Register(RemoveVirtualAction{}, "payments.removeVirtualAction key:int256 = payments.Action")
+	tl.Register(RequestRemoveVirtualAction{}, "payments.requestRemoveVirtualAction key:int256 = payments.Action")
+	tl.Register(OpenVirtualAction{}, "payments.openVirtualAction channel_key:int256 instruction_key:int256 instructions:payments.instructionsToSign signature:bytes = payments.Action")
 	tl.Register(CloseVirtualAction{}, "payments.closeVirtualAction key:int256 state:bytes = payments.Action")
 	tl.Register(CooperativeCloseAction{}, "payments.cooperativeCloseAction signedCloseRequest:bytes = payments.Action")
-	tl.Register(IncrementStatesAction{}, "payments.incrementStatesAction response:Bool = payments.Action")
+	tl.Register(IncrementStatesAction{}, "payments.incrementStatesAction wantResponse:Bool = payments.Action")
 
 	tl.Register(GetChannelConfig{}, "payments.getChannelConfig = payments.Request")
 	tl.Register(RequestAction{}, "payments.requestAction channelAddr:int256 action:payments.Action = payments.Request")
@@ -74,27 +76,37 @@ type RequestInboundChannel struct {
 // for example open virtual channel and add conditional payment
 type ProposeAction struct {
 	ChannelAddr []byte     `tl:"int256"`
-	Action      any        `tl:"struct boxed [payments.openVirtualAction,payments.closeVirtualAction,payments.confirmCloseAction,payments.unlockExpiredAction,payments.syncStateAction,payments.incrementStatesAction]"`
+	Action      any        `tl:"struct boxed [payments.openVirtualAction,payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.incrementStatesAction]"`
 	SignedState *cell.Cell `tl:"cell"`
 }
 
 // RequestAction - request party to propose some action
 type RequestAction struct {
 	ChannelAddr []byte `tl:"int256"`
-	Action      any    `tl:"struct boxed [payments.closeVirtualAction,payments.confirmCloseAction,payments.unlockExpiredAction,payments.syncStateAction,payments.cooperativeCloseAction]"`
+	Action      any    `tl:"struct boxed [payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.cooperativeCloseAction,payments.requestRemoveVirtualAction]"`
 }
 
-// Decision - response for actions proposals and request, Reason is filled when not agreed
+// Decision - response for actions request, Reason is filled when not agreed
 type Decision struct {
 	Agreed bool   `tl:"bool"`
 	Reason string `tl:"string"`
 }
 
+// ProposalDecision - response for actions proposals, Reason is filled when not agreed
+type ProposalDecision struct {
+	Agreed      bool       `tl:"bool"`
+	Reason      string     `tl:"string"`
+	SignedState *cell.Cell `tl:"cell"`
+}
+
 // OpenVirtualAction - request party to open virtual channel (tunnel) with specified target
 type OpenVirtualAction struct {
-	Key          []byte             `tl:"int256"`
-	Instructions InstructionsToSign `tl:"struct"`
-	Signature    []byte             `tl:"bytes"`
+	ChannelKey []byte `tl:"int256"`
+	// We use instruction keys to guarantee instructions execution order
+	// next node can know instruction key only from previous node, then shared key can be calculated
+	InstructionKey []byte             `tl:"int256"`
+	Instructions   InstructionsToSign `tl:"struct"`
+	Signature      []byte             `tl:"bytes"`
 }
 
 type InstructionsToSign struct {
@@ -110,7 +122,8 @@ type InstructionContainer struct {
 }
 
 type OpenVirtualInstruction struct {
-	Target []byte `tl:"int256"`
+	Target             []byte `tl:"int256"`
+	NextInstructionKey []byte `tl:"int256"`
 
 	ExpectedFee      []byte `tl:"bytes"`
 	ExpectedCapacity []byte `tl:"bytes"`
@@ -121,6 +134,8 @@ type OpenVirtualInstruction struct {
 	// Should be <= ExpectedCapacity
 	NextCapacity []byte `tl:"bytes"`
 	NextDeadline int64  `tl:"long"`
+
+	instructionPrivateKey ed25519.PrivateKey `tl:"-"`
 }
 
 // CloseVirtualAction - request party to close virtual channel,
@@ -135,9 +150,15 @@ type CooperativeCloseAction struct {
 	SignedCloseRequest *cell.Cell `tl:"cell"`
 }
 
-// UnlockExpiredAction - request party to remove expired condition
+// RemoveVirtualAction - request party to remove expired condition
 // related to virtual channel, to unlock funds
-type UnlockExpiredAction struct {
+type RemoveVirtualAction struct {
+	Key []byte `tl:"int256"`
+}
+
+// RequestRemoveVirtualAction - request party to close virtual channel to us,
+// without state, because something went wrong
+type RequestRemoveVirtualAction struct {
 	Key []byte `tl:"int256"`
 }
 
@@ -149,9 +170,9 @@ type ConfirmCloseAction struct {
 }
 
 // IncrementStatesAction - send our state with incremented seqno to party,
-// and expect same from them too. Can be used to confirm rollback or for the first state exchange
+// and expect same from them too when WantResponse = true. Can be used to confirm rollback or for the first state exchange
 type IncrementStatesAction struct {
-	Response bool `tl:"bool"`
+	WantResponse bool `tl:"bool"`
 }
 
 // GetChannelConfig - request channel params supported by party,
@@ -169,19 +190,18 @@ type ChannelConfig struct {
 
 func (a *OpenVirtualAction) SetInstructions(actions []OpenVirtualInstruction, key ed25519.PrivateKey) error {
 	a.Instructions = InstructionsToSign{}
-	for _, act := range actions {
-		data, err := tl.Serialize(act, true)
+	for i := 0; i < len(actions); i++ {
+		data, err := tl.Serialize(actions[i], true)
 		if err != nil {
 			return fmt.Errorf("failed to serialize action data: %w", err)
 		}
 
-		hash := sha256.Sum256(data)
-
-		sharedKey, err := adnl.SharedKey(key, act.Target)
+		sharedKey, err := adnl.SharedKey(actions[i].instructionPrivateKey, actions[i].Target)
 		if err != nil {
 			return fmt.Errorf("failed to calc shared key: %w", err)
 		}
 
+		hash := sha256.Sum256(data)
 		stream, err := adnl.BuildSharedCipher(sharedKey, hash[:])
 		if err != nil {
 			return fmt.Errorf("failed to init cipher: %w", err)
@@ -203,17 +223,17 @@ func (a *OpenVirtualAction) SetInstructions(actions []OpenVirtualInstruction, ke
 	return nil
 }
 
-func (a *OpenVirtualAction) DecryptOurInstruction(key ed25519.PrivateKey) (*OpenVirtualInstruction, error) {
+func (a *OpenVirtualAction) DecryptOurInstruction(key ed25519.PrivateKey, instructionKey ed25519.PublicKey) (*OpenVirtualInstruction, error) {
 	verifyData, err := tl.Serialize(a.Instructions, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize verify data: %w", err)
 	}
 
-	if !ed25519.Verify(a.Key, verifyData, a.Signature) {
+	if !ed25519.Verify(a.ChannelKey, verifyData, a.Signature) {
 		return nil, fmt.Errorf("incorrect signature")
 	}
 
-	sharedKey, err := adnl.SharedKey(key, a.Key)
+	sharedKey, err := adnl.SharedKey(key, instructionKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calc shared key: %w", err)
 	}
@@ -249,9 +269,9 @@ type TunnelChainPart struct {
 	Deadline time.Time
 }
 
-func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uint8) (payments.VirtualChannel, []OpenVirtualInstruction, error) {
+func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uint8) (payments.VirtualChannel, ed25519.PublicKey, []OpenVirtualInstruction, error) {
 	if len(chain) == 0 {
-		return payments.VirtualChannel{}, nil, fmt.Errorf("chain is empty")
+		return payments.VirtualChannel{}, nil, nil, fmt.Errorf("chain is empty")
 	}
 
 	vc := payments.VirtualChannel{
@@ -261,6 +281,7 @@ func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uin
 		Deadline: chain[0].Deadline.UTC().Unix(),
 	}
 
+	var firstInstructionKey ed25519.PublicKey
 	var list []OpenVirtualInstruction
 	for i := 0; i < len(chain); i++ {
 		inst := OpenVirtualInstruction{
@@ -268,6 +289,18 @@ func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uin
 			ExpectedCapacity: chain[i].Capacity.Bytes(),
 			ExpectedDeadline: chain[i].Deadline.UTC().Unix(),
 			Target:           chain[i].Target,
+		}
+
+		pub, private, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			return payments.VirtualChannel{}, nil, nil, err
+		}
+
+		inst.instructionPrivateKey = private
+		if i > 0 {
+			list[i-1].NextInstructionKey = pub
+		} else {
+			firstInstructionKey = pub
 		}
 
 		if i < len(chain)-1 {
@@ -288,7 +321,7 @@ func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uin
 	// generate seed with cryptographic random
 	seed, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
 	if err != nil {
-		return payments.VirtualChannel{}, nil, err
+		return payments.VirtualChannel{}, nil, nil, err
 	}
 	mRnd := mRand.New(mRand.NewSource(seed.Int64()))
 
@@ -302,6 +335,7 @@ func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uin
 		randKey := make([]byte, 32)
 		_, _ = rand.Read(randKey)
 		randKey2, _, _ := ed25519.GenerateKey(nil)
+		randKey3, randKey3prv, _ := ed25519.GenerateKey(nil)
 
 		// spread deadlines to look similar to original
 		dlDiff := (chain[0].Deadline.UTC().Unix() - chain[len(chain)-1].Deadline.UTC().Unix()) * 2
@@ -313,14 +347,16 @@ func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uin
 		expDl := nextDl + mRnd.Int63n(dlDiff)
 
 		list = append(list, OpenVirtualInstruction{
-			Target:           randKey2,
-			ExpectedFee:      randAmount(chain[len(chain)-1].Fee, nextFee).Bytes(),
-			ExpectedCapacity: randAmount(chain[len(chain)-1].Capacity, nextCap).Bytes(),
-			ExpectedDeadline: expDl,
-			NextTarget:       randKey,
-			NextFee:          nextFee.Bytes(),
-			NextDeadline:     nextDl,
-			NextCapacity:     nextCap.Bytes(),
+			Target:                randKey2,
+			ExpectedFee:           randAmount(chain[len(chain)-1].Fee, nextFee).Bytes(),
+			ExpectedCapacity:      randAmount(chain[len(chain)-1].Capacity, nextCap).Bytes(),
+			ExpectedDeadline:      expDl,
+			NextTarget:            randKey,
+			NextInstructionKey:    randKey3,
+			NextFee:               nextFee.Bytes(),
+			NextDeadline:          nextDl,
+			NextCapacity:          nextCap.Bytes(),
+			instructionPrivateKey: randKey3prv,
 		})
 	}
 
@@ -328,7 +364,7 @@ func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uin
 		list[i], list[j] = list[j], list[i]
 	})
 
-	return vc, list, nil
+	return vc, firstInstructionKey, list, nil
 }
 
 func randAmount(from, to *big.Int) *big.Int {

@@ -18,8 +18,8 @@ import (
 	"time"
 )
 
-func (s *Service) GetActiveChannelsWithNode(_ context.Context, nodeKey ed25519.PublicKey) ([]string, error) {
-	list, err := s.db.GetActiveChannelsWithKey(nodeKey)
+func (s *Service) GetActiveChannelsWithNode(ctx context.Context, nodeKey ed25519.PublicKey) ([]string, error) {
+	list, err := s.db.GetActiveChannelsWithKey(ctx, nodeKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get channels: %w", err)
 	}
@@ -62,19 +62,7 @@ func (s *Service) deployChannelWithNode(ctx context.Context, channelId []byte, n
 	return addr, nil
 }
 
-func (s *Service) IncrementStates(ctx context.Context, channelAddr string) error {
-	channel, err := s.getVerifiedChannel(channelAddr)
-	if err != nil {
-		return fmt.Errorf("failed to get channel: %w", err)
-	}
-
-	if err = s.proposeAction(ctx, channel, transport.IncrementStatesAction{}, nil); err != nil {
-		return fmt.Errorf("failed to propose action to the party: %w", err)
-	}
-	return nil
-}
-
-func (s *Service) OpenVirtualChannel(ctx context.Context, with ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error {
+func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error {
 	if len(chain) == 0 {
 		return fmt.Errorf("chain is empty")
 	}
@@ -95,88 +83,112 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with ed25519.PublicKey
 	}
 
 	act := transport.OpenVirtualAction{
-		Key: vch.Key,
+		ChannelKey:     vch.Key,
+		InstructionKey: instructionKey,
 	}
 
 	if err = act.SetInstructions(chain, private); err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	if err = s.proposeAction(ctx, channel, act, vch); err != nil {
-		return fmt.Errorf("failed to propose actions to the node: %w", err)
+	tryTill := time.Unix(vch.Deadline+(s.deadlineDecreaseNextHop/2), 0)
+	err = s.db.CreateTask(ctx, "open-virtual", channel.Address,
+		"open-virtual-"+hex.EncodeToString(vch.Key),
+		db.OpenVirtualTask{
+			ChannelAddress: channel.Address,
+			VirtualKey:     vch.Key,
+			Deadline:       vch.Deadline,
+			Fee:            vch.Fee.String(),
+			Capacity:       vch.Capacity.String(),
+			Action:         act,
+		}, nil, &tryTill,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create open task: %w", err)
 	}
+
 	return nil
 }
 
 func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error {
-	channels, err := s.db.GetActiveChannels()
-	if err != nil {
-		log.Error().Err(err).Msg("failed to get active channels")
-		return fmt.Errorf("failed to get active channels: %w", err)
-	}
-	// TODO: tampering checks
+	println("CLL CLOSING:" + hex.EncodeToString(virtualKey))
 
 	if !state.Verify(virtualKey) {
 		return fmt.Errorf("incorrect state signature")
 	}
 
-	for _, ch := range channels {
-		_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
-		if err != nil {
-			if errors.Is(err, payments.ErrNotFound) {
-				continue
-			}
-
-			log.Error().Err(err).Str("channel", ch.Address).Msg("failed to find virtual channel")
-			return fmt.Errorf("failed to find virtual channel: %w", err)
+	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return fmt.Errorf("virtual channel is not exists")
 		}
-
-		if state.Amount.Nano().Cmp(vch.Capacity) == 1 {
-			return fmt.Errorf("amount cannot be > capacity")
-		}
-
-		if vch.Deadline < time.Now().Unix() {
-			return fmt.Errorf("virtual channel has expired")
-		}
-
-		stateCell, err := state.ToCell()
-		if err != nil {
-			return fmt.Errorf("failed to serialize state to cell: %w", err)
-		}
-
-		if err = ch.AddKnownResolve(vch.Key, &state); err != nil {
-			return fmt.Errorf("failed to add channel condition resolve: %w", err)
-		}
-		if err = s.db.UpdateChannel(ch); err != nil {
-			return fmt.Errorf("failed to update channel in db: %w", err)
-		}
-
-		if err = s.requestAction(ctx, ch, transport.CloseVirtualAction{
-			Key:   vch.Key,
-			State: stateCell,
-		}); err != nil {
-			// TODO: task for coop close retry
-			// TODO: accurate calc timings
-			after := time.Now() // time.Unix(vch.Deadline-s.deadlineDecreaseNextHop, 0)
-
-			// creating aggressive onchain close task, for the future,
-			// in case we will not be able to communicate with party
-			errCreate := s.db.CreateTask("uncooperative-close",
-				"uncooperative-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
-				db.ChannelUncooperativeCloseTask{
-					Address:                 ch.Address,
-					CheckVirtualStillExists: vch.Key,
-				}, &after, nil,
-			)
-			if errCreate != nil {
-				log.Error().Err(errCreate).Str("channel", ch.Address).Msg("failed to create uncooperative close task")
-			}
-
-			return fmt.Errorf("failed to request action from the node: %w", err)
-		}
-		return nil
+		return fmt.Errorf("failed to load virtual channel meta: %w", err)
 	}
-	return fmt.Errorf("virtual channel is not exists")
+
+	ch, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return fmt.Errorf("onchain channel with source not exists")
+		}
+		return fmt.Errorf("failed to load channel: %w", err)
+	}
+	println("CLOSING NEXT:" + meta.FromChannelAddress)
+
+	_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
+	if err != nil {
+		if errors.Is(err, payments.ErrNotFound) {
+			// idempotency
+			return nil
+		}
+
+		log.Error().Err(err).Str("channel", ch.Address).Msg("failed to find virtual channel")
+		return fmt.Errorf("failed to find virtual channel: %w", err)
+	}
+
+	if state.Amount.Nano().Cmp(vch.Capacity) == 1 {
+		return fmt.Errorf("amount cannot be > capacity")
+	}
+
+	if vch.Deadline < time.Now().Unix() {
+		return fmt.Errorf("virtual channel has expired")
+	}
+
+	stateCell, err := state.ToCell()
+	if err != nil {
+		return fmt.Errorf("failed to serialize state to cell: %w", err)
+	}
+
+	if err = meta.AddKnownResolve(vch.Key, &state); err != nil {
+		return fmt.Errorf("failed to add channel condition resolve: %w", err)
+	}
+	if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
+		return fmt.Errorf("failed to update channel in db: %w", err)
+	}
+
+	if err = s.requestAction(ctx, ch.Address, transport.CloseVirtualAction{
+		Key:   vch.Key,
+		State: stateCell,
+	}); err != nil {
+		// TODO: task for coop close retry
+		// TODO: accurate calc timings
+		after := time.Now() // time.Unix(vch.Deadline-s.deadlineDecreaseNextHop, 0)
+
+		// creating aggressive onchain close task, for the future,
+		// in case we will not be able to communicate with party
+		errCreate := s.db.CreateTask(ctx, "uncooperative-close", ch.Address+"-uncoop",
+			"uncooperative-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
+			db.ChannelUncooperativeCloseTask{
+				Address:                 ch.Address,
+				CheckVirtualStillExists: vch.Key,
+			}, &after, nil,
+		)
+		if errCreate != nil {
+			log.Error().Err(errCreate).Str("channel", ch.Address).Msg("failed to create uncooperative close task")
+		}
+
+		return fmt.Errorf("failed to request action from the node: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) RequestInboundChannel(ctx context.Context, capacity tlb.Coins, theirKey ed25519.PublicKey) error {
@@ -192,6 +204,8 @@ func (s *Service) RequestInboundChannel(ctx context.Context, capacity tlb.Coins,
 }
 
 func (s *Service) ExecuteCooperativeClose(ctx context.Context, partyReq *payments.CooperativeClose, channelAddr string) error {
+	// TODO: lock channel, to not accept new actions till tx confirms (set status closing)
+
 	ourReq, channel, err := s.getCooperativeCloseRequest(channelAddr, partyReq)
 	if err != nil {
 		return fmt.Errorf("failed to prepare close channel request: %w", err)
@@ -225,12 +239,12 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 
 	log.Info().Msg("trying cooperative close")
 
-	if err = s.requestAction(ctx, ch, transport.CooperativeCloseAction{
+	if err = s.requestAction(ctx, ch.Address, transport.CooperativeCloseAction{
 		SignedCloseRequest: cl,
 	}); err != nil {
 		// TODO: be not so aggressive
 		// creating aggressive onchain close task
-		errCreate := s.db.CreateTask("uncooperative-close",
+		errCreate := s.db.CreateTask(context.Background(), "uncooperative-close", ch.Address+"-uncoop",
 			"uncooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
 			db.ChannelUncooperativeCloseTask{
 				Address: ch.Address,
@@ -430,7 +444,13 @@ func (s *Service) SettleChannelConditionals(ctx context.Context, channelAddr str
 			continue
 		}
 
-		if resolve := channel.GetKnownResolve(vch.Key); resolve != nil {
+		meta, err := s.db.GetVirtualChannelMeta(ctx, vch.Key)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to get virtual channel meta")
+			continue
+		}
+
+		if resolve := meta.GetKnownResolve(vch.Key); resolve != nil {
 			rc, err := tlb.ToCell(resolve)
 			if err != nil {
 				log.Warn().Err(err).Msg("failed to serialize known virtual channel state")

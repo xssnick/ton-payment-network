@@ -12,7 +12,7 @@ import (
 	"github.com/xssnick/payment-network/internal/node"
 	"github.com/xssnick/payment-network/internal/node/chain"
 	"github.com/xssnick/payment-network/internal/node/db"
-	"github.com/xssnick/payment-network/internal/node/db/filedb"
+	"github.com/xssnick/payment-network/internal/node/db/leveldb"
 	"github.com/xssnick/payment-network/internal/node/transport"
 	"github.com/xssnick/payment-network/pkg/payments"
 	"github.com/xssnick/tonutils-go/adnl"
@@ -117,11 +117,16 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 		}
 	}
 
-	fdb := filedb.NewFileDB("./db/" + name)
+	fdb, err := leveldb.NewDB("./db/" + name)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to init leveldb")
+		return
+	}
+
 	tr := transport.NewServer(dhtClient, gate, key, channelKey, isServer)
 
 	var seqno uint32
-	if bo, err := fdb.GetBlockOffset(); err != nil {
+	if bo, err := fdb.GetBlockOffset(context.Background()); err != nil {
 		if !errors.Is(err, db.ErrNotFound) {
 			log.Fatal().Err(err).Msg("failed to load block offset")
 			return
@@ -351,14 +356,14 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 				}
 
 				vPub, vPriv, _ := ed25519.GenerateKey(nil)
-				vc, tun, err := transport.GenerateTunnel(vPub, tunChain, 5)
+				vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPub, tunChain, 5)
 				if err != nil {
 					println("failed to generate tunnel:", err.Error())
 					continue
 				}
 
 				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-				err = svc.OpenVirtualChannel(ctx, with, vPriv, tun, vc)
+				err = svc.OpenVirtualChannel(ctx, with, firstInstructionKey, vPriv, tun, vc)
 				cancel()
 				if err != nil {
 					log.Error().Err(err).Msg("failed to open virtual channel with node")

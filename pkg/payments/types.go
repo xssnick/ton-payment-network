@@ -217,6 +217,52 @@ func (s *SemiChannel) FindVirtualChannel(key ed25519.PublicKey) (*big.Int, *Virt
 	return nil, nil, ErrNotFound
 }
 
+func (s *SemiChannel) CheckSynchronized(with *SemiChannel) error {
+	if !bytes.Equal(s.ChannelID, with.ChannelID) {
+		return fmt.Errorf("diff channel id")
+	}
+
+	if with.CounterpartyData != nil || s.Data.Seqno > 0 {
+		if with.CounterpartyData == nil {
+			return fmt.Errorf("our state on their side is empty")
+		}
+
+		ourStateOnTheirSide, err := tlb.ToCell(with.CounterpartyData)
+		if err != nil {
+			return fmt.Errorf("failed to serialize our state on their side: %w", err)
+		}
+		ourState, err := tlb.ToCell(s.Data)
+		if err != nil {
+			return fmt.Errorf("failed to serialize our state: %w", err)
+		}
+
+		if !bytes.Equal(ourStateOnTheirSide.Hash(), ourState.Hash()) {
+			return fmt.Errorf("our state on their side is diff")
+		}
+	}
+
+	if s.CounterpartyData != nil || with.Data.Seqno > 0 {
+		if s.CounterpartyData == nil {
+			return fmt.Errorf("their state on our side is empty")
+		}
+
+		theirStateOnOurSide, err := tlb.ToCell(s.CounterpartyData)
+		if err != nil {
+			return fmt.Errorf("failed to serialize their state on our side: %w", err)
+		}
+		theirState, err := tlb.ToCell(with.Data)
+		if err != nil {
+			return fmt.Errorf("failed to serialize their state: %w", err)
+		}
+
+		if !bytes.Equal(theirStateOnOurSide.Hash(), theirState.Hash()) {
+			return fmt.Errorf("their state on our side is diff")
+		}
+	}
+
+	return nil
+}
+
 func (s *SemiChannel) Dump() string {
 	c, err := tlb.ToCell(s.Data)
 	if err != nil {

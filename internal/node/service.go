@@ -22,28 +22,34 @@ import (
 )
 
 var ErrDenied = errors.New("actions denied")
+var ErrTryLater = errors.New("try later")
 
 type Transport interface {
 	GetChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey) (*transport.ChannelConfig, error)
 	RequestAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, action transport.Action) (*transport.Decision, error)
-	ProposeAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, state *cell.Cell, action transport.Action) (*transport.Decision, error)
+	ProposeAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, state *cell.Cell, action transport.Action) (*transport.ProposalDecision, error)
 	RequestInboundChannel(ctx context.Context, capacity *big.Int, ourWallet *address.Address, ourKey, theirKey []byte) (*transport.Decision, error)
 }
 
 type DB interface {
-	CreateTask(id, typ string, data any, executeAfter, executeTill *time.Time) error
-	AcquireTask() (*db.Task, error)
-	RetryTask(id string, reason string, retryAt time.Time) error
-	CompleteTask(id string) error
+	Transaction(ctx context.Context, f func(ctx context.Context) error) error
+	CreateTask(ctx context.Context, typ, queue, id string, data any, executeAfter, executeTill *time.Time) error
+	AcquireTask(ctx context.Context) (*db.Task, error)
+	RetryTask(ctx context.Context, task *db.Task, reason string, retryAt time.Time) error
+	CompleteTask(ctx context.Context, task *db.Task) error
 
-	SetBlockOffset(seqno uint32) error
-	GetBlockOffset() (*db.BlockOffset, error)
+	GetVirtualChannelMeta(ctx context.Context, key []byte) (*db.VirtualChannelMeta, error)
+	UpdateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChannelMeta) error
+	CreateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChannelMeta) error
 
-	GetActiveChannels() ([]*db.Channel, error)
-	GetActiveChannelsWithKey(key ed25519.PublicKey) ([]*db.Channel, error)
-	CreateChannel(channel *db.Channel) error
-	GetChannel(addr string) (*db.Channel, error)
-	UpdateChannel(channel *db.Channel) error
+	SetBlockOffset(ctx context.Context, seqno uint32) error
+	GetBlockOffset(ctx context.Context) (*db.BlockOffset, error)
+
+	GetActiveChannels(ctx context.Context) ([]*db.Channel, error)
+	GetActiveChannelsWithKey(ctx context.Context, key ed25519.PublicKey) ([]*db.Channel, error)
+	CreateChannel(ctx context.Context, channel *db.Channel) error
+	GetChannel(ctx context.Context, addr string) (*db.Channel, error)
+	UpdateChannel(ctx context.Context, channel *db.Channel) error
 }
 
 type BlockCheckedEvent struct {
@@ -111,7 +117,7 @@ func (s *Service) Start() {
 	for update := range s.updates {
 		switch upd := update.(type) {
 		case BlockCheckedEvent:
-			if err := s.db.SetBlockOffset(upd.Seqno); err != nil {
+			if err := s.db.SetBlockOffset(context.Background(), upd.Seqno); err != nil {
 				log.Error().Err(err).Uint32("seqno", upd.Seqno).Msg("failed to update master seqno in db")
 				continue
 			}
@@ -127,7 +133,7 @@ func (s *Service) Start() {
 			var channel *db.Channel
 			for {
 				// TODO: not block, DLQ
-				channel, err = s.db.GetChannel(upd.Channel.Address().String())
+				channel, err = s.db.GetChannel(context.Background(), upd.Channel.Address().String())
 				if err != nil && !errors.Is(err, db.ErrNotFound) {
 					log.Error().Err(err).Msg("failed to get channel from db, retrying...")
 					time.Sleep(1 * time.Second)
@@ -189,7 +195,7 @@ func (s *Service) Start() {
 
 					// give 5 sec to other side for tx discovery
 					delay := time.Now().Add(5 * time.Second)
-					err = s.db.CreateTask("exchange-states",
+					err = s.db.CreateTask(context.Background(), "exchange-states", channel.Address,
 						"exchange-states-"+channel.Address+"-"+fmt.Sprint(channel.InitAt.Unix()),
 						db.ChannelTask{Address: channel.Address}, &delay, nil,
 					)
@@ -216,7 +222,7 @@ func (s *Service) Start() {
 						qTheir.Seqno < channel.Their.State.Data.Seqno {
 						// something is outdated, challenge state
 						settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+1), 0)
-						err = s.db.CreateTask("challenge",
+						err = s.db.CreateTask(context.Background(), "challenge", channel.Address+"-chain",
 							"challenge-"+hex.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
 							db.ChannelTask{Address: channel.Address}, nil, &settleAt,
 						)
@@ -237,7 +243,7 @@ func (s *Service) Start() {
 				settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+3), 0)
 				finishAt := settleAt.Add(time.Duration(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration) * time.Second)
 
-				err = s.db.CreateTask("settle",
+				err = s.db.CreateTask(context.Background(), "settle", channel.Address+"-settle",
 					"settle-"+hex.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
 					db.ChannelTask{Address: channel.Address}, &settleAt, &finishAt,
 				)
@@ -250,7 +256,7 @@ func (s *Service) Start() {
 			case payments.ChannelStatusAwaitingFinalization:
 				settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+5), 0)
 				finishAt := settleAt.Add(time.Duration(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration+5) * time.Second)
-				err = s.db.CreateTask("finalize",
+				err = s.db.CreateTask(context.Background(), "finalize", channel.Address+"-finalize",
 					"finalize-"+hex.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
 					db.ChannelTask{Address: channel.Address}, &finishAt, nil,
 				)
@@ -275,7 +281,7 @@ func (s *Service) Start() {
 			}
 
 			for {
-				if err = fc(channel); err != nil {
+				if err = fc(context.Background(), channel); err != nil {
 					log.Error().Err(err).Msg("failed to set channel in db, retrying...")
 					time.Sleep(1 * time.Second)
 					continue
@@ -287,7 +293,7 @@ func (s *Service) Start() {
 }
 
 func (s *Service) DebugPrintVirtualChannels() {
-	chs, err := s.db.GetActiveChannels()
+	chs, err := s.db.GetActiveChannels(context.Background())
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get active channels")
 		return
@@ -353,7 +359,7 @@ func (s *Service) GetActiveChannel(channelAddr string) (*db.Channel, error) {
 }
 
 func (s *Service) getVerifiedChannel(channelAddr string) (*db.Channel, error) {
-	channel, err := s.db.GetChannel(channelAddr)
+	channel, err := s.db.GetChannel(context.Background(), channelAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -368,7 +374,12 @@ func (s *Service) getVerifiedChannel(channelAddr string) (*db.Channel, error) {
 	return channel, nil
 }
 
-func (s *Service) requestAction(ctx context.Context, channel *db.Channel, action any) error {
+func (s *Service) requestAction(ctx context.Context, channelAddress string, action any) error {
+	channel, err := s.getVerifiedChannel(channelAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
 	decision, err := s.transport.RequestAction(ctx, address.MustParseAddr(channel.Address), channel.TheirOnchain.Key, action)
 	if err != nil {
 		return fmt.Errorf("failed to request actions: %w", err)
@@ -381,26 +392,22 @@ func (s *Service) requestAction(ctx context.Context, channel *db.Channel, action
 	return nil
 }
 
-func (s *Service) proposeAction(ctx context.Context, channel *db.Channel, action transport.Action, details any) error {
-	ourNextState, rollback, err := s.updateOurStateWithAction(channel, action, details)
+// proposeAction - Update our state and send it to party.
+// It should be called in strict order, to avoid state unsync due to network or other problems.
+// Call should be considered as finished only when nil or ErrDenied was returned.
+// That's why all calls to proposeAction must be done via worker jobs.
+// Repeatable calls with the same state should be ok, other side's ProcessAction supports idempotency.
+func (s *Service) proposeAction(ctx context.Context, channelAddress string, action transport.Action, details any) error {
+	channel, err := s.getVerifiedChannel(channelAddress)
 	if err != nil {
-		if errors.Is(err, ErrAlreadyApplied) {
-			return nil
-		}
+		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if err := s.updateOurStateWithAction(channel, action, details); err != nil {
 		return fmt.Errorf("failed to prepare actions for the next node: %w", err)
 	}
 
-	success := false
-	defer func() {
-		if !success {
-			// we rollback changes in case of they are not accepted by party
-			if err = rollback(); err != nil {
-				log.Error().Err(err).Msg("failed to rollback unaccepted proposal")
-			}
-		}
-	}()
-
-	stateCell, err := tlb.ToCell(ourNextState)
+	stateCell, err := tlb.ToCell(channel.Our.SignedSemiChannel)
 	if err != nil {
 		return fmt.Errorf("failed to serialize state: %w", err)
 	}
@@ -414,8 +421,26 @@ func (s *Service) proposeAction(ctx context.Context, channel *db.Channel, action
 		log.Warn().Str("reason", res.Reason).Msg("actions request denied")
 		return ErrDenied
 	}
-	// TODO: better rollback with signed confirmation from party
-	success = true
+
+	var theirState payments.SignedSemiChannel
+	if err := tlb.LoadFromCell(&theirState, res.SignedState.BeginParse()); err != nil {
+		return fmt.Errorf("failed to parse their updated channel state: %w", err)
+	}
+
+	if err = theirState.Verify(channel.TheirOnchain.Key); err != nil {
+		return fmt.Errorf("failed to verify their state signature: %w", err)
+	}
+
+	if err = theirState.State.CheckSynchronized(&channel.Our.State); err != nil {
+		return fmt.Errorf("states are not syncronized: %w", err)
+	}
+
+	// renew their state to update their reference to our state
+	channel.Their.SignedSemiChannel = theirState
+	if err = s.db.UpdateChannel(ctx, channel); err != nil {
+		return fmt.Errorf("failed to update channel in db: %w", err)
+	}
+
 	return nil
 }
 
@@ -444,4 +469,11 @@ func (s *Service) verifyChannel(p *payments.AsyncChannel) (ok bool, isLeft bool)
 		return false, false
 	}
 	return true, isLeft
+}
+
+func (s *Service) incrementStates(ctx context.Context, channelAddr string, wantResponse bool) error {
+	if err := s.proposeAction(ctx, channelAddr, transport.IncrementStatesAction{WantResponse: wantResponse}, nil); err != nil {
+		return fmt.Errorf("failed to propose action to the party: %w", err)
+	}
+	return nil
 }

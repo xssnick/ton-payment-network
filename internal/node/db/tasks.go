@@ -2,17 +2,20 @@ package db
 
 import (
 	"encoding/json"
+	"github.com/xssnick/payment-network/internal/node/transport"
 	"time"
 )
 
 type Task struct {
 	ID           string
 	Type         string
-	IsExecuted   bool
+	Queue        string
 	Data         json.RawMessage
-	ExecuteAfter *time.Time
+	LockedTill   *time.Time
+	ExecuteAfter time.Time
 	ExecuteTill  *time.Time
 	CreatedAt    time.Time
+	CompletedAt  *time.Time
 	LastError    string
 }
 
@@ -30,7 +33,43 @@ type ChannelUncooperativeCloseTask struct {
 	CheckVirtualStillExists []byte
 }
 
-type CloseNextTask struct {
+type ConfirmCloseVirtualTask struct {
 	VirtualKey []byte
 	State      []byte
+}
+
+type CloseNextVirtualTask struct {
+	VirtualKey []byte
+	State      []byte
+}
+
+type OpenVirtualTask struct {
+	PrevChannelAddress string
+	ChannelAddress     string
+	VirtualKey         []byte
+	Deadline           int64
+	Fee                string
+	Capacity           string
+	Action             transport.OpenVirtualAction
+}
+
+type AskRemoveVirtualTask struct {
+	Key            []byte
+	ChannelAddress string
+}
+
+type IncrementStatesTask struct {
+	ChannelAddress string
+	WantResponse   bool
+}
+
+type RemoveVirtualTask struct {
+	Key []byte
+}
+
+type DeployInboundTask struct {
+	ID            []byte
+	Key           []byte
+	Capacity      string
+	WalletAddress string
 }

@@ -28,49 +28,51 @@ import (
 // 3. Receiver triggers ProcessAction and approves
 // 4. Node in chain repeats this steps in background, if it is not initial sender.
 
-func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, signedState payments.SignedSemiChannel, action transport.Action) error {
+func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address,
+	signedState payments.SignedSemiChannel, action transport.Action) (*payments.SignedSemiChannel, error) {
+	start := time.Now()
+
+	println("PROC START:", reflect.TypeOf(action).String(), start.String())
+	defer func() {
+		println("PROC END:", reflect.TypeOf(action).String(), time.Since(start).String())
+	}()
+
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
 	channel, err := s.getVerifiedChannel(channelAddr.String())
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if channel.Status != db.ChannelStateActive {
-		return fmt.Errorf("channel is not active")
+		return nil, fmt.Errorf("channel is not active")
 	}
 
 	if !bytes.Equal(key, channel.TheirOnchain.Key) {
-		return fmt.Errorf("incorrect channel key")
+		return nil, fmt.Errorf("incorrect channel key")
 	}
 
 	if err = signedState.Verify(channel.TheirOnchain.Key); err != nil {
-		return fmt.Errorf("failed to verify passed state: %w", err)
+		return nil, fmt.Errorf("failed to verify passed state: %w", err)
 	}
 
 	if signedState.State.Data.Sent.Nano().Cmp(channel.Their.State.Data.Sent.Nano()) == -1 {
-		return fmt.Errorf("amount decrease is not allowed")
+		return nil, fmt.Errorf("amount decrease is not allowed")
 	}
 
-	var toExecute func() error
+	var toExecute func(ctx context.Context) error
 	if signedState.State.Data.Seqno == channel.Their.State.Data.Seqno {
 		// idempotency check
 		channel.Their.Signature = signedState.Signature
 		if err = channel.Their.Verify(channel.TheirOnchain.Key); err != nil {
-			return fmt.Errorf("inconsistent state, this seqno with different content was already committed")
+			return nil, fmt.Errorf("inconsistent state, this seqno with different content was already committed")
 		}
-		return nil
+		return &channel.Our.SignedSemiChannel, nil
 	}
 
 	if signedState.State.Data.Seqno != channel.Their.State.Data.Seqno+1 {
-		return fmt.Errorf("incorrect state seqno %d, want %d", signedState.State.Data.Seqno, channel.Their.State.Data.Seqno+1)
-	}
-
-	// we will roll back to this moment's state in case of failure
-	rollback, err := s.createRollback(channel, true)
-	if err != nil {
-		return fmt.Errorf("failed to prepare rollback: %w", err)
+		return nil, fmt.Errorf("incorrect state seqno %d, want %d", signedState.State.Data.Seqno, channel.Their.State.Data.Seqno+1)
 	}
 
 	log.Debug().Type("action", action).Msg("action process")
@@ -79,10 +81,17 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 	case transport.IncrementStatesAction:
 		hasStates := channel.Our.IsReady() && channel.Their.IsReady()
 
-		toExecute = func() error {
-			if !data.Response {
-				if err = s.proposeAction(ctx, channel, transport.IncrementStatesAction{Response: true}, nil); err != nil {
-					return fmt.Errorf("failed to propose action to party: %w", err)
+		toExecute = func(ctx context.Context) error {
+			if data.WantResponse {
+				err = s.db.CreateTask(ctx, "increment-state", channel.Address,
+					"increment-state-"+fmt.Sprint(channel.Our.State.Data.Seqno),
+					db.IncrementStatesTask{
+						ChannelAddress: channel.Address,
+						WantResponse:   false,
+					}, nil, nil,
+				)
+				if err != nil {
+					return fmt.Errorf("failed to create increment-state task: %w", err)
 				}
 			}
 
@@ -93,73 +102,114 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			}
 			return nil
 		}
-	case transport.UnlockExpiredAction:
+	case transport.RemoveVirtualAction:
 		index, _, err := signedState.State.FindVirtualChannel(data.Key)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
-			return fmt.Errorf("failed to find virtual channel in their new state: %w", err)
+			return nil, fmt.Errorf("failed to find virtual channel in their new state: %w", err)
 		}
 		if err == nil {
-			return fmt.Errorf("condition should be removed to unlock")
+			return nil, fmt.Errorf("condition should be removed to unlock")
 		}
 
 		index, vch, err := channel.Their.State.FindVirtualChannel(data.Key)
 		if err != nil {
-			return fmt.Errorf("failed to find virtual channel in their prev state: %w", err)
+			if errors.Is(err, payments.ErrNotFound) {
+				// idempotency
+				return &channel.Our.SignedSemiChannel, nil
+			}
+			return nil, fmt.Errorf("failed to find virtual channel in their prev state: %w", err)
 		}
 
-		if vch.Deadline >= time.Now().Unix() {
-			return fmt.Errorf("condition is not expired")
+		meta, err := s.db.GetVirtualChannelMeta(context.Background(), vch.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load virtual channel meta: %w", err)
+		}
+
+		if vch.Deadline >= time.Now().Unix() && !meta.ReadyToReleaseCoins {
+			return nil, fmt.Errorf("virtual channel is not expired")
 		}
 
 		if err = channel.Their.State.Data.Conditionals.SetIntKey(index, nil); err != nil {
-			return fmt.Errorf("failed to remove condition with index %s: %w", index.String(), err)
+			return nil, fmt.Errorf("failed to remove condition with index %s: %w", index.String(), err)
+		}
+
+		toExecute = func(ctx context.Context) error {
+			meta.Active = false
+			if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
+				return fmt.Errorf("failed to update virtual channel meta: %w", err)
+			}
+
+			log.Info().Hex("key", data.Key).Msg("virtual channel removed")
+			return nil
 		}
 	case transport.ConfirmCloseAction:
 		index, _, err := signedState.State.FindVirtualChannel(data.Key)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
-			return fmt.Errorf("failed to find virtual channel in their new state: %w", err)
+			return nil, fmt.Errorf("failed to find virtual channel in their new state: %w", err)
 		}
 		if err == nil {
-			return fmt.Errorf("condition should be removed to close")
+			return nil, fmt.Errorf("condition should be removed to close")
 		}
 
 		index, vch, err := channel.Their.State.FindVirtualChannel(data.Key)
 		if err != nil {
-			return fmt.Errorf("failed to find virtual channel in their prev state: %w", err)
+			if errors.Is(err, payments.ErrNotFound) {
+				// idempotency
+				return &channel.Our.SignedSemiChannel, nil
+			}
+			return nil, fmt.Errorf("failed to find virtual channel in their prev state: %w", err)
 		}
 
 		balanceDiff := new(big.Int).Sub(signedState.State.Data.Sent.Nano(), channel.Their.State.Data.Sent.Nano())
 
 		var vState payments.VirtualChannelState
 		if err = tlb.LoadFromCell(&vState, data.State.BeginParse()); err != nil {
-			return fmt.Errorf("failed to load virtual channel state cell: %w", err)
+			return nil, fmt.Errorf("failed to load virtual channel state cell: %w", err)
 		}
 
 		if !vState.Verify(vch.Key) {
-			return fmt.Errorf("incorrect channel state signature")
+			return nil, fmt.Errorf("incorrect channel state signature")
 		}
 
 		if vState.Amount.Nano().Cmp(vch.Capacity) == 1 {
-			return fmt.Errorf("amount cannot be > capacity")
+			return nil, fmt.Errorf("amount cannot be > capacity")
 		}
 
 		gotAmt := new(big.Int).Add(vState.Amount.Nano(), vch.Fee)
 		if gotAmt.Cmp(balanceDiff) == -1 {
-			return fmt.Errorf("incorrect amount unlocked: %s instead of %s", balanceDiff.String(), vState.Amount.Nano().String())
+			return nil, fmt.Errorf("incorrect amount unlocked: %s instead of %s", balanceDiff.String(), vState.Amount.Nano().String())
 		}
 
-		if res := channel.GetKnownResolve(vch.Key); res != nil {
+		meta, err := s.db.GetVirtualChannelMeta(context.Background(), vch.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load virtual channel meta: %w", err)
+		}
+
+		if !meta.Active {
+			return nil, fmt.Errorf("virtual channel is inactive")
+		}
+		if !meta.ReadyToReleaseCoins {
+			return nil, fmt.Errorf("virtual channel close was not requested")
+		}
+
+		if res := meta.GetKnownResolve(vch.Key); res != nil {
 			if res.Amount.Nano().Cmp(vState.Amount.Nano()) == 1 {
-				// TODO: maybe just use newer instead of err
-				return fmt.Errorf("outdated virtual channel state")
+				return nil, fmt.Errorf("outdated virtual channel state")
 			}
+		} else {
+			return nil, fmt.Errorf("resolve is unknown on node side")
 		}
 
 		if err = channel.Their.State.Data.Conditionals.DeleteIntKey(index); err != nil {
-			return fmt.Errorf("failed to remove condition with index %s: %w", index.String(), err)
+			return nil, fmt.Errorf("failed to remove condition with index %s: %w", index.String(), err)
 		}
 
-		toExecute = func() error {
+		toExecute = func(ctx context.Context) error {
+			meta.Active = false
+			if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
+				return fmt.Errorf("failed to update virtual channel meta: %w", err)
+			}
+
 			log.Info().Hex("key", data.Key).
 				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
@@ -167,60 +217,67 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil
 		}
 	case transport.OpenVirtualAction:
-		index, vch, err := signedState.State.FindVirtualChannel(data.Key)
+		index, vch, err := signedState.State.FindVirtualChannel(data.ChannelKey)
 		if err != nil {
-			return fmt.Errorf("failed to find virtual channel in their new state: %w", err)
+			return nil, fmt.Errorf("failed to find virtual channel in their new state: %w", err)
 		}
 
 		if vch.Capacity.Sign() <= 0 {
-			return fmt.Errorf("invalid capacity")
+			return nil, fmt.Errorf("invalid capacity")
 		}
 
 		if vch.Fee.Sign() < 0 {
-			return fmt.Errorf("invalid fee")
+			return nil, fmt.Errorf("invalid fee")
 		}
 
 		if vch.Deadline < time.Now().Unix()+s.deadlineDecreaseNextHop {
-			return fmt.Errorf("too short virtual channel deadline")
+			return nil, fmt.Errorf("too short virtual channel deadline")
 		}
 
-		_, oldVC, err := channel.Their.State.FindVirtualChannel(data.Key)
+		_, oldVC, err := channel.Their.State.FindVirtualChannel(data.ChannelKey)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
-			return fmt.Errorf("failed to find virtual channel in their prev state: %w", err)
+			return nil, fmt.Errorf("failed to find virtual channel in their prev state: %w", err)
 		}
 		if err == nil {
 			if oldVC.Deadline == vch.Deadline && oldVC.Fee.Cmp(vch.Fee) == 0 && oldVC.Capacity.Cmp(vch.Capacity) == 0 {
 				// idempotency
-				return nil
+				return &channel.Our.SignedSemiChannel, nil
 			}
-			return fmt.Errorf("channel with this key is already exists and has different configuration")
+			return nil, fmt.Errorf("channel with this key is already exists and has different configuration")
+		}
+
+		if _, err = s.db.GetVirtualChannelMeta(context.Background(), vch.Key); err != nil && !errors.Is(err, db.ErrNotFound) {
+			return nil, fmt.Errorf("failed to load virtual channel meta: %w", err)
+		}
+		if err == nil {
+			return nil, fmt.Errorf("this virtual channel key was already used before")
 		}
 
 		// we put our serialized condition to make sure that party is not cheated,
 		// if something diff will be in state, final signature will not match
 		if err = channel.Their.State.Data.Conditionals.SetIntKey(index, vch.Serialize()); err != nil {
-			return fmt.Errorf("failed to settle condition with index %s: %w", index.String(), err)
+			return nil, fmt.Errorf("failed to settle condition with index %s: %w", index.String(), err)
 		}
 
 		theirBalance, err := channel.CalcBalance(true)
 		if err != nil {
-			return fmt.Errorf("failed to calc other side balance: %w", err)
+			return nil, fmt.Errorf("failed to calc other side balance: %w", err)
 		}
 
 		if theirBalance.Sign() == -1 {
-			return fmt.Errorf("not enough available balance, you need %s more to do this", theirBalance.Abs(theirBalance).String())
+			return nil, fmt.Errorf("not enough available balance, you need %s more to do this", theirBalance.Abs(theirBalance).String())
 		}
 
-		currentInstruction, err := data.DecryptOurInstruction(s.key)
+		currentInstruction, err := data.DecryptOurInstruction(s.key, data.InstructionKey)
 		if err != nil {
-			return fmt.Errorf("failed to decrypt instruction: %w", err)
+			return nil, fmt.Errorf("failed to decrypt instruction: %w", err)
 		}
 
 		expFee := new(big.Int).SetBytes(currentInstruction.ExpectedFee)
 		expCap := new(big.Int).SetBytes(currentInstruction.ExpectedCapacity)
 
 		if expFee.Cmp(vch.Fee) != 0 || expCap.Cmp(vch.Capacity) != 0 || currentInstruction.ExpectedDeadline != vch.Deadline {
-			return fmt.Errorf("incorrect values, not equals to expected")
+			return nil, fmt.Errorf("incorrect values, not equals to expected")
 		}
 
 		if !bytes.Equal(currentInstruction.NextTarget, s.key.Public().(ed25519.PublicKey)) {
@@ -230,33 +287,33 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			nextCap := new(big.Int).SetBytes(currentInstruction.NextCapacity)
 
 			if currentInstruction.NextDeadline > vch.Deadline-s.deadlineDecreaseNextHop {
-				return fmt.Errorf("too short next deadline")
+				return nil, fmt.Errorf("too short next deadline")
 			}
 
 			if nextCap.Cmp(vch.Capacity) == 1 {
-				return fmt.Errorf("capacity cannot increase")
+				return nil, fmt.Errorf("capacity cannot increase")
 			}
 
 			ourFee := new(big.Int).Sub(vch.Fee, nextFee)
 			if ourFee.Cmp(s.virtualChannelFee.Nano()) == -1 {
-				return fmt.Errorf("min fee to open channel is %s TON", s.virtualChannelFee.String())
+				return nil, fmt.Errorf("min fee to open channel is %s TON", s.virtualChannelFee.String())
 			}
 
-			targetChannels, err := s.db.GetActiveChannelsWithKey(currentInstruction.NextTarget)
+			targetChannels, err := s.db.GetActiveChannelsWithKey(context.Background(), currentInstruction.NextTarget)
 			if err != nil {
-				return fmt.Errorf("failed to get target channel: %w", err)
+				return nil, fmt.Errorf("failed to get target channel: %w", err)
 			}
 			// TODO: tampering checks
 
 			if len(targetChannels) == 0 {
-				return fmt.Errorf("destination channel is not belongs to this node")
+				return nil, fmt.Errorf("destination channel is not belongs to this node")
 			}
 
 			var target *db.Channel
 			for _, targetChannel := range targetChannels {
 				balance, err := targetChannel.CalcBalance(false)
 				if err != nil {
-					return fmt.Errorf("failed to calc our channel %s balance: %w", targetChannel.Address, err)
+					return nil, fmt.Errorf("failed to calc our channel %s balance: %w", targetChannel.Address, err)
 				}
 
 				amt := new(big.Int).Add(nextCap, nextFee)
@@ -267,54 +324,85 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			}
 
 			if target == nil {
-				return fmt.Errorf("not enough balance with target to tunnel requested capacity")
+				return nil, fmt.Errorf("not enough balance with target to tunnel requested capacity")
 			}
 
-			// we will execute it only after all checks passed, for example final signature verify
-			toExecute = func() error {
-				if err = s.proposeAction(ctx, targetChannels[0], data, payments.VirtualChannel{
-					Key:      vch.Key,
-					Capacity: nextCap,
-					Fee:      nextFee,
-					Deadline: currentInstruction.NextDeadline,
+			// we will execute it only after all checks passed and final signature verify
+			toExecute = func(ctx context.Context) error {
+				data.InstructionKey = currentInstruction.NextInstructionKey
+
+				if err = s.db.CreateVirtualChannelMeta(ctx, &db.VirtualChannelMeta{
+					Key:                vch.Key,
+					Active:             true,
+					FromChannelAddress: channel.Address,
+					ToChannelAddress:   target.Address,
+					CreatedAt:          time.Now(),
 				}); err != nil {
-					return fmt.Errorf("failed to propose actions to next node: %w", err)
+					return fmt.Errorf("failed to update virtual channel meta: %w", err)
 				}
 
-				log.Info().Hex("key", data.Key).
+				// TODO: play with try till time, and start uncooperative close if no response for a long time
+				tryTill := time.Unix(vch.Deadline+(s.deadlineDecreaseNextHop/2), 0)
+				err = s.db.CreateTask(ctx, "open-virtual", target.Address,
+					"open-virtual-"+hex.EncodeToString(vch.Key),
+					db.OpenVirtualTask{
+						PrevChannelAddress: channel.Address,
+						ChannelAddress:     target.Address,
+						VirtualKey:         vch.Key,
+						Deadline:           currentInstruction.NextDeadline,
+						Fee:                nextFee.String(),
+						Capacity:           nextCap.String(),
+						Action:             data,
+					}, nil, &tryTill,
+				)
+				if err != nil {
+					return fmt.Errorf("failed to create open-virtual task: %w", err)
+				}
+
+				log.Info().Hex("key", data.ChannelKey).
 					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 					Str("fee", tlb.FromNanoTON(vch.Fee).String()).
 					Str("target", targetChannels[0].Address).
-					Msg("channel tunnelled through us")
+					Msg("channel tunnelling through us requested")
 
 				return nil
 			}
 		} else {
-			toExecute = func() error {
+			toExecute = func(ctx context.Context) error {
 				// TODO: check if we accept virtual channels to us
-				log.Info().Hex("key", data.Key).
+
+				if err = s.db.CreateVirtualChannelMeta(ctx, &db.VirtualChannelMeta{
+					Key:                vch.Key,
+					Active:             true,
+					FromChannelAddress: channel.Address,
+					CreatedAt:          time.Now(),
+				}); err != nil {
+					return fmt.Errorf("failed to update virtual channel meta: %w", err)
+				}
+
+				log.Info().Hex("key", data.ChannelKey).
 					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 					Msg("channel opened with us")
 				return nil
 			}
 		}
 	default:
-		return fmt.Errorf("unexpected action type: %s", reflect.TypeOf(data).String())
+		return nil, fmt.Errorf("unexpected action type: %s", reflect.TypeOf(data).String())
 	}
 
 	if channel.Our.IsReady() && signedState.State.CounterpartyData == nil {
-		return fmt.Errorf("counterparty state downgrade attempt")
+		return nil, fmt.Errorf("counterparty state downgrade attempt")
 	}
 
 	if signedState.State.CounterpartyData != nil {
 		// if seqno is diff we do additional checks and replace counterparty
 		if signedState.State.CounterpartyData.Seqno != channel.Our.State.Data.Seqno {
-			return fmt.Errorf("counterparty state is incorrect")
+			return nil, fmt.Errorf("counterparty state is incorrect")
 		}
 
 		cp, err := channel.Our.State.Data.Copy()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// we replace it to our value, if something is incorrect, signature will fail
 		// we are doing copy to not depend on pointer to our state (which may change during exec)
@@ -328,36 +416,36 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 	if err = channel.Their.Verify(channel.TheirOnchain.Key); err != nil {
 		log.Warn().Msg(channel.Their.State.Dump())
 		log.Warn().Msg(signedState.State.Dump())
-		return fmt.Errorf("state looks tampered: %w", err)
+		return nil, fmt.Errorf("state looks tampered: %w", err)
 	}
 
 	cp, err := channel.Their.State.Data.Copy()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// update our counterparty
 	channel.Our.State.CounterpartyData = &cp
 	cl, err := tlb.ToCell(channel.Our.State)
 	if err != nil {
-		return fmt.Errorf("failed to serialize our state for signing: %w", err)
+		return nil, fmt.Errorf("failed to serialize our state for signing: %w", err)
 	}
 	channel.Our.Signature = payments.Signature{Value: cl.Sign(s.key)}
 
-	if err = s.db.UpdateChannel(channel); err != nil {
-		return fmt.Errorf("failed to update channel in db: %w", err)
+	if err = s.db.Transaction(context.Background(), func(ctx context.Context) error {
+		if toExecute != nil {
+			if err = toExecute(ctx); err != nil {
+				return err
+			}
+		}
+		if err = s.db.UpdateChannel(ctx, channel); err != nil {
+			return fmt.Errorf("failed to update channel in db: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
-	if toExecute != nil {
-		// TODO: This rollback gives ability to next node + sender to scam us by throwing err and keeping state,
-		//  need to add additional logic to request seqno increment with state cancellation
-		if err = toExecute(); err != nil {
-			if rollErr := rollback(); rollErr != nil {
-				log.Error().Err(rollErr).Msg("failed to rollback changes")
-			}
-			return err
-		}
-	}
-	return nil
+	return &channel.Our.SignedSemiChannel, nil
 }
 
 func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *big.Int, walletAddr *address.Address, key ed25519.PublicKey) error {
@@ -365,7 +453,7 @@ func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *bi
 		return fmt.Errorf("")
 	}
 
-	list, err := s.db.GetActiveChannelsWithKey(key)
+	list, err := s.db.GetActiveChannelsWithKey(context.Background(), key)
 	if err != nil {
 		return fmt.Errorf("failed to get active channels: %w", err)
 	}
@@ -379,28 +467,58 @@ func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *bi
 
 	id := key[:16]
 
-	go func() {
-		// TODO: more reliable
-		addr, err := s.deployChannelWithNode(context.Background(), id, key, walletAddr, tlb.FromNanoTON(capacity))
-		if err != nil {
-			log.Error().Err(err).Msg("deploy of requested channel is failed")
-			return
-		}
-		log.Info().Str("addr", addr.String()).Msg("requested channel is deployed")
-	}()
+	if err = s.db.CreateTask(ctx, "deploy-inbound", walletAddr.String(),
+		"deploy-inbound-"+hex.EncodeToString(id),
+		db.DeployInboundTask{
+			ID:            id,
+			Key:           key,
+			Capacity:      capacity.String(),
+			WalletAddress: walletAddr.String(),
+		}, nil, nil,
+	); err != nil {
+		return fmt.Errorf("failed to create deploy-inbound task: %w", err)
+	}
 
 	return nil
 }
 
 func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action transport.Action) error {
+	start := time.Now()
+	println("REQ START:", reflect.TypeOf(action).String(), start.String())
+	defer func() {
+		println("REQ END:", reflect.TypeOf(action).String(), time.Since(start).String())
+	}()
+
 	channel, err := s.GetActiveChannel(channelAddr.String())
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
+	if !bytes.Equal(channel.TheirOnchain.Key, key) {
+		return fmt.Errorf("unauthorized channel")
+	}
+
 	log.Debug().Type("action", action).Msg("action request process")
 
 	switch data := action.(type) {
+	case transport.RequestRemoveVirtualAction:
+		_, vch, err := channel.Our.State.FindVirtualChannel(data.Key)
+		if err != nil {
+			if errors.Is(err, payments.ErrNotFound) {
+				return fmt.Errorf("virtual channel is not found")
+			}
+			return fmt.Errorf("failed to find virtual channel: %w", err)
+		}
+
+		tryTill := time.Unix(vch.Deadline, 0)
+		if err = s.db.CreateTask(context.Background(), "remove-virtual", channel.Address,
+			"remove-virtual-"+hex.EncodeToString(vch.Key),
+			db.RemoveVirtualTask{
+				Key: data.Key,
+			}, nil, &tryTill,
+		); err != nil {
+			return fmt.Errorf("failed to create remove-virtual task: %w", err)
+		}
 	case transport.CloseVirtualAction:
 		var vState payments.VirtualChannelState
 		if err = tlb.LoadFromCell(&vState, data.State.BeginParse()); err != nil {
@@ -424,26 +542,17 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return fmt.Errorf("virtual channel is expired")
 		}
 
-		err = s.proposeAction(context.Background(), channel, transport.ConfirmCloseAction{
-			Key:   data.Key,
-			State: data.State,
-		}, nil)
-		if err != nil {
-			return fmt.Errorf("failed to propose action: %w", err)
-		}
-
-		// TODO: not create task if we final destination
-		// TODO: not allow 2 virtual channels with same key
 		tryTill := time.Unix(vch.Deadline+(s.deadlineDecreaseNextHop/2), 0)
-		err = s.db.CreateTask("close-next",
-			"close-next-"+hex.EncodeToString(vch.Key),
-			db.CloseNextTask{
+		if err = s.db.CreateTask(context.Background(), "confirm-close-virtual", channel.Address,
+			"confirm-close-virtual-"+hex.EncodeToString(vch.Key),
+			db.ConfirmCloseVirtualTask{
 				VirtualKey: data.Key,
 				State:      data.State.ToBOC(),
 			}, nil, &tryTill,
-		)
+		); err != nil {
+			return fmt.Errorf("failed to create confirm-close-virtual task: %w", err)
+		}
 	case transport.CooperativeCloseAction:
-		// TODO: lock channel, to not accept new actions till tx confirms (set status closing)
 		var req payments.CooperativeClose
 		err = tlb.LoadFromCell(&req, data.SignedCloseRequest.BeginParse())
 		if err != nil {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/xssnick/payment-network/pkg/payments"
@@ -27,6 +26,16 @@ const (
 var ErrAlreadyExists = errors.New("already exists")
 var ErrNotFound = errors.New("not found")
 
+type VirtualChannelMeta struct {
+	Key                 []byte
+	Active              bool
+	FromChannelAddress  string
+	ToChannelAddress    string
+	LastKnownResolve    []byte
+	ReadyToReleaseCoins bool
+	CreatedAt           time.Time
+}
+
 type Channel struct {
 	ID           []byte
 	Address      string
@@ -34,8 +43,6 @@ type Channel struct {
 	WeLeft       bool
 	OurOnchain   OnchainState
 	TheirOnchain OnchainState
-
-	KnownResolves map[string][]byte
 
 	Our   Side
 	Their Side
@@ -79,6 +86,42 @@ func NewSide(channelId []byte, seqno uint64) Side {
 
 func (s *Side) IsReady() bool {
 	return !bytes.Equal(s.Signature.Value, make([]byte, 64))
+}
+
+func (s *Side) Copy() *Side {
+	sd := &Side{
+		SignedSemiChannel: payments.SignedSemiChannel{
+			Signature: payments.Signature{
+				Value: append([]byte{}, s.Signature.Value...),
+			},
+			State: payments.SemiChannel{
+				ChannelID: append([]byte{}, s.State.ChannelID...),
+				Data: payments.SemiChannelBody{
+					Seqno:        s.State.Data.Seqno,
+					Sent:         s.State.Data.Sent,
+					Conditionals: cell.NewDict(32),
+				},
+			},
+		},
+	}
+
+	for _, kv := range s.State.Data.Conditionals.All() {
+		_ = sd.State.Data.Conditionals.Set(kv.Key, kv.Value)
+	}
+
+	if s.State.CounterpartyData != nil {
+		sd.State.CounterpartyData = &payments.SemiChannelBody{
+			Seqno:        s.State.CounterpartyData.Seqno,
+			Sent:         s.State.CounterpartyData.Sent,
+			Conditionals: cell.NewDict(32),
+		}
+
+		for _, kv := range s.State.CounterpartyData.Conditionals.All() {
+			_ = sd.State.CounterpartyData.Conditionals.Set(kv.Key, kv.Value)
+		}
+	}
+
+	return sd
 }
 
 func (s *Side) UnmarshalJSON(bytes []byte) error {
@@ -132,62 +175,53 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 	return balance, nil
 }
 
-func (ch *Channel) GetKnownResolve(key ed25519.PublicKey) *payments.VirtualChannelState {
-	ch.mx.RLock()
-	defer ch.mx.RUnlock()
-
-	if ch.KnownResolves == nil {
+func (ch *VirtualChannelMeta) GetKnownResolve(key ed25519.PublicKey) *payments.VirtualChannelState {
+	if ch.LastKnownResolve == nil {
 		return nil
 	}
 
-	if val := ch.KnownResolves[hex.EncodeToString(key)]; val != nil {
-		cll, err := cell.FromBOC(val)
-		if err != nil {
-			return nil
-		}
-
-		var st payments.VirtualChannelState
-		if err = tlb.LoadFromCell(&st, cll.BeginParse()); err != nil {
-			return nil
-		}
-
-		if !st.Verify(key) {
-			return nil
-		}
-		return &st
+	cll, err := cell.FromBOC(ch.LastKnownResolve)
+	if err != nil {
+		return nil
 	}
-	return nil
+
+	var st payments.VirtualChannelState
+	if err = tlb.LoadFromCell(&st, cll.BeginParse()); err != nil {
+		return nil
+	}
+
+	if !st.Verify(key) {
+		return nil
+	}
+	return &st
 }
 
-func (ch *Channel) RemoveKnownResolve(key ed25519.PublicKey) {
-	ch.mx.Lock()
-	defer ch.mx.Unlock()
-
-	if ch.KnownResolves == nil {
-		return
-	}
-	delete(ch.KnownResolves, hex.EncodeToString(key))
-}
-
-func (ch *Channel) AddKnownResolve(key ed25519.PublicKey, state *payments.VirtualChannelState) error {
-	ch.mx.Lock()
-	defer ch.mx.Unlock()
-
-	if ch.KnownResolves == nil {
-		ch.KnownResolves = map[string][]byte{}
-	}
-
+func (ch *VirtualChannelMeta) AddKnownResolve(key ed25519.PublicKey, state *payments.VirtualChannelState) error {
 	if !state.Verify(key) {
 		return fmt.Errorf("incorrect signature")
 	}
 
-	// TODO: check old value is newer
+	if ch.LastKnownResolve != nil {
+		cl, err := cell.FromBOC(ch.LastKnownResolve)
+		if err != nil {
+			return err
+		}
+
+		var oldState payments.VirtualChannelState
+		if err = tlb.LoadFromCell(&oldState, cl.BeginParse()); err != nil {
+			return fmt.Errorf("failed to parse old start: %w", err)
+		}
+
+		if oldState.Amount.Nano().Cmp(state.Amount.Nano()) == 1 {
+			return fmt.Errorf("newer state is already known")
+		}
+	}
 
 	cl, err := tlb.ToCell(state)
 	if err != nil {
 		return err
 	}
 
-	ch.KnownResolves[hex.EncodeToString(key)] = cl.ToBOC()
+	ch.LastKnownResolve = cl.ToBOC()
 	return nil
 }
