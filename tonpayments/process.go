@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
-	db2 "github.com/xssnick/ton-payment-network/tonpayments/db"
+	db "github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
@@ -39,7 +39,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 		return nil, err
 	}
 
-	if channel.Status != db2.ChannelStateActive {
+	if channel.Status != db.ChannelStateActive {
 		return nil, fmt.Errorf("channel is not active")
 	}
 
@@ -83,7 +83,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			if data.WantResponse {
 				err = s.db.CreateTask(ctx, "increment-state", channel.Address,
 					"increment-state-"+fmt.Sprint(channel.Our.State.Data.Seqno),
-					db2.IncrementStatesTask{
+					db.IncrementStatesTask{
 						ChannelAddress: channel.Address,
 						WantResponse:   false,
 					}, nil, nil,
@@ -245,7 +245,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil, fmt.Errorf("channel with this key is already exists and has different configuration")
 		}
 
-		if _, err = s.db.GetVirtualChannelMeta(context.Background(), vch.Key); err != nil && !errors.Is(err, db2.ErrNotFound) {
+		if _, err = s.db.GetVirtualChannelMeta(context.Background(), vch.Key); err != nil && !errors.Is(err, db.ErrNotFound) {
 			return nil, fmt.Errorf("failed to load virtual channel meta: %w", err)
 		}
 		if err == nil {
@@ -308,7 +308,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 				return nil, fmt.Errorf("destination channel is not belongs to this node")
 			}
 
-			var target *db2.Channel
+			var target *db.Channel
 			for _, targetChannel := range targetChannels {
 				balance, err := targetChannel.CalcBalance(false)
 				if err != nil {
@@ -333,7 +333,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 				tryTill := time.Unix(currentInstruction.NextDeadline, 0)
 				err = s.db.CreateTask(ctx, "open-virtual", target.Address,
 					"open-virtual-"+hex.EncodeToString(vch.Key),
-					db2.OpenVirtualTask{
+					db.OpenVirtualTask{
 						PrevChannelAddress: channel.Address,
 						ChannelAddress:     target.Address,
 						VirtualKey:         vch.Key,
@@ -359,7 +359,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			toExecute = func(ctx context.Context) error {
 				// TODO: check if we accept virtual channels to us
 
-				if err = s.db.CreateVirtualChannelMeta(ctx, &db2.VirtualChannelMeta{
+				if err = s.db.CreateVirtualChannelMeta(ctx, &db.VirtualChannelMeta{
 					Key:                vch.Key,
 					Active:             true,
 					FromChannelAddress: channel.Address,
@@ -370,7 +370,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 
 				log.Info().Hex("key", data.ChannelKey).
 					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
-					Msg("channel opened with us")
+					Msg("virtual channel opened with us")
 				return nil
 			}
 		}
@@ -457,7 +457,7 @@ func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *bi
 
 	if err = s.db.CreateTask(ctx, "deploy-inbound", walletAddr.String(),
 		"deploy-inbound-"+hex.EncodeToString(id)+"-"+time.Now().String(),
-		db2.DeployInboundTask{
+		db.DeployInboundTask{
 			ID:            id,
 			Key:           key,
 			Capacity:      capacity.String(),
@@ -502,7 +502,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		tryTill := time.Unix(vch.Deadline, 0)
 		if err = s.db.CreateTask(context.Background(), "remove-virtual", channel.Address,
 			"remove-virtual-"+hex.EncodeToString(vch.Key),
-			db2.RemoveVirtualTask{
+			db.RemoveVirtualTask{
 				Key: data.Key,
 			}, nil, &tryTill,
 		); err != nil {
@@ -538,7 +538,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		tryTill := time.Unix(vch.Deadline+(channel.SafeOnchainClosePeriod/2), 0)
 		if err = s.db.CreateTask(context.Background(), "confirm-close-virtual", channel.Address,
 			"confirm-close-virtual-"+hex.EncodeToString(vch.Key),
-			db2.ConfirmCloseVirtualTask{
+			db.ConfirmCloseVirtualTask{
 				VirtualKey: data.Key,
 				State:      data.State.ToBOC(),
 			}, nil, &tryTill,

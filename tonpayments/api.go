@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
-	db2 "github.com/xssnick/ton-payment-network/tonpayments/db"
+	db "github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
@@ -72,14 +72,28 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 		return fmt.Errorf("failed to get active channels: %w", err)
 	}
 
-	if len(channels) == 0 {
-		return fmt.Errorf("no active channels with first node")
-	}
-	// TODO: select channel with enough balance
+	needAmount := new(big.Int).Add(vch.Fee, vch.Capacity)
+	var channel *db.Channel
+	for _, channelAddr := range channels {
+		ch, err := s.GetActiveChannel(channelAddr)
+		if err != nil {
+			return fmt.Errorf("failed to get channel: %w", err)
+		}
 
-	channel, err := s.GetActiveChannel(channels[0])
-	if err != nil {
-		return fmt.Errorf("failed to get channel: %w", err)
+		balance, err := ch.CalcBalance(false)
+		if err != nil {
+			return fmt.Errorf("failed to calc channel balance: %w", err)
+		}
+
+		if balance.Cmp(needAmount) != -1 {
+			// we found channel with enough balance
+			channel = ch
+			break
+		}
+	}
+
+	if channel == nil {
+		return fmt.Errorf("failed to open virtual channel, %w: no active channel with enough balance exists", ErrNotPossible)
 	}
 
 	act := transport.OpenVirtualAction{
@@ -94,7 +108,7 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 	tryTill := time.Unix(vch.Deadline, 0)
 	err = s.db.CreateTask(ctx, "open-virtual", channel.Address,
 		"open-virtual-"+hex.EncodeToString(vch.Key),
-		db2.OpenVirtualTask{
+		db.OpenVirtualTask{
 			ChannelAddress: channel.Address,
 			VirtualKey:     vch.Key,
 			Deadline:       vch.Deadline,
@@ -117,7 +131,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 
 	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
 	if err != nil {
-		if errors.Is(err, db2.ErrNotFound) {
+		if errors.Is(err, db.ErrNotFound) {
 			return fmt.Errorf("virtual channel is not exists")
 		}
 		return fmt.Errorf("failed to load virtual channel meta: %w", err)
@@ -125,7 +139,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 
 	ch, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
 	if err != nil {
-		if errors.Is(err, db2.ErrNotFound) {
+		if errors.Is(err, db.ErrNotFound) {
 			return fmt.Errorf("onchain channel with source not exists")
 		}
 		return fmt.Errorf("failed to load channel: %w", err)
@@ -176,7 +190,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 	// in case we will not be able to communicate with party
 	if err = s.db.CreateTask(ctx, "uncooperative-close", ch.Address+"-uncoop",
 		"uncooperative-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
-		db2.ChannelUncooperativeCloseTask{
+		db.ChannelUncooperativeCloseTask{
 			Address:                 ch.Address,
 			CheckVirtualStillExists: vch.Key,
 		}, &uncooperativeAfter, nil,
@@ -250,7 +264,7 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 
 		if err = s.db.CreateTask(ctx, "cooperative-close", ch.Address,
 			"cooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
-			db2.ChannelUncooperativeCloseTask{
+			db.ChannelUncooperativeCloseTask{
 				Address:            ch.Address,
 				ChannelInitiatedAt: &ch.InitAt,
 			}, nil, nil,
@@ -261,7 +275,7 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 	})
 }
 
-func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payments.CooperativeClose) (*payments.CooperativeClose, *db2.Channel, error) {
+func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payments.CooperativeClose) (*payments.CooperativeClose, *db.Channel, error) {
 	channel, err := s.GetActiveChannel(channelAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get channel: %w", err)
