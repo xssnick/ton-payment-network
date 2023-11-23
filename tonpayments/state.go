@@ -1,11 +1,11 @@
-package node
+package tonpayments
 
 import (
 	"bytes"
 	"fmt"
-	"github.com/xssnick/ton-payment-network/internal/node/db"
-	"github.com/xssnick/ton-payment-network/internal/node/transport"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/tonpayments/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/tlb"
 	"math/big"
 	"reflect"

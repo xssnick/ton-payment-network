@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
-	"github.com/xssnick/ton-payment-network/internal/node/db"
+	db2 "github.com/xssnick/ton-payment-network/tonpayments/db"
 	"time"
 )
 
-func (d *DB) AcquireTask(ctx context.Context) (*db.Task, error) {
-	var result *db.Task
+func (d *DB) AcquireTask(ctx context.Context) (*db2.Task, error) {
+	var result *db2.Task
 	err := d.Transaction(ctx, func(ctx context.Context) error {
 		tx := d.getExecutor(ctx)
 
@@ -46,7 +46,7 @@ func (d *DB) AcquireTask(ctx context.Context) (*db.Task, error) {
 				return fmt.Errorf("failed to get task by index: %w", err)
 			}
 
-			var task *db.Task
+			var task *db2.Task
 			if err := json.Unmarshal(data, &task); err != nil {
 				return fmt.Errorf("failed to decode json data: %w", err)
 			}
@@ -126,7 +126,7 @@ func (d *DB) CreateTask(ctx context.Context, typ, queue, id string, data any, ex
 			after = *executeAfter
 		}
 
-		if err = d.createTask(ctx, &db.Task{
+		if err = d.createTask(ctx, &db2.Task{
 			ID:           id,
 			Type:         typ,
 			Queue:        queue,
@@ -135,7 +135,7 @@ func (d *DB) CreateTask(ctx context.Context, typ, queue, id string, data any, ex
 			ExecuteTill:  executeTill,
 			CreatedAt:    time.Now(),
 		}); err != nil {
-			if errors.Is(err, db.ErrAlreadyExists) {
+			if errors.Is(err, db2.ErrAlreadyExists) {
 				// idempotency
 				return nil
 			}
@@ -145,7 +145,7 @@ func (d *DB) CreateTask(ctx context.Context, typ, queue, id string, data any, ex
 	})
 }
 
-func (d *DB) CompleteTask(ctx context.Context, task *db.Task) error {
+func (d *DB) CompleteTask(ctx context.Context, task *db2.Task) error {
 	if task.CompletedAt != nil {
 		return nil
 	}
@@ -167,7 +167,7 @@ func (d *DB) CompleteTask(ctx context.Context, task *db.Task) error {
 			return fmt.Errorf("failed to check existance: %w", err)
 		}
 		if !has {
-			return db.ErrNotFound
+			return db2.ErrNotFound
 		}
 
 		data, err := json.Marshal(task)
@@ -189,7 +189,7 @@ func (d *DB) CompleteTask(ctx context.Context, task *db.Task) error {
 	})
 }
 
-func (d *DB) RetryTask(ctx context.Context, task *db.Task, reason string, retryAt time.Time) error {
+func (d *DB) RetryTask(ctx context.Context, task *db2.Task, reason string, retryAt time.Time) error {
 	if task.CompletedAt != nil || task.LockedTill == nil {
 		return nil
 	}
@@ -208,7 +208,7 @@ func (d *DB) RetryTask(ctx context.Context, task *db.Task, reason string, retryA
 			return fmt.Errorf("failed to check existance: %w", err)
 		}
 		if !has {
-			return db.ErrNotFound
+			return db2.ErrNotFound
 		}
 
 		data, err := json.Marshal(task)
@@ -225,7 +225,7 @@ func (d *DB) RetryTask(ctx context.Context, task *db.Task, reason string, retryA
 	})
 }
 
-func (d *DB) createTask(ctx context.Context, task *db.Task) error {
+func (d *DB) createTask(ctx context.Context, task *db2.Task) error {
 	key := append([]byte("tv:"), []byte(task.ID)...)
 
 	// we need an index to know processing order
@@ -239,7 +239,7 @@ func (d *DB) createTask(ctx context.Context, task *db.Task) error {
 			return fmt.Errorf("failed to check existance: %w", err)
 		}
 		if has {
-			return db.ErrAlreadyExists
+			return db2.ErrAlreadyExists
 		}
 
 		data, err := json.Marshal(task)
@@ -261,7 +261,7 @@ func (d *DB) createTask(ctx context.Context, task *db.Task) error {
 	})
 }
 
-func getTaskIndexKey(task *db.Task) []byte {
+func getTaskIndexKey(task *db2.Task) []byte {
 	at := make([]byte, 8)
 	binary.BigEndian.PutUint64(at, uint64(task.ExecuteAfter.UTC().UnixNano()))
 

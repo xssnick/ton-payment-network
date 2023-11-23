@@ -1,4 +1,4 @@
-package node
+package tonpayments
 
 import (
 	"context"
@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
-	"github.com/xssnick/ton-payment-network/internal/node/db"
-	"github.com/xssnick/ton-payment-network/internal/node/transport"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
+	db2 "github.com/xssnick/ton-payment-network/tonpayments/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton/wallet"
@@ -94,7 +94,7 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 	tryTill := time.Unix(vch.Deadline, 0)
 	err = s.db.CreateTask(ctx, "open-virtual", channel.Address,
 		"open-virtual-"+hex.EncodeToString(vch.Key),
-		db.OpenVirtualTask{
+		db2.OpenVirtualTask{
 			ChannelAddress: channel.Address,
 			VirtualKey:     vch.Key,
 			Deadline:       vch.Deadline,
@@ -117,7 +117,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 
 	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
+		if errors.Is(err, db2.ErrNotFound) {
 			return fmt.Errorf("virtual channel is not exists")
 		}
 		return fmt.Errorf("failed to load virtual channel meta: %w", err)
@@ -125,7 +125,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 
 	ch, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
+		if errors.Is(err, db2.ErrNotFound) {
 			return fmt.Errorf("onchain channel with source not exists")
 		}
 		return fmt.Errorf("failed to load channel: %w", err)
@@ -176,7 +176,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 	// in case we will not be able to communicate with party
 	if err = s.db.CreateTask(ctx, "uncooperative-close", ch.Address+"-uncoop",
 		"uncooperative-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
-		db.ChannelUncooperativeCloseTask{
+		db2.ChannelUncooperativeCloseTask{
 			Address:                 ch.Address,
 			CheckVirtualStillExists: vch.Key,
 		}, &uncooperativeAfter, nil,
@@ -250,7 +250,7 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 
 		if err = s.db.CreateTask(ctx, "cooperative-close", ch.Address,
 			"cooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
-			db.ChannelUncooperativeCloseTask{
+			db2.ChannelUncooperativeCloseTask{
 				Address:            ch.Address,
 				ChannelInitiatedAt: &ch.InitAt,
 			}, nil, nil,
@@ -261,7 +261,7 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 	})
 }
 
-func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payments.CooperativeClose) (*payments.CooperativeClose, *db.Channel, error) {
+func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payments.CooperativeClose) (*payments.CooperativeClose, *db2.Channel, error) {
 	channel, err := s.GetActiveChannel(channelAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get channel: %w", err)

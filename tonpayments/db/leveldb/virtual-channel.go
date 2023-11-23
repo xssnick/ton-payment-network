@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
-	"github.com/xssnick/ton-payment-network/internal/node/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/db"
 )
 
 func (d *DB) CreateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChannelMeta) error {

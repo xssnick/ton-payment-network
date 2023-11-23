@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/xssnick/ton-payment-network/internal/node"
-	"github.com/xssnick/ton-payment-network/internal/node/chain"
-	"github.com/xssnick/ton-payment-network/internal/node/db"
-	"github.com/xssnick/ton-payment-network/internal/node/db/leveldb"
-	"github.com/xssnick/ton-payment-network/internal/node/transport"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/tonpayments"
+	"github.com/xssnick/ton-payment-network/tonpayments/chain"
+	"github.com/xssnick/ton-payment-network/tonpayments/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/db/leveldb"
+	transport2 "github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/liteclient"
@@ -123,7 +123,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 		return
 	}
 
-	tr := transport.NewServer(dhtClient, gate, key, channelKey, isServer)
+	tr := transport2.NewServer(dhtClient, gate, key, channelKey, isServer)
 
 	var seqno uint32
 	if bo, err := fdb.GetBlockOffset(context.Background()); err != nil {
@@ -146,7 +146,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 	}
 	log.Info().Str("addr", w.WalletAddress().String()).Msg("wallet initialized")
 
-	svc := node.NewService(api, fdb, tr, w, inv, channelKey, payments.ClosingConfig{
+	svc := tonpayments.NewService(api, fdb, tr, w, inv, channelKey, payments.ClosingConfig{
 		QuarantineDuration:       600,
 		MisbehaviorFine:          tlb.MustFromTON("0.015"),
 		ConditionalCloseDuration: 180,
@@ -345,14 +345,14 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				var tunChain []transport.TunnelChainPart
+				var tunChain []transport2.TunnelChainPart
 				for i, parsedKey := range parsedKeys {
 					fee := big.NewInt(0)
 					if len(parsedKeys)-i > 1 {
 						fee = new(big.Int).Mul(tlb.MustFromTON("0.01").Nano(), big.NewInt(int64(len(parsedKeys)-i)-1))
 					}
 
-					tunChain = append(tunChain, transport.TunnelChainPart{
+					tunChain = append(tunChain, transport2.TunnelChainPart{
 						Target:   parsedKey,
 						Capacity: amt.Nano(),
 						Fee:      fee,
@@ -361,7 +361,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 				}
 
 				vPub, vPriv, _ := ed25519.GenerateKey(nil)
-				vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPub, tunChain, 5)
+				vc, firstInstructionKey, tun, err := transport2.GenerateTunnel(vPub, tunChain, 5)
 				if err != nil {
 					println("failed to generate tunnel:", err.Error())
 					continue

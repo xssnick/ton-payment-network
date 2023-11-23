@@ -10,7 +10,7 @@ import (
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
-	"github.com/xssnick/ton-payment-network/internal/node/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/db"
 )
 
 func (d *DB) CreateChannel(ctx context.Context, channel *db.Channel) error {
