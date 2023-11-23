@@ -2,7 +2,7 @@ package db
 
 import (
 	"encoding/json"
-	"github.com/xssnick/payment-network/internal/node/transport"
+	"github.com/xssnick/ton-payment-network/internal/node/transport"
 	"time"
 )
 

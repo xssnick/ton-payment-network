@@ -1,4 +1,4 @@
-module github.com/xssnick/payment-network
+module github.com/xssnick/ton-payment-network
 
 go 1.19
 

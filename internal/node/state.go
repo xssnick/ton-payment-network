@@ -3,9 +3,9 @@ package node
 import (
 	"bytes"
 	"fmt"
-	"github.com/xssnick/payment-network/internal/node/db"
-	"github.com/xssnick/payment-network/internal/node/transport"
-	"github.com/xssnick/payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/internal/node/db"
+	"github.com/xssnick/ton-payment-network/internal/node/transport"
+	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/tonutils-go/tlb"
 	"math/big"
 	"reflect"
