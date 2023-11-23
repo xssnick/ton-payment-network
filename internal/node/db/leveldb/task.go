@@ -26,7 +26,8 @@ func (d *DB) AcquireTask(ctx context.Context) (*db.Task, error) {
 	next:
 		for iter.Next() {
 			key := iter.Key()
-			if binary.LittleEndian.Uint64(key[3:]) > uint64(now.UnixNano()) {
+
+			if binary.BigEndian.Uint64(key[3:]) > uint64(now.UnixNano()) {
 				// no tasks ready to execute
 				break
 			}
@@ -62,10 +63,26 @@ func (d *DB) AcquireTask(ctx context.Context) (*db.Task, error) {
 				continue
 			}
 
+			if task.ReExecuteAfter != nil && task.ReExecuteAfter.After(now) {
+				// not yet ready to retry
+				toSkip = append(toSkip, task.Queue)
+				continue
+			}
+
+			if task.ExecuteTill != nil && task.ExecuteTill.Before(now) {
+				// task is expired, remove from index (queue)
+				if err = tx.Delete(key, &opt.WriteOptions{
+					Sync: true,
+				}); err != nil {
+					return fmt.Errorf("failed to delete index: %w", err)
+				}
+				continue
+			}
+
 			result = task
 
 			// we need to lock task to not acquire it twice when using multiple workers
-			till := time.Now().Add(2 * time.Minute)
+			till := time.Now().Add(5 * time.Minute)
 			result.LockedTill = &till
 
 			data, err = json.Marshal(result)
@@ -135,14 +152,12 @@ func (d *DB) CompleteTask(ctx context.Context, task *db.Task) error {
 
 	now := time.Now()
 	task.CompletedAt = &now
+	task.LockedTill = nil
 
 	key := append([]byte("tv:"), []byte(task.ID)...)
 
-	at := make([]byte, 8)
-	binary.LittleEndian.PutUint64(at, uint64(task.ExecuteAfter.UTC().UnixNano()))
-
 	// we need remove it from index to not pick it up again
-	keyOrderIndex := append(append([]byte("ti:"), at...), []byte(task.Queue)...)
+	keyOrderIndex := getTaskIndexKey(task)
 
 	return d.Transaction(ctx, func(ctx context.Context) error {
 		tx := d.getExecutor(ctx)
@@ -175,12 +190,13 @@ func (d *DB) CompleteTask(ctx context.Context, task *db.Task) error {
 }
 
 func (d *DB) RetryTask(ctx context.Context, task *db.Task, reason string, retryAt time.Time) error {
-	if task.CompletedAt != nil {
+	if task.CompletedAt != nil || task.LockedTill == nil {
 		return nil
 	}
 
+	task.LockedTill = nil
 	task.LastError = reason
-	task.ExecuteAfter = retryAt
+	task.ReExecuteAfter = &retryAt
 
 	key := append([]byte("tv:"), []byte(task.ID)...)
 
@@ -212,11 +228,8 @@ func (d *DB) RetryTask(ctx context.Context, task *db.Task, reason string, retryA
 func (d *DB) createTask(ctx context.Context, task *db.Task) error {
 	key := append([]byte("tv:"), []byte(task.ID)...)
 
-	at := make([]byte, 8)
-	binary.LittleEndian.PutUint64(at, uint64(task.ExecuteAfter.UTC().UnixNano()))
-
 	// we need an index to know processing order
-	keyOrderIndex := append(append([]byte("ti:"), at...), []byte(task.Queue)...)
+	keyOrderIndex := getTaskIndexKey(task)
 
 	return d.Transaction(ctx, func(ctx context.Context) error {
 		tx := d.getExecutor(ctx)
@@ -246,4 +259,11 @@ func (d *DB) createTask(ctx context.Context, task *db.Task) error {
 		}
 		return nil
 	})
+}
+
+func getTaskIndexKey(task *db.Task) []byte {
+	at := make([]byte, 8)
+	binary.BigEndian.PutUint64(at, uint64(task.ExecuteAfter.UTC().UnixNano()))
+
+	return append(append([]byte("ti:"), at...), []byte(task.Queue)...)
 }

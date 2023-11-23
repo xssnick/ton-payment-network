@@ -129,7 +129,10 @@ func (d *DB) GetActiveChannels(ctx context.Context) ([]*db.Channel, error) {
 		if err := json.Unmarshal(iter.Value(), &channel); err != nil {
 			return nil, fmt.Errorf("failed to decode json data: %w", err)
 		}
-		channels = append(channels, channel)
+
+		if channel.Status == db.ChannelStateActive {
+			channels = append(channels, channel)
+		}
 	}
 
 	if err := iter.Error(); err != nil {

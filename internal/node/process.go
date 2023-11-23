@@ -30,12 +30,6 @@ import (
 
 func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address,
 	signedState payments.SignedSemiChannel, action transport.Action) (*payments.SignedSemiChannel, error) {
-	start := time.Now()
-
-	println("PROC START:", reflect.TypeOf(action).String(), start.String())
-	defer func() {
-		println("PROC END:", reflect.TypeOf(action).String(), time.Since(start).String())
-	}()
 
 	s.mx.Lock()
 	defer s.mx.Unlock()
@@ -47,6 +41,10 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 
 	if channel.Status != db.ChannelStateActive {
 		return nil, fmt.Errorf("channel is not active")
+	}
+
+	if !channel.AcceptingActions {
+		return nil, fmt.Errorf("channel is currently not accepting new actions")
 	}
 
 	if !bytes.Equal(key, channel.TheirOnchain.Key) {
@@ -214,6 +212,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
 				Msg("virtual channel closed")
+
 			return nil
 		}
 	case transport.OpenVirtualAction:
@@ -230,7 +229,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil, fmt.Errorf("invalid fee")
 		}
 
-		if vch.Deadline < time.Now().Unix()+s.deadlineDecreaseNextHop {
+		if vch.Deadline < time.Now().Unix()+channel.SafeOnchainClosePeriod {
 			return nil, fmt.Errorf("too short virtual channel deadline")
 		}
 
@@ -286,7 +285,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			nextFee := new(big.Int).SetBytes(currentInstruction.NextFee)
 			nextCap := new(big.Int).SetBytes(currentInstruction.NextCapacity)
 
-			if currentInstruction.NextDeadline > vch.Deadline-s.deadlineDecreaseNextHop {
+			if currentInstruction.NextDeadline > vch.Deadline-channel.SafeOnchainClosePeriod {
 				return nil, fmt.Errorf("too short next deadline")
 			}
 
@@ -331,18 +330,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			toExecute = func(ctx context.Context) error {
 				data.InstructionKey = currentInstruction.NextInstructionKey
 
-				if err = s.db.CreateVirtualChannelMeta(ctx, &db.VirtualChannelMeta{
-					Key:                vch.Key,
-					Active:             true,
-					FromChannelAddress: channel.Address,
-					ToChannelAddress:   target.Address,
-					CreatedAt:          time.Now(),
-				}); err != nil {
-					return fmt.Errorf("failed to update virtual channel meta: %w", err)
-				}
-
-				// TODO: play with try till time, and start uncooperative close if no response for a long time
-				tryTill := time.Unix(vch.Deadline+(s.deadlineDecreaseNextHop/2), 0)
+				tryTill := time.Unix(currentInstruction.NextDeadline, 0)
 				err = s.db.CreateTask(ctx, "open-virtual", target.Address,
 					"open-virtual-"+hex.EncodeToString(vch.Key),
 					db.OpenVirtualTask{
@@ -468,7 +456,7 @@ func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *bi
 	id := key[:16]
 
 	if err = s.db.CreateTask(ctx, "deploy-inbound", walletAddr.String(),
-		"deploy-inbound-"+hex.EncodeToString(id),
+		"deploy-inbound-"+hex.EncodeToString(id)+"-"+time.Now().String(),
 		db.DeployInboundTask{
 			ID:            id,
 			Key:           key,
@@ -483,11 +471,8 @@ func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *bi
 }
 
 func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action transport.Action) error {
-	start := time.Now()
-	println("REQ START:", reflect.TypeOf(action).String(), start.String())
-	defer func() {
-		println("REQ END:", reflect.TypeOf(action).String(), time.Since(start).String())
-	}()
+	s.mx.Lock()
+	defer s.mx.Unlock()
 
 	channel, err := s.GetActiveChannel(channelAddr.String())
 	if err != nil {
@@ -502,6 +487,10 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 
 	switch data := action.(type) {
 	case transport.RequestRemoveVirtualAction:
+		if !channel.AcceptingActions {
+			return fmt.Errorf("channel is currently not accepting new actions")
+		}
+
 		_, vch, err := channel.Our.State.FindVirtualChannel(data.Key)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
@@ -520,6 +509,10 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return fmt.Errorf("failed to create remove-virtual task: %w", err)
 		}
 	case transport.CloseVirtualAction:
+		if !channel.AcceptingActions {
+			return fmt.Errorf("channel is currently not accepting new actions")
+		}
+
 		var vState payments.VirtualChannelState
 		if err = tlb.LoadFromCell(&vState, data.State.BeginParse()); err != nil {
 			return fmt.Errorf("failed to load virtual channel state cell: %w", err)
@@ -542,7 +535,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return fmt.Errorf("virtual channel is expired")
 		}
 
-		tryTill := time.Unix(vch.Deadline+(s.deadlineDecreaseNextHop/2), 0)
+		tryTill := time.Unix(vch.Deadline+(channel.SafeOnchainClosePeriod/2), 0)
 		if err = s.db.CreateTask(context.Background(), "confirm-close-virtual", channel.Address,
 			"confirm-close-virtual-"+hex.EncodeToString(vch.Key),
 			db.ConfirmCloseVirtualTask{
@@ -559,7 +552,9 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return fmt.Errorf("failed to serialize their close channel request: %w", err)
 		}
 
-		if err = s.ExecuteCooperativeClose(ctx, &req, channel.Address); err != nil {
+		log.Info().Str("address", channel.Address).Msg("received cooperative close request")
+
+		if err = s.executeCooperativeClose(ctx, &req, channel.Address); err != nil {
 			return fmt.Errorf("failed to execute cooperative close action: %w", err)
 		}
 	default:

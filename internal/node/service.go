@@ -22,6 +22,7 @@ import (
 )
 
 var ErrDenied = errors.New("actions denied")
+var ErrNotPossible = errors.New("not possible")
 var ErrTryLater = errors.New("try later")
 
 type Transport interface {
@@ -69,41 +70,39 @@ type Service struct {
 
 	key ed25519.PrivateKey
 
-	maxOutboundCapacity     tlb.Coins
-	virtualChannelFee       tlb.Coins
-	excessFee               tlb.Coins
-	wallet                  *wallet.Wallet
-	contractMaker           *payments.Client
-	closingConfig           payments.ClosingConfig
-	deadlineDecreaseNextHop int64
-	channelsLimit           int
+	maxOutboundCapacity  tlb.Coins
+	virtualChannelFee    tlb.Coins
+	excessFee            tlb.Coins
+	wallet               *wallet.Wallet
+	contractMaker        *payments.Client
+	closingConfig        payments.ClosingConfig
+	virtualChannelsLimit int
 
 	// TODO: channel based lock
 	mx sync.Mutex
 }
 
-func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, deadlineDecreaseNextHop time.Duration, closingConfig payments.ClosingConfig) *Service {
+func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, closingConfig payments.ClosingConfig) *Service {
 	return &Service{
-		ton:                     api,
-		transport:               transport,
-		updates:                 updates,
-		db:                      db,
-		key:                     key,
-		maxOutboundCapacity:     tlb.MustFromTON("5.0"),
-		virtualChannelFee:       tlb.MustFromTON("0.01"),
-		excessFee:               tlb.MustFromTON("0.01"),
-		wallet:                  wallet,
-		contractMaker:           payments.NewPaymentChannelClient(api),
-		closingConfig:           closingConfig,
-		deadlineDecreaseNextHop: int64(deadlineDecreaseNextHop / time.Second),
-		channelsLimit:           3000,
+		ton:                  api,
+		transport:            transport,
+		updates:              updates,
+		db:                   db,
+		key:                  key,
+		maxOutboundCapacity:  tlb.MustFromTON("5.0"),
+		virtualChannelFee:    tlb.MustFromTON("0.01"),
+		excessFee:            tlb.MustFromTON("0.01"),
+		wallet:               wallet,
+		contractMaker:        payments.NewPaymentChannelClient(api),
+		closingConfig:        closingConfig,
+		virtualChannelsLimit: 3000,
 	}
 }
 
 func (s *Service) GetChannelConfig() transport.ChannelConfig {
 	return transport.ChannelConfig{
 		ExcessFee:                s.excessFee.Nano().Bytes(),
-		WalletAddr:               s.wallet.Address().Data(),
+		WalletAddr:               s.wallet.WalletAddress().Data(),
 		QuarantineDuration:       s.closingConfig.QuarantineDuration,
 		MisbehaviorFine:          s.closingConfig.MisbehaviorFine.Nano().Bytes(),
 		ConditionalCloseDuration: s.closingConfig.ConditionalCloseDuration,
@@ -161,22 +160,23 @@ func (s *Service) Start() {
 
 			isNew := channel == nil
 			if isNew || channel.Status == db.ChannelStateInactive {
-				if upd.Channel.Status != payments.ChannelStatusOpen {
-					// TODO: think about possible cases
+				if upd.Channel.Status == payments.ChannelStatusUninitialized {
 					continue
 				}
 
 				channel = &db.Channel{
-					ID:           upd.Channel.Storage.ChannelID,
-					Address:      upd.Channel.Address().String(),
-					WeLeft:       isLeft,
-					OurOnchain:   our,
-					TheirOnchain: their,
-					Our:          db.NewSide(upd.Channel.Storage.ChannelID, uint64(our.CommittedSeqno)),
-					Their:        db.NewSide(upd.Channel.Storage.ChannelID, uint64(their.CommittedSeqno)),
-					InitAt:       time.Unix(int64(upd.Transaction.Now), 0),
-					UpdatedAt:    time.Unix(int64(upd.Transaction.Now), 0),
-					CreatedAt:    time.Now(),
+					ID:                     upd.Channel.Storage.ChannelID,
+					Address:                upd.Channel.Address().String(),
+					WeLeft:                 isLeft,
+					OurOnchain:             our,
+					TheirOnchain:           their,
+					Our:                    db.NewSide(upd.Channel.Storage.ChannelID, uint64(our.CommittedSeqno), uint64(their.CommittedSeqno)),
+					Their:                  db.NewSide(upd.Channel.Storage.ChannelID, uint64(their.CommittedSeqno), uint64(our.CommittedSeqno)),
+					InitAt:                 time.Unix(int64(upd.Transaction.Now), 0),
+					UpdatedAt:              time.Unix(int64(upd.Transaction.Now), 0),
+					CreatedAt:              time.Now(),
+					AcceptingActions:       upd.Channel.Status == payments.ChannelStatusOpen,
+					SafeOnchainClosePeriod: 300 + int64(upd.Channel.Storage.ClosingConfig.QuarantineDuration) + int64(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration),
 				}
 			}
 
@@ -209,6 +209,8 @@ func (s *Service) Start() {
 						Msg("onchain channel opened")
 				}
 			case payments.ChannelStatusClosureStarted:
+				channel.Status = db.ChannelStateClosing
+
 				if (isLeft && !upd.Channel.Storage.Quarantine.StateCommittedByA) ||
 					(!isLeft && upd.Channel.Storage.Quarantine.StateCommittedByA) {
 					// if committed not by us, check state
@@ -216,6 +218,10 @@ func (s *Service) Start() {
 					if isLeft {
 						qOur, qTheir = qTheir, qOur
 					}
+
+					log.Info().Str("address", channel.Address).
+						Hex("with", channel.TheirOnchain.Key).
+						Msg("onchain channel closure started")
 
 					// TODO: maybe check only their?
 					if qOur.Seqno < channel.Our.State.Data.Seqno ||
@@ -235,11 +241,12 @@ func (s *Service) Start() {
 				}
 				fallthrough
 			case payments.ChannelStatusSettlingConditionals:
+				channel.Status = db.ChannelStateClosing
+
 				log.Info().Str("address", channel.Address).
 					Hex("with", channel.TheirOnchain.Key).
-					Msg("onchain channel uncooperative closing event")
+					Msg("onchain channel uncooperative closing event, settling conditions")
 
-				channel.Status = db.ChannelStateClosing
 				settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+3), 0)
 				finishAt := settleAt.Add(time.Duration(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration) * time.Second)
 
@@ -254,8 +261,16 @@ func (s *Service) Start() {
 				}
 				fallthrough
 			case payments.ChannelStatusAwaitingFinalization:
+				channel.Status = db.ChannelStateClosing
+
 				settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+5), 0)
 				finishAt := settleAt.Add(time.Duration(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration+5) * time.Second)
+
+				log.Info().Str("address", channel.Address).
+					Hex("with", channel.TheirOnchain.Key).
+					Float64("till_finalize_sec", time.Until(finishAt).Seconds()).
+					Msg("onchain channel awaiting finalization")
+
 				err = s.db.CreateTask(context.Background(), "finalize", channel.Address+"-finalize",
 					"finalize-"+hex.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
 					db.ChannelTask{Address: channel.Address}, &finishAt, nil,
@@ -318,6 +333,8 @@ func (s *Service) DebugPrintVirtualChannels() {
 			Str("in_deposit", tlb.FromNanoTON(ch.TheirOnchain.Deposited).String()).
 			Str("sent_in", ch.Their.State.Data.Sent.String()).
 			Str("balance_in", inBalance).
+			Uint64("seqno_their", ch.Their.State.Data.Seqno).
+			Uint64("seqno_our", ch.Our.State.Data.Seqno).
 			Msg("active onchain channel")
 		for _, kv := range ch.Our.State.Data.Conditionals.All() {
 			vch, _ := payments.ParseVirtualChannelCond(kv.Value)
@@ -404,7 +421,7 @@ func (s *Service) proposeAction(ctx context.Context, channelAddress string, acti
 	}
 
 	if err := s.updateOurStateWithAction(channel, action, details); err != nil {
-		return fmt.Errorf("failed to prepare actions for the next node: %w", err)
+		return fmt.Errorf("failed to prepare actions for the next node - %w: %v", ErrNotPossible, err)
 	}
 
 	stateCell, err := tlb.ToCell(channel.Our.SignedSemiChannel)

@@ -96,7 +96,7 @@ type Decision struct {
 type ProposalDecision struct {
 	Agreed      bool       `tl:"bool"`
 	Reason      string     `tl:"string"`
-	SignedState *cell.Cell `tl:"cell"`
+	SignedState *cell.Cell `tl:"cell optional"`
 }
 
 // OpenVirtualAction - request party to open virtual channel (tunnel) with specified target

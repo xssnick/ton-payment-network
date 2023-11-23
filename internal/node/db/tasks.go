@@ -7,16 +7,17 @@ import (
 )
 
 type Task struct {
-	ID           string
-	Type         string
-	Queue        string
-	Data         json.RawMessage
-	LockedTill   *time.Time
-	ExecuteAfter time.Time
-	ExecuteTill  *time.Time
-	CreatedAt    time.Time
-	CompletedAt  *time.Time
-	LastError    string
+	ID             string
+	Type           string
+	Queue          string
+	Data           json.RawMessage
+	LockedTill     *time.Time
+	ExecuteAfter   time.Time
+	ReExecuteAfter *time.Time
+	ExecuteTill    *time.Time
+	CreatedAt      time.Time
+	CompletedAt    *time.Time
+	LastError      string
 }
 
 type ChannelTask struct {
@@ -31,6 +32,12 @@ type BlockOffset struct {
 type ChannelUncooperativeCloseTask struct {
 	Address                 string
 	CheckVirtualStillExists []byte
+	ChannelInitiatedAt      *time.Time
+}
+
+type ChannelCooperativeCloseTask struct {
+	Address            string
+	ChannelInitiatedAt time.Time
 }
 
 type ConfirmCloseVirtualTask struct {

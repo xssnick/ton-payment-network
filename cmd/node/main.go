@@ -144,12 +144,12 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 		log.Fatal().Err(err).Msg("failed to init wallet")
 		return
 	}
-	log.Info().Str("addr", w.Address().String()).Msg("wallet initialized")
+	log.Info().Str("addr", w.WalletAddress().String()).Msg("wallet initialized")
 
-	svc := node.NewService(api, fdb, tr, w, inv, channelKey, 5*time.Minute, payments.ClosingConfig{
-		QuarantineDuration:       60,
+	svc := node.NewService(api, fdb, tr, w, inv, channelKey, payments.ClosingConfig{
+		QuarantineDuration:       600,
 		MisbehaviorFine:          tlb.MustFromTON("0.015"),
-		ConditionalCloseDuration: 60,
+		ConditionalCloseDuration: 180,
 	})
 	tr.SetService(svc)
 
@@ -172,7 +172,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					println("failed to coop close channel:", err.Error())
 					continue
 				}
-				println("CHANNEL COOP CLOSED")
+				println("CHANNEL COOP CLOSE REQUESTED")
 			case "sign":
 				println("Channel private key:")
 				var strKey string
@@ -244,7 +244,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					println("failed to close channel:", err.Error())
 					continue
 				}
-				println("VIRTUAL CHANNEL CLOSED")
+				println("VIRTUAL CHANNEL CLOSE REQUESTED")
 			case "deploy_out":
 				println("With node key:")
 				var strKey string
@@ -347,10 +347,15 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 
 				var tunChain []transport.TunnelChainPart
 				for i, parsedKey := range parsedKeys {
+					fee := big.NewInt(0)
+					if len(parsedKeys)-i > 1 {
+						fee = new(big.Int).Mul(tlb.MustFromTON("0.01").Nano(), big.NewInt(int64(len(parsedKeys)-i)-1))
+					}
+
 					tunChain = append(tunChain, transport.TunnelChainPart{
 						Target:   parsedKey,
 						Capacity: amt.Nano(),
-						Fee:      new(big.Int).Mul(tlb.MustFromTON("0.01").Nano(), big.NewInt(int64(len(parsedKeys)-i))),
+						Fee:      fee,
 						Deadline: time.Now().Add(1*time.Hour + (30*time.Minute)*time.Duration(len(parsedKeys)-i)),
 					})
 				}
@@ -370,7 +375,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				println("VIRTUAL CHANNEL IS OPEN, PRIV KEY:", hex.EncodeToString(vPriv.Seed()))
+				println("VIRTUAL CHANNEL OPENING REQUESTED, PRIVATE KEY:", hex.EncodeToString(vPriv.Seed()))
 			default:
 				println("UNKNOWN COMMAND " + cmd)
 			}

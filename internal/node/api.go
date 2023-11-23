@@ -91,7 +91,7 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	tryTill := time.Unix(vch.Deadline+(s.deadlineDecreaseNextHop/2), 0)
+	tryTill := time.Unix(vch.Deadline, 0)
 	err = s.db.CreateTask(ctx, "open-virtual", channel.Address,
 		"open-virtual-"+hex.EncodeToString(vch.Key),
 		db.OpenVirtualTask{
@@ -111,8 +111,6 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 }
 
 func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error {
-	println("CLL CLOSING:" + hex.EncodeToString(virtualKey))
-
 	if !state.Verify(virtualKey) {
 		return fmt.Errorf("incorrect state signature")
 	}
@@ -132,7 +130,6 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		}
 		return fmt.Errorf("failed to load channel: %w", err)
 	}
-	println("CLOSING NEXT:" + meta.FromChannelAddress)
 
 	_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
 	if err != nil {
@@ -161,31 +158,36 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 	if err = meta.AddKnownResolve(vch.Key, &state); err != nil {
 		return fmt.Errorf("failed to add channel condition resolve: %w", err)
 	}
+	meta.ReadyToReleaseCoins = true
 	if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 		return fmt.Errorf("failed to update channel in db: %w", err)
+	}
+
+	// We start uncooperative close at specific moment to have time
+	// to commit resolve onchain in case partner is irresponsible.
+	// But in the same time we give our partner time to
+	uncooperativeAfter := time.Unix(vch.Deadline-ch.SafeOnchainClosePeriod, 0)
+	minDelay := time.Now().Add(1 * time.Minute)
+	if !uncooperativeAfter.After(minDelay) {
+		uncooperativeAfter = minDelay
+	}
+
+	// Creating aggressive onchain close task, for the future,
+	// in case we will not be able to communicate with party
+	if err = s.db.CreateTask(ctx, "uncooperative-close", ch.Address+"-uncoop",
+		"uncooperative-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
+		db.ChannelUncooperativeCloseTask{
+			Address:                 ch.Address,
+			CheckVirtualStillExists: vch.Key,
+		}, &uncooperativeAfter, nil,
+	); err != nil {
+		log.Warn().Err(err).Str("channel", ch.Address).Msg("failed to create uncooperative close task")
 	}
 
 	if err = s.requestAction(ctx, ch.Address, transport.CloseVirtualAction{
 		Key:   vch.Key,
 		State: stateCell,
 	}); err != nil {
-		// TODO: task for coop close retry
-		// TODO: accurate calc timings
-		after := time.Now() // time.Unix(vch.Deadline-s.deadlineDecreaseNextHop, 0)
-
-		// creating aggressive onchain close task, for the future,
-		// in case we will not be able to communicate with party
-		errCreate := s.db.CreateTask(ctx, "uncooperative-close", ch.Address+"-uncoop",
-			"uncooperative-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
-			db.ChannelUncooperativeCloseTask{
-				Address:                 ch.Address,
-				CheckVirtualStillExists: vch.Key,
-			}, &after, nil,
-		)
-		if errCreate != nil {
-			log.Error().Err(errCreate).Str("channel", ch.Address).Msg("failed to create uncooperative close task")
-		}
-
 		return fmt.Errorf("failed to request action from the node: %w", err)
 	}
 	return nil
@@ -203,13 +205,18 @@ func (s *Service) RequestInboundChannel(ctx context.Context, capacity tlb.Coins,
 	return nil
 }
 
-func (s *Service) ExecuteCooperativeClose(ctx context.Context, partyReq *payments.CooperativeClose, channelAddr string) error {
-	// TODO: lock channel, to not accept new actions till tx confirms (set status closing)
-
+func (s *Service) executeCooperativeClose(ctx context.Context, partyReq *payments.CooperativeClose, channelAddr string) error {
 	ourReq, channel, err := s.getCooperativeCloseRequest(channelAddr, partyReq)
 	if err != nil {
 		return fmt.Errorf("failed to prepare close channel request: %w", err)
 	}
+
+	channel.AcceptingActions = false
+	if err = s.db.UpdateChannel(ctx, channel); err != nil {
+		return fmt.Errorf("failed to update channel: %w", err)
+	}
+
+	// TODO: send external in worker and wait result
 
 	msg, err := tlb.ToCell(ourReq)
 	if err != nil {
@@ -227,38 +234,31 @@ func (s *Service) ExecuteCooperativeClose(ctx context.Context, partyReq *payment
 }
 
 func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr string) error {
-	req, ch, err := s.getCooperativeCloseRequest(channelAddr, nil)
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
+	_, ch, err := s.getCooperativeCloseRequest(channelAddr, nil)
 	if err != nil {
 		return fmt.Errorf("failed to prepare close channel request: %w", err)
 	}
 
-	cl, err := tlb.ToCell(req)
-	if err != nil {
-		return fmt.Errorf("failed to serialize request to cell: %w", err)
-	}
-
-	log.Info().Msg("trying cooperative close")
-
-	if err = s.requestAction(ctx, ch.Address, transport.CooperativeCloseAction{
-		SignedCloseRequest: cl,
-	}); err != nil {
-		// TODO: be not so aggressive
-		// creating aggressive onchain close task
-		errCreate := s.db.CreateTask(context.Background(), "uncooperative-close", ch.Address+"-uncoop",
-			"uncooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
-			db.ChannelUncooperativeCloseTask{
-				Address: ch.Address,
-			}, nil, nil,
-		)
-		if errCreate != nil {
-			log.Error().Err(errCreate).Str("channel", ch.Address).Msg("failed to create uncooperative close task")
+	return s.db.Transaction(ctx, func(ctx context.Context) error {
+		ch.AcceptingActions = false
+		if err = s.db.UpdateChannel(ctx, ch); err != nil {
+			return fmt.Errorf("failed to update channel: %w", err)
 		}
 
-		return fmt.Errorf("failed to request action from the node: %w", err)
-	}
-
-	// TODO: wait close here to confirm
-	return nil
+		if err = s.db.CreateTask(ctx, "cooperative-close", ch.Address,
+			"cooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
+			db.ChannelUncooperativeCloseTask{
+				Address:            ch.Address,
+				ChannelInitiatedAt: &ch.InitAt,
+			}, nil, nil,
+		); err != nil {
+			return fmt.Errorf("failed to create cooperative close task: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payments.CooperativeClose) (*payments.CooperativeClose, *db.Channel, error) {
@@ -267,9 +267,28 @@ func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payme
 		return nil, nil, fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	if channel.Our.State.Data.Conditionals.Size() > 0 ||
-		channel.Their.State.Data.Conditionals.Size() > 0 {
-		return nil, nil, fmt.Errorf("conditionals should be resolved before cooperative close")
+	for _, kv := range channel.Our.State.Data.Conditionals.All() {
+		vch, err := payments.ParseVirtualChannelCond(kv.Value)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
+		}
+
+		// if condition is not expired we cannot close onchain channel
+		if vch.Deadline >= time.Now().Unix() {
+			return nil, nil, fmt.Errorf("conditionals should be resolved before cooperative close")
+		}
+	}
+
+	for _, kv := range channel.Their.State.Data.Conditionals.All() {
+		vch, err := payments.ParseVirtualChannelCond(kv.Value)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
+		}
+
+		// if condition is not expired we cannot close onchain channel
+		if vch.Deadline >= time.Now().Unix() {
+			return nil, nil, fmt.Errorf("conditionals should be resolved before cooperative close")
+		}
 	}
 
 	ourBalance, err := channel.CalcBalance(false)
@@ -325,6 +344,27 @@ func (s *Service) StartUncooperativeClose(ctx context.Context, channelAddr strin
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
+	channel.AcceptingActions = false
+	if err = s.db.UpdateChannel(ctx, channel); err != nil {
+		return fmt.Errorf("failed to update channel: %w", err)
+	}
+
+	block, err := s.ton.CurrentMasterchainInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get master block: %w", err)
+	}
+
+	och, err := payments.NewPaymentChannelClient(s.ton).GetAsyncChannel(ctx, block, address.MustParseAddr(channelAddr), true)
+	if err != nil {
+		return fmt.Errorf("failed to get onchain channel: %w", err)
+	}
+
+	if och.Status != payments.ChannelStatusOpen {
+		log.Info().Str("address", channel.Address).
+			Msg("uncooperative close already started or not required")
+		return nil
+	}
+
 	log.Info().Str("address", channel.Address).
 		Msg("starting uncooperative close")
 
@@ -354,7 +394,7 @@ func (s *Service) StartUncooperativeClose(ctx context.Context, channelAddr strin
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
 	log.Info().Hex("hash", tx.Hash).Msg("uncooperative close transaction completed")
-	// TODO: wait event from invalidator here to confirm
+
 	return nil
 }
 
@@ -362,6 +402,23 @@ func (s *Service) ChallengeChannelState(ctx context.Context, channelAddr string)
 	channel, err := s.getVerifiedChannel(channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	block, err := s.ton.CurrentMasterchainInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get master block: %w", err)
+	}
+
+	och, err := payments.NewPaymentChannelClient(s.ton).GetAsyncChannel(ctx, block, address.MustParseAddr(channelAddr), true)
+	if err != nil {
+		return fmt.Errorf("failed to get onchain channel: %w", err)
+	}
+
+	if och.Status == payments.ChannelStatusAwaitingFinalization ||
+		och.Status == payments.ChannelStatusUninitialized ||
+		och.Status == payments.ChannelStatusSettlingConditionals {
+		// no more time to challenge
+		return nil
 	}
 
 	msg := payments.ChallengeQuarantinedState{
@@ -403,6 +460,21 @@ func (s *Service) FinishUncooperativeChannelClose(ctx context.Context, channelAd
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
+	block, err := s.ton.CurrentMasterchainInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get master block: %w", err)
+	}
+
+	och, err := payments.NewPaymentChannelClient(s.ton).GetAsyncChannel(ctx, block, address.MustParseAddr(channelAddr), true)
+	if err != nil {
+		return fmt.Errorf("failed to get onchain channel: %w", err)
+	}
+
+	if och.Status == payments.ChannelStatusUninitialized {
+		// already closed
+		return nil
+	}
+
 	msgCell, err := tlb.ToCell(payments.FinishUncooperativeClose{})
 	if err != nil {
 		return fmt.Errorf("failed to serialize message to cell: %w", err)
@@ -427,6 +499,22 @@ func (s *Service) SettleChannelConditionals(ctx context.Context, channelAddr str
 	}
 
 	if channel.Their.State.Data.Conditionals.Size() == 0 {
+		return nil
+	}
+
+	block, err := s.ton.CurrentMasterchainInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get master block: %w", err)
+	}
+
+	och, err := payments.NewPaymentChannelClient(s.ton).GetAsyncChannel(ctx, block, address.MustParseAddr(channelAddr), true)
+	if err != nil {
+		return fmt.Errorf("failed to get onchain channel: %w", err)
+	}
+
+	if och.Status == payments.ChannelStatusAwaitingFinalization ||
+		och.Status == payments.ChannelStatusUninitialized {
+		// no more time to settle
 		return nil
 	}
 

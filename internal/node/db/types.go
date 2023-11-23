@@ -37,12 +37,15 @@ type VirtualChannelMeta struct {
 }
 
 type Channel struct {
-	ID           []byte
-	Address      string
-	Status       ChannelStatus
-	WeLeft       bool
-	OurOnchain   OnchainState
-	TheirOnchain OnchainState
+	ID                     []byte
+	Address                string
+	Status                 ChannelStatus
+	WeLeft                 bool
+	OurOnchain             OnchainState
+	TheirOnchain           OnchainState
+	SafeOnchainClosePeriod int64
+
+	AcceptingActions bool
 
 	Our   Side
 	Their Side
@@ -66,7 +69,7 @@ type Side struct {
 	payments.SignedSemiChannel
 }
 
-func NewSide(channelId []byte, seqno uint64) Side {
+func NewSide(channelId []byte, seqno, counterpartySeqno uint64) Side {
 	return Side{
 		SignedSemiChannel: payments.SignedSemiChannel{
 			Signature: payments.Signature{
@@ -76,6 +79,11 @@ func NewSide(channelId []byte, seqno uint64) Side {
 				ChannelID: channelId,
 				Data: payments.SemiChannelBody{
 					Seqno:        seqno,
+					Sent:         tlb.ZeroCoins,
+					Conditionals: cell.NewDict(32),
+				},
+				CounterpartyData: &payments.SemiChannelBody{
+					Seqno:        counterpartySeqno,
 					Sent:         tlb.ZeroCoins,
 					Conditionals: cell.NewDict(32),
 				},

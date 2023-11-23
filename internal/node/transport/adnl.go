@@ -197,10 +197,6 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				return fmt.Errorf("incorrect signature")
 			}
 
-			// if err = s.svc.Authorize(q.Key); err != nil {
-			// 	return fmt.Errorf("not authorized by service: %w", err)
-			// }
-
 			s.mx.Lock()
 			if peer.authKey != nil {
 				// when authenticated with new key, delete old record
@@ -253,6 +249,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				return fmt.Errorf("failed to parse channel state")
 			}
 
+			var updCell *cell.Cell
 			ok := true
 			reason := ""
 			updateProof, err := s.svc.ProcessAction(ctx, peer.authKey,
@@ -260,11 +257,10 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			if err != nil {
 				reason = err.Error()
 				ok = false
-			}
-
-			updCell, err := tlb.ToCell(updateProof)
-			if err != nil {
-				return fmt.Errorf("failed to serialize state cell: %w", err)
+			} else {
+				if updCell, err = tlb.ToCell(updateProof); err != nil {
+					return fmt.Errorf("failed to serialize state cell: %w", err)
+				}
 			}
 
 			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, ProposalDecision{Agreed: ok, Reason: reason, SignedState: updCell}); err != nil {
@@ -449,6 +445,13 @@ func (s *Server) doQuery(ctx context.Context, theirKey []byte, req, resp tl.Seri
 	peer, err := s.preparePeer(ctx, theirKey)
 	if err != nil {
 		return fmt.Errorf("failed to prepare peer: %w", err)
+	}
+
+	var cancel func()
+	dl, ok := ctx.Deadline()
+	if !ok || dl.After(time.Now().Add(7*time.Second)) {
+		ctx, cancel = context.WithTimeout(ctx, 7*time.Second)
+		defer cancel()
 	}
 
 	tm := time.Now()
