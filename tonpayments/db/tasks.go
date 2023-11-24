@@ -75,7 +75,6 @@ type RemoveVirtualTask struct {
 }
 
 type DeployInboundTask struct {
-	ID            []byte
 	Key           []byte
 	Capacity      string
 	WalletAddress string

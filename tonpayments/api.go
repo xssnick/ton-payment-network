@@ -1,6 +1,7 @@
 package tonpayments
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -18,33 +19,57 @@ import (
 	"time"
 )
 
-func (s *Service) GetActiveChannelsWithNode(ctx context.Context, nodeKey ed25519.PublicKey) ([]string, error) {
-	list, err := s.db.GetActiveChannelsWithKey(ctx, nodeKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get channels: %w", err)
-	}
-
-	var addresses []string
-	for _, channel := range list {
-		addresses = append(addresses, channel.Address)
-	}
-	return addresses, nil
-}
-
-func (s *Service) DeployChannelWithNode(ctx context.Context, channelId []byte, nodeKey ed25519.PublicKey, capacity tlb.Coins) (*address.Address, error) {
+func (s *Service) DeployChannelWithNode(ctx context.Context, capacity tlb.Coins, nodeKey ed25519.PublicKey) (*address.Address, error) {
 	cfg, err := s.transport.GetChannelConfig(ctx, nodeKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get channel config: %w", err)
 	}
 
 	log.Info().Msg("starting channel deploy")
-	return s.deployChannelWithNode(ctx, channelId, nodeKey, address.NewAddress(0, 0, cfg.WalletAddr), capacity)
+	return s.deployChannelWithNode(ctx, nodeKey, address.NewAddress(0, 0, cfg.WalletAddr), capacity)
 }
 
-func (s *Service) deployChannelWithNode(ctx context.Context, channelId []byte, nodeKey ed25519.PublicKey, nodeAddr *address.Address, capacity tlb.Coins) (*address.Address, error) {
+func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, nodeAddr *address.Address, capacity tlb.Coins) (*address.Address, error) {
+	channelId := make([]byte, 16)
+	copy(channelId, nodeKey[:15])
+
+	channels, err := s.db.GetChannelsWithKey(ctx, nodeKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get channels: %w", err)
+	}
+
+	used := make([][]byte, 0, len(channels))
+	for _, ch := range channels {
+		if ch.Status != db.ChannelStateInactive {
+			used = append(used, ch.ID)
+		}
+	}
+
+	// find free channel id
+	found := false
+	for i := 0; i < 256; i++ {
+		exists := false
+		for _, chId := range used {
+			if bytes.Equal(chId, channelId) {
+				exists = true
+				break
+			}
+		}
+
+		if !exists {
+			found = true
+			break
+		}
+		channelId[15]++
+	}
+
+	if !found {
+		return nil, fmt.Errorf("too many channels are already open")
+	}
+
 	body, code, data, err := s.contractMaker.GetDeployAsyncChannelParams(channelId, true, capacity, s.key, nodeKey, s.closingConfig, payments.PaymentConfig{
 		ExcessFee: s.excessFee,
-		DestA:     s.wallet.Address(),
+		DestA:     s.wallet.WalletAddress(),
 		DestB:     nodeAddr,
 	})
 	if err != nil {
@@ -67,17 +92,16 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 		return fmt.Errorf("chain is empty")
 	}
 
-	channels, err := s.GetActiveChannelsWithNode(ctx, with)
+	channels, err := s.db.GetChannelsWithKey(ctx, with)
 	if err != nil {
 		return fmt.Errorf("failed to get active channels: %w", err)
 	}
 
 	needAmount := new(big.Int).Add(vch.Fee, vch.Capacity)
 	var channel *db.Channel
-	for _, channelAddr := range channels {
-		ch, err := s.GetActiveChannel(channelAddr)
-		if err != nil {
-			return fmt.Errorf("failed to get channel: %w", err)
+	for _, ch := range channels {
+		if ch.Status != db.ChannelStateActive {
+			continue
 		}
 
 		balance, err := ch.CalcBalance(false)

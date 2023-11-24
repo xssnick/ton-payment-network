@@ -90,7 +90,7 @@ func (d *DB) GetChannel(ctx context.Context, addr string) (*db.Channel, error) {
 	return channel, nil
 }
 
-func (d *DB) GetActiveChannelsWithKey(ctx context.Context, key ed25519.PublicKey) ([]*db.Channel, error) {
+func (d *DB) GetChannelsWithKey(ctx context.Context, key ed25519.PublicKey) ([]*db.Channel, error) {
 	tx := d.getExecutor(ctx)
 
 	iter := tx.NewIterator(util.BytesPrefix([]byte("ch:")), nil)
@@ -104,7 +104,7 @@ func (d *DB) GetActiveChannelsWithKey(ctx context.Context, key ed25519.PublicKey
 			return nil, fmt.Errorf("failed to decode json data: %w", err)
 		}
 
-		if channel.Status == db.ChannelStateActive && bytes.Equal(channel.TheirOnchain.Key, key) {
+		if bytes.Equal(channel.TheirOnchain.Key, key) {
 			channels = append(channels, channel)
 		}
 	}

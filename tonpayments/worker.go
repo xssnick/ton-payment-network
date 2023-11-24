@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
-	db2 "github.com/xssnick/ton-payment-network/tonpayments/db"
+	db "github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
@@ -70,7 +70,7 @@ func (s *Service) taskExecutor() {
 
 				switch task.Type {
 				case "exchange-states":
-					var data db2.ChannelTask
+					var data db.ChannelTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -80,7 +80,7 @@ func (s *Service) taskExecutor() {
 						return err
 					}
 				case "increment-state":
-					var data db2.IncrementStatesTask
+					var data db.IncrementStatesTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -89,7 +89,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to increment state with party: %w", err)
 					}
 				case "confirm-close-virtual":
-					var data db2.ConfirmCloseVirtualTask
+					var data db.ConfirmCloseVirtualTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -126,7 +126,7 @@ func (s *Service) taskExecutor() {
 						tryTill := time.Unix(vch.Deadline, 0)
 						if err = s.db.CreateTask(ctx, "close-next-virtual", meta.FromChannelAddress,
 							"close-next-"+hex.EncodeToString(data.VirtualKey),
-							db2.CloseNextVirtualTask{
+							db.CloseNextVirtualTask{
 								VirtualKey: data.VirtualKey,
 								State:      vStateCell.ToBOC(),
 							}, nil, &tryTill,
@@ -143,7 +143,7 @@ func (s *Service) taskExecutor() {
 						}
 					}
 				case "close-next-virtual":
-					var data db2.CloseNextVirtualTask
+					var data db.CloseNextVirtualTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -164,18 +164,18 @@ func (s *Service) taskExecutor() {
 
 					return nil
 				case "open-virtual":
-					var data db2.OpenVirtualTask
+					var data db.OpenVirtualTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					if err = s.db.CreateVirtualChannelMeta(ctx, &db2.VirtualChannelMeta{
+					if err = s.db.CreateVirtualChannelMeta(ctx, &db.VirtualChannelMeta{
 						Key:                data.VirtualKey,
 						Active:             true,
 						FromChannelAddress: data.PrevChannelAddress,
 						ToChannelAddress:   data.ChannelAddress,
 						CreatedAt:          time.Now(),
-					}); err != nil && !errors.Is(err, db2.ErrAlreadyExists) {
+					}); err != nil && !errors.Is(err, db.ErrAlreadyExists) {
 						return fmt.Errorf("failed to create virtual channel meta: %w", err)
 					}
 
@@ -211,7 +211,7 @@ func (s *Service) taskExecutor() {
 									// and notify previous party that we are ready to release locked coins.
 									err = s.db.CreateTask(ctx, "ask-remove-virtual", data.PrevChannelAddress,
 										"ask-remove-virtual-"+hex.EncodeToString(data.VirtualKey),
-										db2.AskRemoveVirtualTask{
+										db.AskRemoveVirtualTask{
 											ChannelAddress: data.PrevChannelAddress,
 											Key:            data.VirtualKey,
 										}, nil, &tryTill,
@@ -236,7 +236,7 @@ func (s *Service) taskExecutor() {
 						Str("target", data.ChannelAddress).
 						Msg("channel successfully tunnelled through us")
 				case "ask-remove-virtual":
-					var data db2.AskRemoveVirtualTask
+					var data db.AskRemoveVirtualTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -248,7 +248,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("request to remove virtual action failed: %w", err)
 					}
 				case "remove-virtual":
-					var data db2.RemoveVirtualTask
+					var data db.RemoveVirtualTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -271,7 +271,7 @@ func (s *Service) taskExecutor() {
 							// in case we will not be able to communicate with party
 							if err = s.db.CreateTask(ctx, "uncooperative-close", meta.ToChannelAddress+"-uncoop",
 								"uncooperative-close-"+meta.ToChannelAddress+"-vc-"+hex.EncodeToString(data.Key),
-								db2.ChannelUncooperativeCloseTask{
+								db.ChannelUncooperativeCloseTask{
 									Address:                 meta.ToChannelAddress,
 									CheckVirtualStillExists: data.Key,
 								}, &uncooperativeAfter, nil,
@@ -311,7 +311,7 @@ func (s *Service) taskExecutor() {
 						// and notify previous party that we are ready to release locked coins.
 						err = s.db.CreateTask(ctx, "ask-remove-virtual", meta.FromChannelAddress,
 							"ask-remove-virtual-"+hex.EncodeToString(data.Key),
-							db2.AskRemoveVirtualTask{
+							db.AskRemoveVirtualTask{
 								ChannelAddress: meta.FromChannelAddress,
 								Key:            data.Key,
 							}, nil, &tryTill,
@@ -321,7 +321,7 @@ func (s *Service) taskExecutor() {
 						}
 					}
 				case "cooperative-close":
-					var data db2.ChannelCooperativeCloseTask
+					var data db.ChannelCooperativeCloseTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -336,7 +336,7 @@ func (s *Service) taskExecutor() {
 						return nil
 					}
 
-					if ch.Status != db2.ChannelStateActive {
+					if ch.Status != db.ChannelStateActive {
 						return nil
 					}
 
@@ -348,7 +348,7 @@ func (s *Service) taskExecutor() {
 					after := time.Now().Add(3 * time.Minute)
 					if err = s.db.CreateTask(context.Background(), "uncooperative-close", ch.Address+"-uncoop",
 						"uncooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
-						db2.ChannelUncooperativeCloseTask{
+						db.ChannelUncooperativeCloseTask{
 							Address:            ch.Address,
 							ChannelInitiatedAt: &ch.InitAt,
 						}, &after, nil,
@@ -364,7 +364,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to request action from the node: %w", err)
 					}
 				case "uncooperative-close":
-					var data db2.ChannelUncooperativeCloseTask
+					var data db.ChannelUncooperativeCloseTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -374,7 +374,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to get channel: %w", err)
 					}
 
-					if channel.Status != db2.ChannelStateActive {
+					if channel.Status != db.ChannelStateActive {
 						return nil
 					}
 
@@ -401,7 +401,7 @@ func (s *Service) taskExecutor() {
 						return err
 					}
 				case "challenge":
-					var data db2.ChannelTask
+					var data db.ChannelTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -414,7 +414,7 @@ func (s *Service) taskExecutor() {
 						return err
 					}
 				case "settle":
-					var data db2.ChannelTask
+					var data db.ChannelTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -427,7 +427,7 @@ func (s *Service) taskExecutor() {
 						return err
 					}
 				case "finalize":
-					var data db2.ChannelTask
+					var data db.ChannelTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
@@ -437,13 +437,13 @@ func (s *Service) taskExecutor() {
 						return err
 					}
 				case "deploy-inbound":
-					var data db2.DeployInboundTask
+					var data db.DeployInboundTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
 					capacity, _ := new(big.Int).SetString(data.Capacity, 10)
-					addr, err := s.deployChannelWithNode(context.Background(), data.ID, data.Key, address.MustParseAddr(data.WalletAddress), tlb.FromNanoTON(capacity))
+					addr, err := s.deployChannelWithNode(context.Background(), data.Key, address.MustParseAddr(data.WalletAddress), tlb.FromNanoTON(capacity))
 					if err != nil {
 						return fmt.Errorf("deploy of requested channel is failed: %w", err)
 					}

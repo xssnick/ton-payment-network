@@ -298,7 +298,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 				return nil, fmt.Errorf("min fee to open channel is %s TON", s.virtualChannelFee.String())
 			}
 
-			targetChannels, err := s.db.GetActiveChannelsWithKey(context.Background(), currentInstruction.NextTarget)
+			targetChannels, err := s.db.GetChannelsWithKey(context.Background(), currentInstruction.NextTarget)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get target channel: %w", err)
 			}
@@ -310,6 +310,10 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 
 			var target *db.Channel
 			for _, targetChannel := range targetChannels {
+				if targetChannel.Status != db.ChannelStateActive {
+					continue
+				}
+
 				balance, err := targetChannel.CalcBalance(false)
 				if err != nil {
 					return nil, fmt.Errorf("failed to calc our channel %s balance: %w", targetChannel.Address, err)
@@ -437,28 +441,27 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 }
 
 func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *big.Int, walletAddr *address.Address, key ed25519.PublicKey) error {
-	if capacity.Cmp(s.maxOutboundCapacity.Nano()) == 1 {
-		return fmt.Errorf("")
-	}
-
-	list, err := s.db.GetActiveChannelsWithKey(context.Background(), key)
+	list, err := s.db.GetChannelsWithKey(context.Background(), key)
 	if err != nil {
 		return fmt.Errorf("failed to get active channels: %w", err)
 	}
 
+	usedCapacity := new(big.Int).Set(capacity)
 	for _, channel := range list {
-		if channel.OurOnchain.Deposited.Sign() == 1 {
-			// TODO: respond with its address
-			return fmt.Errorf("inbound channel already opened")
+		if channel.Status != db.ChannelStateInactive {
+			usedCapacity.Add(usedCapacity, channel.OurOnchain.Deposited)
 		}
 	}
 
-	id := key[:16]
+	if usedCapacity.Cmp(s.maxOutboundCapacity.Nano()) == 1 {
+		return fmt.Errorf("maximum outbound capacity reached")
+	}
+
+	// TODO: also check inside task to not allow ddos
 
 	if err = s.db.CreateTask(ctx, "deploy-inbound", walletAddr.String(),
-		"deploy-inbound-"+hex.EncodeToString(id)+"-"+time.Now().String(),
+		"deploy-inbound-"+hex.EncodeToString(key)+"-"+fmt.Sprint(time.Now().Unix()/30),
 		db.DeployInboundTask{
-			ID:            id,
 			Key:           key,
 			Capacity:      capacity.String(),
 			WalletAddress: walletAddr.String(),
