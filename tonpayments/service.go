@@ -108,6 +108,10 @@ func (s *Service) GetChannelConfig() transport.ChannelConfig {
 	}
 }
 
+func (s *Service) GetChannelsWithNode(ctx context.Context, key ed25519.PublicKey) ([]*db.Channel, error) {
+	return s.db.GetChannelsWithKey(ctx, key)
+}
+
 func (s *Service) Start() {
 	go s.peerDiscovery()
 	go s.taskExecutor()
