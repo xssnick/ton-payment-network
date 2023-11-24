@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
-	"github.com/xssnick/payment-network/internal/node"
-	"github.com/xssnick/payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/tonpayments"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
@@ -154,7 +154,7 @@ func (v *Scanner) Start(ctx context.Context, ch chan<- any) error {
 				}
 			}
 
-			ch <- node.BlockCheckedEvent{
+			ch <- tonpayments.BlockCheckedEvent{
 				Seqno: master.SeqNo,
 			}
 
@@ -254,7 +254,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, tasks chan accFetchTask, threa
 						return
 					}
 
-					ch <- node.ChannelUpdatedEvent{
+					ch <- tonpayments.ChannelUpdatedEvent{
 						Transaction: tx,
 						Channel:     p,
 					}

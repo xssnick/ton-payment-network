@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/xssnick/payment-network/internal/node"
-	"github.com/xssnick/payment-network/internal/node/chain"
-	"github.com/xssnick/payment-network/internal/node/db"
-	"github.com/xssnick/payment-network/internal/node/db/filedb"
-	"github.com/xssnick/payment-network/internal/node/transport"
-	"github.com/xssnick/payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/tonpayments"
+	"github.com/xssnick/ton-payment-network/tonpayments/chain"
+	"github.com/xssnick/ton-payment-network/tonpayments/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/db/leveldb"
+	transport2 "github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/liteclient"
@@ -117,11 +117,16 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 		}
 	}
 
-	fdb := filedb.NewFileDB("./db/" + name)
-	tr := transport.NewServer(dhtClient, gate, key, channelKey, isServer)
+	fdb, err := leveldb.NewDB("./db/" + name)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to init leveldb")
+		return
+	}
+
+	tr := transport2.NewServer(dhtClient, gate, key, channelKey, isServer)
 
 	var seqno uint32
-	if bo, err := fdb.GetBlockOffset(); err != nil {
+	if bo, err := fdb.GetBlockOffset(context.Background()); err != nil {
 		if !errors.Is(err, db.ErrNotFound) {
 			log.Fatal().Err(err).Msg("failed to load block offset")
 			return
@@ -139,12 +144,12 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 		log.Fatal().Err(err).Msg("failed to init wallet")
 		return
 	}
-	log.Info().Str("addr", w.Address().String()).Msg("wallet initialized")
+	log.Info().Str("addr", w.WalletAddress().String()).Msg("wallet initialized")
 
-	svc := node.NewService(api, fdb, tr, w, inv, channelKey, 5*time.Minute, payments.ClosingConfig{
-		QuarantineDuration:       60,
+	svc := tonpayments.NewService(api, fdb, tr, w, inv, channelKey, payments.ClosingConfig{
+		QuarantineDuration:       600,
 		MisbehaviorFine:          tlb.MustFromTON("0.015"),
-		ConditionalCloseDuration: 60,
+		ConditionalCloseDuration: 180,
 	})
 	tr.SetService(svc)
 
@@ -167,7 +172,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					println("failed to coop close channel:", err.Error())
 					continue
 				}
-				println("CHANNEL COOP CLOSED")
+				println("CHANNEL COOP CLOSE REQUESTED")
 			case "sign":
 				println("Channel private key:")
 				var strKey string
@@ -239,7 +244,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					println("failed to close channel:", err.Error())
 					continue
 				}
-				println("VIRTUAL CHANNEL CLOSED")
+				println("VIRTUAL CHANNEL CLOSE REQUESTED")
 			case "deploy_out":
 				println("With node key:")
 				var strKey string
@@ -340,32 +345,37 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				var tunChain []transport.TunnelChainPart
+				var tunChain []transport2.TunnelChainPart
 				for i, parsedKey := range parsedKeys {
-					tunChain = append(tunChain, transport.TunnelChainPart{
+					fee := big.NewInt(0)
+					if len(parsedKeys)-i > 1 {
+						fee = new(big.Int).Mul(tlb.MustFromTON("0.01").Nano(), big.NewInt(int64(len(parsedKeys)-i)-1))
+					}
+
+					tunChain = append(tunChain, transport2.TunnelChainPart{
 						Target:   parsedKey,
 						Capacity: amt.Nano(),
-						Fee:      new(big.Int).Mul(tlb.MustFromTON("0.01").Nano(), big.NewInt(int64(len(parsedKeys)-i))),
+						Fee:      fee,
 						Deadline: time.Now().Add(1*time.Hour + (30*time.Minute)*time.Duration(len(parsedKeys)-i)),
 					})
 				}
 
 				vPub, vPriv, _ := ed25519.GenerateKey(nil)
-				vc, tun, err := transport.GenerateTunnel(vPub, tunChain, 5)
+				vc, firstInstructionKey, tun, err := transport2.GenerateTunnel(vPub, tunChain, 5)
 				if err != nil {
 					println("failed to generate tunnel:", err.Error())
 					continue
 				}
 
 				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-				err = svc.OpenVirtualChannel(ctx, with, vPriv, tun, vc)
+				err = svc.OpenVirtualChannel(ctx, with, firstInstructionKey, vPriv, tun, vc)
 				cancel()
 				if err != nil {
 					log.Error().Err(err).Msg("failed to open virtual channel with node")
 					continue
 				}
 
-				println("VIRTUAL CHANNEL IS OPEN, PRIV KEY:", hex.EncodeToString(vPriv.Seed()))
+				println("VIRTUAL CHANNEL OPENING REQUESTED, PRIVATE KEY:", hex.EncodeToString(vPriv.Seed()))
 			default:
 				println("UNKNOWN COMMAND " + cmd)
 			}

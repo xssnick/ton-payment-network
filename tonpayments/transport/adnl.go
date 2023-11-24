@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/rs/zerolog/log"
-	"github.com/xssnick/payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
@@ -32,7 +32,7 @@ type PeerConnection struct {
 
 type Service interface {
 	GetChannelConfig() ChannelConfig
-	ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action) error
+	ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action) (*payments.SignedSemiChannel, error)
 	ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action Action) error
 	ProcessInboundChannelRequest(ctx context.Context, capacity *big.Int, walletAddr *address.Address, key ed25519.PublicKey) error
 }
@@ -197,10 +197,6 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				return fmt.Errorf("incorrect signature")
 			}
 
-			// if err = s.svc.Authorize(q.Key); err != nil {
-			// 	return fmt.Errorf("not authorized by service: %w", err)
-			// }
-
 			s.mx.Lock()
 			if peer.authKey != nil {
 				// when authenticated with new key, delete old record
@@ -253,15 +249,21 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				return fmt.Errorf("failed to parse channel state")
 			}
 
+			var updCell *cell.Cell
 			ok := true
 			reason := ""
-			if err := s.svc.ProcessAction(ctx, peer.authKey,
-				address.NewAddress(0, 0, q.ChannelAddr), state, q.Action); err != nil {
+			updateProof, err := s.svc.ProcessAction(ctx, peer.authKey,
+				address.NewAddress(0, 0, q.ChannelAddr), state, q.Action)
+			if err != nil {
 				reason = err.Error()
 				ok = false
+			} else {
+				if updCell, err = tlb.ToCell(updateProof); err != nil {
+					return fmt.Errorf("failed to serialize state cell: %w", err)
+				}
 			}
 
-			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Decision{Agreed: ok, Reason: reason}); err != nil {
+			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, ProposalDecision{Agreed: ok, Reason: reason, SignedState: updCell}); err != nil {
 				return err
 			}
 		case RequestAction:
@@ -401,8 +403,8 @@ func (s *Server) GetChannelConfig(ctx context.Context, theirChannelKey ed25519.P
 	return &res, nil
 }
 
-func (s *Server) ProposeAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, state *cell.Cell, action Action) (*Decision, error) {
-	var res Decision
+func (s *Server) ProposeAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, state *cell.Cell, action Action) (*ProposalDecision, error) {
+	var res ProposalDecision
 	err := s.doQuery(ctx, theirChannelKey, ProposeAction{
 		ChannelAddr: channelAddr.Data(),
 		Action:      action,
@@ -443,6 +445,13 @@ func (s *Server) doQuery(ctx context.Context, theirKey []byte, req, resp tl.Seri
 	peer, err := s.preparePeer(ctx, theirKey)
 	if err != nil {
 		return fmt.Errorf("failed to prepare peer: %w", err)
+	}
+
+	var cancel func()
+	dl, ok := ctx.Deadline()
+	if !ok || dl.After(time.Now().Add(7*time.Second)) {
+		ctx, cancel = context.WithTimeout(ctx, 7*time.Second)
+		defer cancel()
 	}
 
 	tm := time.Now()
