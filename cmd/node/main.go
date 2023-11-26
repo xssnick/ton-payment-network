@@ -270,8 +270,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				chId := sha256.Sum256([]byte("default"))
-				addr, err := svc.DeployChannelWithNode(context.Background(), chId[:16], btsKey, amt)
+				addr, err := svc.DeployChannelWithNode(context.Background(), amt, btsKey)
 				if err != nil {
 					log.Error().Err(err).Msg("failed to deploy channel with node")
 					continue

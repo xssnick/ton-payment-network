@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -372,6 +373,10 @@ func (s *Server) auth(ctx context.Context, peer *PeerConnection) error {
 }
 
 func (s *Server) preparePeer(ctx context.Context, key []byte) (peer *PeerConnection, err error) {
+	if bytes.Equal(key, s.channelKey.Public().(ed25519.PublicKey)) {
+		return nil, fmt.Errorf("cannot connect to ourself")
+	}
+
 	s.mx.RLock()
 	peer = s.peersByKey[string(key)]
 	s.mx.RUnlock()
