@@ -69,6 +69,8 @@ type Side struct {
 	payments.SignedSemiChannel
 }
 
+var ErrNewerStateIsKnown = errors.New("newer state is already known")
+
 func NewSide(channelId []byte, seqno, counterpartySeqno uint64) Side {
 	return Side{
 		SignedSemiChannel: payments.SignedSemiChannel{
@@ -221,7 +223,7 @@ func (ch *VirtualChannelMeta) AddKnownResolve(key ed25519.PublicKey, state *paym
 		}
 
 		if oldState.Amount.Nano().Cmp(state.Amount.Nano()) == 1 {
-			return fmt.Errorf("newer state is already known")
+			return ErrNewerStateIsKnown
 		}
 	}
 

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
-	db "github.com/xssnick/ton-payment-network/tonpayments/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
@@ -94,14 +94,19 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					vStateCell, err := cell.FromBOC(data.State)
-					if err != nil {
-						return fmt.Errorf("failed parse state boc: %w", err)
-					}
-
 					meta, err := s.db.GetVirtualChannelMeta(ctx, data.VirtualKey)
 					if err != nil {
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
+					}
+
+					resolve := meta.GetKnownResolve(data.VirtualKey)
+					if resolve == nil {
+						return fmt.Errorf("failed to load virtual channel resolve: %w", err)
+					}
+
+					state, err := tlb.ToCell(resolve)
+					if err != nil {
+						return fmt.Errorf("failed to serialize virtual channel resolve: %w", err)
 					}
 
 					if meta.FromChannelAddress != "" {
@@ -117,7 +122,7 @@ func (s *Service) taskExecutor() {
 
 						err = s.proposeAction(ctx, meta.ToChannelAddress, transport.ConfirmCloseAction{
 							Key:   data.VirtualKey,
-							State: vStateCell,
+							State: state,
 						}, nil)
 						if err != nil {
 							return fmt.Errorf("failed to propose action: %w", err)
@@ -128,7 +133,7 @@ func (s *Service) taskExecutor() {
 							"close-next-"+hex.EncodeToString(data.VirtualKey),
 							db.CloseNextVirtualTask{
 								VirtualKey: data.VirtualKey,
-								State:      vStateCell.ToBOC(),
+								State:      state.ToBOC(),
 							}, nil, &tryTill,
 						); err != nil {
 							return fmt.Errorf("failed to create close-next-virtual task: %w", err)
@@ -136,7 +141,7 @@ func (s *Service) taskExecutor() {
 					} else {
 						err = s.proposeAction(ctx, meta.ToChannelAddress, transport.ConfirmCloseAction{
 							Key:   data.VirtualKey,
-							State: vStateCell,
+							State: state,
 						}, nil)
 						if err != nil {
 							return fmt.Errorf("failed to propose action: %w", err)
@@ -158,7 +163,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to load virtual channel state cell: %w", err)
 					}
 
-					if err = s.CloseVirtualChannel(ctx, data.VirtualKey, vState); err != nil {
+					if err = s.CloseVirtualChannel(ctx, data.VirtualKey); err != nil {
 						return fmt.Errorf("failed to request virtual channel close: %w", err)
 					}
 

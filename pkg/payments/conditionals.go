@@ -21,6 +21,11 @@ type VirtualChannelState struct {
 	Amount    tlb.Coins
 }
 
+type Payment struct {
+	Key   []byte              `tlb:"bits 256"`
+	State VirtualChannelState `tlb:"^"`
+}
+
 var virtualChannelStaticCode = func() *cell.Cell {
 	// compiled using FunC code:
 	/*
@@ -209,7 +214,7 @@ func readIntOP(code *cell.Slice) (*big.Int, error) {
 	return nil, fmt.Errorf("incorrect opcode")
 }
 
-func (c *VirtualChannelState) ToCell() (*cell.Cell, error) {
+func (c VirtualChannelState) ToCell() (*cell.Cell, error) {
 	if len(c.Signature) != 64 {
 		return nil, fmt.Errorf("icorrect signature size")
 	}

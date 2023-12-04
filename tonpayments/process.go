@@ -36,6 +36,9 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 
 	channel, err := s.getVerifiedChannel(channelAddr.String())
 	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			// TODO: check channel onchain (async)
+		}
 		return nil, err
 	}
 
@@ -82,7 +85,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 		toExecute = func(ctx context.Context) error {
 			if data.WantResponse {
 				err = s.db.CreateTask(ctx, "increment-state", channel.Address,
-					"increment-state-"+fmt.Sprint(channel.Our.State.Data.Seqno),
+					"increment-state-"+channel.Address+"-"+fmt.Sprint(channel.Our.State.Data.Seqno),
 					db.IncrementStatesTask{
 						ChannelAddress: channel.Address,
 						WantResponse:   false,
@@ -538,15 +541,23 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return fmt.Errorf("virtual channel is expired")
 		}
 
-		tryTill := time.Unix(vch.Deadline+(channel.SafeOnchainClosePeriod/2), 0)
-		if err = s.db.CreateTask(context.Background(), "confirm-close-virtual", channel.Address,
-			"confirm-close-virtual-"+hex.EncodeToString(vch.Key),
-			db.ConfirmCloseVirtualTask{
-				VirtualKey: data.Key,
-				State:      data.State.ToBOC(),
-			}, nil, &tryTill,
-		); err != nil {
-			return fmt.Errorf("failed to create confirm-close-virtual task: %w", err)
+		if err = s.db.Transaction(context.Background(), func(ctx context.Context) error {
+			if err = s.AddVirtualChannelResolve(ctx, vch.Key, vState); err != nil {
+				return fmt.Errorf("failed to add virtual channel resolve: %w", err)
+			}
+
+			tryTill := time.Unix(vch.Deadline+(channel.SafeOnchainClosePeriod/2), 0)
+			if err = s.db.CreateTask(ctx, "confirm-close-virtual", channel.Address,
+				"confirm-close-virtual-"+hex.EncodeToString(vch.Key),
+				db.ConfirmCloseVirtualTask{
+					VirtualKey: data.Key,
+				}, nil, &tryTill,
+			); err != nil {
+				return fmt.Errorf("failed to create confirm-close-virtual task: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	case transport.CooperativeCloseAction:
 		var req payments.CooperativeClose
