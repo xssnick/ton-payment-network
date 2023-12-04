@@ -19,6 +19,8 @@ import (
 	"time"
 )
 
+var ErrNoResolveExists = errors.New("cannot close channel without known state")
+
 func (s *Service) DeployChannelWithNode(ctx context.Context, capacity tlb.Coins, nodeKey ed25519.PublicKey) (*address.Address, error) {
 	cfg, err := s.transport.GetChannelConfig(ctx, nodeKey)
 	if err != nil {
@@ -62,6 +64,7 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		}
 		channelId[15]++
 	}
+	println("CH ID", hex.EncodeToString(channelId[0:]))
 
 	if !found {
 		return nil, fmt.Errorf("too many channels are already open")
@@ -148,11 +151,28 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 	return nil
 }
 
-func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error {
-	if !state.Verify(virtualKey) {
-		return fmt.Errorf("incorrect state signature")
+func (s *Service) GetVirtualChannelResolveAmount(ctx context.Context, virtualKey ed25519.PublicKey) (tlb.Coins, error) {
+	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return tlb.Coins{}, fmt.Errorf("virtual channel is not exists")
+		}
+		return tlb.Coins{}, fmt.Errorf("failed to load virtual channel meta: %w", err)
 	}
 
+	if !meta.Active {
+		return tlb.Coins{}, fmt.Errorf("virtual channel is inactive")
+	}
+
+	resolve := meta.GetKnownResolve(virtualKey)
+	if resolve == nil {
+		return tlb.Coins{}, ErrNoResolveExists
+	}
+
+	return resolve.Amount, nil
+}
+
+func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error {
 	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -180,12 +200,60 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		return fmt.Errorf("failed to find virtual channel: %w", err)
 	}
 
+	if vch.Deadline < time.Now().Unix() {
+		return fmt.Errorf("virtual channel has expired")
+	}
+
 	if state.Amount.Nano().Cmp(vch.Capacity) == 1 {
 		return fmt.Errorf("amount cannot be > capacity")
 	}
 
-	if vch.Deadline < time.Now().Unix() {
-		return fmt.Errorf("virtual channel has expired")
+	if !meta.Active {
+		return fmt.Errorf("virtual channel is inactive")
+	}
+
+	if err = meta.AddKnownResolve(vch.Key, &state); err != nil {
+		return fmt.Errorf("failed to add channel condition resolve: %w", err)
+	}
+
+	if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
+		return fmt.Errorf("failed to update channel in db: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey) error {
+	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return fmt.Errorf("virtual channel is not exists")
+		}
+		return fmt.Errorf("failed to load virtual channel meta: %w", err)
+	}
+
+	ch, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return fmt.Errorf("onchain channel with source not exists")
+		}
+		return fmt.Errorf("failed to load channel: %w", err)
+	}
+
+	_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
+	if err != nil {
+		if errors.Is(err, payments.ErrNotFound) {
+			// idempotency
+			return nil
+		}
+
+		log.Error().Err(err).Str("channel", ch.Address).Msg("failed to find virtual channel")
+		return fmt.Errorf("failed to find virtual channel: %w", err)
+	}
+
+	state := meta.GetKnownResolve(vch.Key)
+	if state == nil {
+		return ErrNoResolveExists
 	}
 
 	stateCell, err := state.ToCell()
@@ -193,9 +261,6 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		return fmt.Errorf("failed to serialize state to cell: %w", err)
 	}
 
-	if err = meta.AddKnownResolve(vch.Key, &state); err != nil {
-		return fmt.Errorf("failed to add channel condition resolve: %w", err)
-	}
 	meta.ReadyToReleaseCoins = true
 	if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 		return fmt.Errorf("failed to update channel in db: %w", err)

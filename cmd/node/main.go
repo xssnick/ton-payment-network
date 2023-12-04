@@ -239,7 +239,13 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				err = svc.CloseVirtualChannel(context.Background(), btsState[:32], st)
+				err = svc.AddVirtualChannelResolve(context.Background(), btsState[:32], st)
+				if err != nil {
+					println("failed to add resolve to channel:", err.Error())
+					continue
+				}
+
+				err = svc.CloseVirtualChannel(context.Background(), btsState[:32])
 				if err != nil {
 					println("failed to close channel:", err.Error())
 					continue
