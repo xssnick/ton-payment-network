@@ -20,6 +20,7 @@ import (
 )
 
 var ErrNoResolveExists = errors.New("cannot close channel without known state")
+var ErrResolveNotRequired = errors.New("resolve is not required")
 
 func (s *Service) DeployChannelWithNode(ctx context.Context, capacity tlb.Coins, nodeKey ed25519.PublicKey) (*address.Address, error) {
 	cfg, err := s.transport.GetChannelConfig(ctx, nodeKey)
@@ -181,38 +182,68 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 		return fmt.Errorf("failed to load virtual channel meta: %w", err)
 	}
 
-	ch, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			return fmt.Errorf("onchain channel with source not exists")
-		}
-		return fmt.Errorf("failed to load channel: %w", err)
-	}
-
-	_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
-	if err != nil {
-		if errors.Is(err, payments.ErrNotFound) {
-			// idempotency
-			return nil
+	if meta.FromChannelAddress != "" {
+		ch, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				return fmt.Errorf("onchain channel with source not exists")
+			}
+			return fmt.Errorf("failed to load channel: %w", err)
 		}
 
-		log.Error().Err(err).Str("channel", ch.Address).Msg("failed to find virtual channel")
-		return fmt.Errorf("failed to find virtual channel: %w", err)
-	}
+		_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
+		if err != nil {
+			if errors.Is(err, payments.ErrNotFound) {
+				// idempotency
+				return nil
+			}
 
-	if vch.Deadline < time.Now().Unix() {
-		return fmt.Errorf("virtual channel has expired")
-	}
+			log.Error().Err(err).Str("channel", ch.Address).Msg("failed to find virtual channel")
+			return fmt.Errorf("failed to find virtual channel: %w", err)
+		}
 
-	if state.Amount.Nano().Cmp(vch.Capacity) == 1 {
-		return fmt.Errorf("amount cannot be > capacity")
+		if vch.Deadline < time.Now().Unix() {
+			return fmt.Errorf("virtual channel has expired")
+		}
+
+		if state.Amount.Nano().Cmp(vch.Capacity) == 1 {
+			return fmt.Errorf("amount cannot be > capacity")
+		}
+	} else {
+		// in case we are the final point, check against our channel
+		ch, err := s.db.GetChannel(ctx, meta.ToChannelAddress)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				return fmt.Errorf("onchain channel with target not exists")
+			}
+			return fmt.Errorf("failed to load channel: %w", err)
+		}
+
+		_, vch, err := ch.Our.State.FindVirtualChannel(virtualKey)
+		if err != nil {
+			if errors.Is(err, payments.ErrNotFound) {
+				// idempotency
+				return nil
+			}
+
+			log.Error().Err(err).Str("channel", ch.Address).Msg("failed to find virtual channel")
+			return fmt.Errorf("failed to find virtual channel: %w", err)
+		}
+
+		if vch.Deadline < time.Now().Unix() {
+			return fmt.Errorf("virtual channel has expired")
+		}
+
+		if state.Amount.Nano().Cmp(vch.Capacity) == 1 {
+			return fmt.Errorf("amount cannot be > capacity")
+		}
 	}
 
 	if !meta.Active {
 		return fmt.Errorf("virtual channel is inactive")
 	}
 
-	if err = meta.AddKnownResolve(vch.Key, &state); err != nil {
+	if err = meta.AddKnownResolve(meta.Key, &state); err != nil {
 		return fmt.Errorf("failed to add channel condition resolve: %w", err)
 	}
 
@@ -463,7 +494,7 @@ func (s *Service) StartUncooperativeClose(ctx context.Context, channelAddr strin
 	}
 
 	if och.Status != payments.ChannelStatusOpen {
-		log.Info().Str("address", channel.Address).
+		log.Debug().Str("address", channel.Address).
 			Msg("uncooperative close already started or not required")
 		return nil
 	}

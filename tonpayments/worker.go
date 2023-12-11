@@ -17,35 +17,16 @@ import (
 	"time"
 )
 
-func (s *Service) peerDiscovery() {
-	for {
-		list, err := s.db.GetActiveChannels(context.Background())
-		if err != nil {
-			log.Error().Err(err).Msg("failed to get active channels from db")
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		keys := map[string][]byte{}
-		// get distinct keys to try to connect with them
-		for _, v := range list {
-			keys[string(v.TheirOnchain.Key)] = v.TheirOnchain.Key
-		}
-
-		for _, k := range keys {
-			go func(key []byte) {
-				// ping
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_, err := s.transport.GetChannelConfig(ctx, key)
-				cancel()
-				if err != nil {
-					log.Debug().Err(err).Hex("key", key).Msg("failed to connect with peer")
-					return
-				}
-			}(k)
-		}
-		time.Sleep(30 * time.Second)
+func (s *Service) addPeersForChannels() error {
+	list, err := s.db.GetActiveChannels(context.Background())
+	if err != nil {
+		return err
 	}
+
+	for _, v := range list {
+		s.transport.AddUrgentPeer(v.TheirOnchain.Key)
+	}
+	return nil
 }
 
 func (s *Service) taskExecutor() {
@@ -333,15 +314,15 @@ func (s *Service) taskExecutor() {
 
 					req, ch, err := s.getCooperativeCloseRequest(data.Address, nil)
 					if err != nil {
+						if errors.Is(err, ErrNotActive) {
+							// expected channel already closed
+							return nil
+						}
 						return fmt.Errorf("failed to prepare close channel request: %w", err)
 					}
 
 					if ch.InitAt.Before(data.ChannelInitiatedAt) {
 						// expected channel already closed
-						return nil
-					}
-
-					if ch.Status != db.ChannelStateActive {
 						return nil
 					}
 
