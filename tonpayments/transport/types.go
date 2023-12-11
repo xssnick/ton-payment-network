@@ -17,6 +17,9 @@ import (
 )
 
 func init() {
+	tl.Register(Ping{}, "payments.ping value:long = payments.Ping")
+	tl.Register(Pong{}, "payments.pong value:long = payments.Pong")
+
 	tl.Register(Decision{}, "payments.decision agreed:Bool reason:string = payments.Decision")
 	tl.Register(ProposalDecision{}, "payments.proposalDecision agreed:Bool reason:string signedState:bytes = payments.ProposalDecision")
 	tl.Register(ChannelConfig{}, "payments.channelConfig excessFee:bytes walletAddr:int256 quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.ChannelConfig")
@@ -47,6 +50,16 @@ type Action any
 // NodeAddress - DHT record value which stores adnl addr related to node's public key used for channels
 type NodeAddress struct {
 	ADNLAddr []byte `tl:"int256"`
+}
+
+// Ping - check connection is alive and delay
+type Ping struct {
+	Value int64 `tl:"long"`
+}
+
+// Pong - response on check connection is alive
+type Pong struct {
+	Value int64 `tl:"long"`
 }
 
 // Authenticate - auth with both sides adnl ids signature, to establish connection

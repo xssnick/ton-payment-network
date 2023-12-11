@@ -16,6 +16,7 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -50,17 +51,20 @@ type Server struct {
 	peers      map[string]*PeerConnection
 	mx         sync.RWMutex
 
+	urgentPeers map[string]func()
+
 	closer func()
 }
 
 func NewServer(dht *dht.Client, gate *adnl.Gateway, key, channelKey ed25519.PrivateKey, serverMode bool) *Server {
 	s := &Server{
-		channelKey: channelKey,
-		key:        key,
-		dht:        dht,
-		gate:       gate,
-		peersByKey: map[string]*PeerConnection{},
-		peers:      map[string]*PeerConnection{},
+		channelKey:  channelKey,
+		key:         key,
+		dht:         dht,
+		gate:        gate,
+		peersByKey:  map[string]*PeerConnection{},
+		peers:       map[string]*PeerConnection{},
+		urgentPeers: map[string]func(){},
 	}
 	s.closeCtx, s.closer = context.WithCancel(context.Background())
 	s.gate.SetConnectionHandler(s.bootstrapPeerWrap)
@@ -229,6 +233,10 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, s.svc.GetChannelConfig()); err != nil {
 				return err
 			}
+		case Ping:
+			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Pong{Value: q.Value}); err != nil {
+				return err
+			}
 		case RequestInboundChannel:
 			res := Decision{Agreed: true}
 			err := s.svc.ProcessInboundChannelRequest(ctx, new(big.Int).SetBytes(q.Capacity), address.NewAddress(0, 0, q.Wallet), q.Key)
@@ -285,6 +293,58 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			}
 		}
 		return nil
+	}
+}
+
+func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
+	if s.urgentPeers[string(channelKey)] != nil {
+		// already urgent
+		return
+	}
+
+	peerCtx, cancel := context.WithCancel(s.closeCtx)
+	s.urgentPeers[string(channelKey)] = cancel
+
+	go func() {
+		var wait time.Duration = 0
+		for {
+			select {
+			case <-peerCtx.Done():
+				log.Debug().Hex("key", channelKey).Msg("closing urgent peer")
+				return
+			case <-time.After(wait):
+			}
+
+			start := time.Now()
+
+			var pong Pong
+			ctx, cancel := context.WithTimeout(peerCtx, 10*time.Second)
+			err := s.doQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong)
+			cancel()
+			if err != nil {
+				wait = 3 * time.Second
+				log.Debug().Err(err).Hex("key", channelKey).Msg("failed to ping urgent peer, retrying in 3s")
+				continue
+			}
+
+			wait = 10 * time.Second
+			log.Debug().Hex("key", channelKey).Dur("ping", time.Since(start).Round(time.Millisecond)).Msg("urgent peer successfully pinged")
+		}
+	}()
+}
+
+func (s *Server) RemoveUrgentPeer(channelKey ed25519.PublicKey) {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
+	if fc := s.urgentPeers[string(channelKey)]; fc != nil {
+		delete(s.urgentPeers, string(channelKey))
+		// cancel peer connector
+		fc()
+		return
 	}
 }
 

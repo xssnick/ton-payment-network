@@ -37,7 +37,9 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 	channel, err := s.getVerifiedChannel(channelAddr.String())
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			// TODO: check channel onchain (async)
+			// our party proposed action with channel we don't know,
+			// we will try to find it onchain and register (asynchronously)
+			go s.discoverChannel(channelAddr)
 		}
 		return nil, err
 	}
@@ -576,4 +578,49 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 	}
 
 	return nil
+}
+
+func (s *Service) discoverChannel(channelAddr *address.Address) {
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+
+	block, err := s.ton.CurrentMasterchainInfo(ctx)
+	if err != nil {
+		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get current block")
+		return
+	}
+
+	acc, err := s.ton.GetAccount(ctx, block, channelAddr)
+	if err != nil {
+		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get account")
+		return
+	}
+
+	txList, err := s.ton.ListTransactions(ctx, channelAddr, 1, acc.LastTxLT, acc.LastTxHash)
+	if err != nil {
+		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get tx list")
+		return
+	}
+
+	if len(txList) == 0 {
+		log.Warn().Str("address", channelAddr.String()).Msg("no transactions at requested unknown account")
+		return
+	}
+
+	if txList[0].LT != acc.LastTxLT {
+		log.Warn().Str("address", channelAddr.String()).Msg("incorrect last tx lt at requested unknown account")
+		return
+	}
+
+	ch, err := s.contractMaker.ParseAsyncChannel(channelAddr, acc.Code, acc.Data, true)
+	if err != nil {
+		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to parse channel")
+		return
+	}
+
+	log.Info().Str("address", channelAddr.String()).Msg("proposed previously unknown channel, scheduling force check")
+	s.updates <- ChannelUpdatedEvent{
+		Transaction: txList[0],
+		Channel:     ch,
+	}
 }

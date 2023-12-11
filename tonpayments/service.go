@@ -21,10 +21,13 @@ import (
 	"time"
 )
 
+var ErrNotActive = errors.New("channel is not active")
 var ErrDenied = errors.New("actions denied")
 var ErrNotPossible = errors.New("not possible")
 
 type Transport interface {
+	AddUrgentPeer(channelKey ed25519.PublicKey)
+	RemoveUrgentPeer(channelKey ed25519.PublicKey)
 	GetChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey) (*transport.ChannelConfig, error)
 	RequestAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, action transport.Action) (*transport.Decision, error)
 	ProposeAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, state *cell.Cell, action transport.Action) (*transport.ProposalDecision, error)
@@ -113,7 +116,10 @@ func (s *Service) GetChannelsWithNode(ctx context.Context, key ed25519.PublicKey
 }
 
 func (s *Service) Start() {
-	go s.peerDiscovery()
+	if err := s.addPeersForChannels(); err != nil {
+		log.Error().Err(err).Msg("failed to add urgent peers")
+	}
+
 	go s.taskExecutor()
 
 	for update := range s.updates {
@@ -304,6 +310,8 @@ func (s *Service) Start() {
 					time.Sleep(1 * time.Second)
 					continue
 				}
+
+				s.transport.AddUrgentPeer(channel.TheirOnchain.Key)
 				break
 			}
 		}
@@ -368,7 +376,7 @@ func (s *Service) GetActiveChannel(channelAddr string) (*db.Channel, error) {
 	}
 
 	if channel.Status != db.ChannelStateActive {
-		return nil, fmt.Errorf("channel is not active")
+		return nil, ErrNotActive
 	}
 
 	if !channel.Our.IsReady() || !channel.Their.IsReady() {
