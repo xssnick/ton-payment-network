@@ -67,7 +67,7 @@ func main() {
 
 	// TODO: set secure policy
 	// initialize ton api lite connection wrapper
-	api := ton.NewAPIClient(client, ton.ProofCheckPolicyFast)
+	api := ton.NewAPIClient(client, ton.ProofCheckPolicyFast).WithRetry(2).WithTimeout(5 * time.Second)
 	// api.SetTrustedBlockFromConfig(tonCfg)
 
 	sk := sha256.Sum256([]byte("adnl" + *Name))
