@@ -25,6 +25,7 @@ const (
 
 var ErrAlreadyExists = errors.New("already exists")
 var ErrNotFound = errors.New("not found")
+var ErrChannelBusy = fmt.Errorf("channel is busy")
 
 type VirtualChannelMeta struct {
 	Key                 []byte

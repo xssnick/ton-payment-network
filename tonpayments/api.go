@@ -254,6 +254,23 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 	return nil
 }
 
+func (s *Service) CloseUncooperative(ctx context.Context, addr string) error {
+	channel, err := s.GetActiveChannel(addr)
+	if err != nil {
+		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if err = s.db.CreateTask(ctx, "uncooperative-close", channel.Address+"-uncoop",
+		"uncooperative-close-"+channel.Address+"-"+fmt.Sprint(channel.InitAt.Unix()),
+		db.ChannelUncooperativeCloseTask{
+			Address: channel.Address,
+		}, nil, nil,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey) error {
 	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
 	if err != nil {
@@ -262,6 +279,12 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		}
 		return fmt.Errorf("failed to load virtual channel meta: %w", err)
 	}
+
+	unlock, err := s.db.AcquireChannelLock(ctx, meta.FromChannelAddress)
+	if err != nil {
+		return fmt.Errorf("failed to acquire channel lock: %w", err)
+	}
+	defer unlock()
 
 	ch, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
 	if err != nil {
@@ -390,6 +413,17 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 			}, nil, nil,
 		); err != nil {
 			return fmt.Errorf("failed to create cooperative close task: %w", err)
+		}
+
+		after := time.Now().Add(5 * time.Minute)
+		if err = s.db.CreateTask(ctx, "uncooperative-close", ch.Address+"-uncoop",
+			"uncooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
+			db.ChannelUncooperativeCloseTask{
+				Address:            ch.Address,
+				ChannelInitiatedAt: &ch.InitAt,
+			}, &after, nil,
+		); err != nil {
+			log.Error().Err(err).Str("channel", ch.Address).Msg("failed to create uncooperative close task")
 		}
 		return nil
 	})

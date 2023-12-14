@@ -189,11 +189,11 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, threads int) {
 					var acc *tlb.Account
 					{
 						ctx := context.Background()
-						for i := 0; i < 20; i++ {
+						for i := 0; i < 20; i++ { // TODO: retry without loosing
 							var err error
 							ctx, err = v.api.Client().StickyContextNextNode(ctx)
 							if err != nil {
-								log.Warn().Err(err).Str("addr", task.addr.String()).Msg("failed to pick next node")
+								log.Debug().Err(err).Str("addr", task.addr.String()).Msg("failed to pick next node")
 								break
 							}
 
@@ -201,7 +201,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, threads int) {
 							acc, err = v.api.WaitForBlock(task.master.SeqNo).GetAccount(qCtx, task.master, task.addr)
 							cancel()
 							if err != nil {
-								log.Warn().Err(err).Str("addr", task.addr.String()).Msg("failed to get account")
+								log.Debug().Err(err).Str("addr", task.addr.String()).Msg("failed to get account")
 								time.Sleep(100 * time.Millisecond)
 								continue
 							}
@@ -217,7 +217,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, threads int) {
 					p, err := v.client.ParseAsyncChannel(task.addr, acc.Code, acc.Data, true)
 					if err != nil {
 						if !errors.Is(err, payments.ErrVerificationNotPassed) {
-							log.Error().Err(err).Str("addr", task.addr.String()).Msg("failed to parse payment channel")
+							log.Warn().Err(err).Str("addr", task.addr.String()).Msg("failed to parse payment channel")
 						}
 						return
 					}
@@ -225,10 +225,10 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, threads int) {
 					var tx *tlb.Transaction
 					{
 						ctx := context.Background()
-						for z := 0; z < 20; z++ {
+						for z := 0; z < 20; z++ { // TODO: retry without loosing
 							ctx, err = v.api.Client().StickyContextNextNode(ctx)
 							if err != nil {
-								log.Warn().Err(err).Str("addr", task.addr.String()).Msg("failed to pick next node")
+								log.Debug().Err(err).Str("addr", task.addr.String()).Msg("failed to pick next node")
 								break
 							}
 
@@ -236,7 +236,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, threads int) {
 							tx, err = v.api.WaitForBlock(task.master.SeqNo).GetTransaction(qCtx, task.shard, task.addr, task.lt)
 							cancel()
 							if err != nil {
-								log.Warn().Err(err).Str("addr", task.addr.String()).Msg("failed to get transaction")
+								log.Debug().Err(err).Str("addr", task.addr.String()).Msg("failed to get transaction")
 								time.Sleep(200 * time.Millisecond)
 								continue
 							}
@@ -394,7 +394,7 @@ func (v *Scanner) fetchBlock(ctx context.Context, master *ton.BlockIDExt) (trans
 
 					fetchedIDs, more, err = v.api.WaitForBlock(master.SeqNo).GetBlockTransactionsV2(ctx, shard, 100, after)
 					if err != nil {
-						log.Warn().Err(err).Uint32("master", master.SeqNo).Msg("failed to get tx ids on block")
+						log.Debug().Err(err).Uint32("master", master.SeqNo).Msg("failed to get tx ids on block")
 						time.Sleep(500 * time.Millisecond)
 						continue
 					}

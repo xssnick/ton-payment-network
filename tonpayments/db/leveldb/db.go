@@ -12,7 +12,10 @@ import (
 
 type DB struct {
 	_db *leveldb.DB
-	mx  sync.Mutex
+
+	channelLocks map[string]*sync.Mutex
+
+	mx sync.Mutex
 }
 
 type Tx struct {
@@ -57,7 +60,8 @@ func NewDB(path string) (*DB, error) {
 	}
 
 	return &DB{
-		_db: db,
+		channelLocks: map[string]*sync.Mutex{},
+		_db:          db,
 	}, nil
 }
 

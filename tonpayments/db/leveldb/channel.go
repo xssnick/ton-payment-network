@@ -11,6 +11,7 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
+	"sync"
 )
 
 func (d *DB) CreateChannel(ctx context.Context, channel *db.Channel) error {
@@ -140,4 +141,22 @@ func (d *DB) GetActiveChannels(ctx context.Context) ([]*db.Channel, error) {
 	}
 
 	return channels, nil
+}
+
+func (d *DB) AcquireChannelLock(ctx context.Context, addr string) (func(), error) {
+	d.mx.Lock()
+	l, ok := d.channelLocks[addr]
+	if !ok {
+		l = &sync.Mutex{}
+		d.channelLocks[addr] = l
+	}
+	d.mx.Unlock()
+
+	if !l.TryLock() {
+		return nil, db.ErrChannelBusy
+	}
+
+	return func() {
+		l.Unlock()
+	}, nil
 }

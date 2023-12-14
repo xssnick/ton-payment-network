@@ -23,6 +23,7 @@ import (
 
 var ErrNotActive = errors.New("channel is not active")
 var ErrDenied = errors.New("actions denied")
+var ErrChannelIsBusy = errors.New("channel is busy")
 var ErrNotPossible = errors.New("not possible")
 
 type Transport interface {
@@ -53,6 +54,8 @@ type DB interface {
 	CreateChannel(ctx context.Context, channel *db.Channel) error
 	GetChannel(ctx context.Context, addr string) (*db.Channel, error)
 	UpdateChannel(ctx context.Context, channel *db.Channel) error
+
+	AcquireChannelLock(ctx context.Context, addr string) (func(), error)
 }
 
 type BlockCheckedEvent struct {
@@ -204,9 +207,9 @@ func (s *Service) Start() {
 
 					// give 5 sec to other side for tx discovery
 					delay := time.Now().Add(5 * time.Second)
-					err = s.db.CreateTask(context.Background(), "exchange-states", channel.Address,
+					err = s.db.CreateTask(context.Background(), "increment-state", channel.Address,
 						"exchange-states-"+channel.Address+"-"+fmt.Sprint(channel.InitAt.Unix()),
-						db.ChannelTask{Address: channel.Address}, &delay, nil,
+						db.IncrementStatesTask{ChannelAddress: channel.Address, WantResponse: true}, &delay, nil,
 					)
 					if err != nil {
 						log.Error().Err(err).Str("channel", channel.Address).Msg("failed to create task for exchanging states")
@@ -446,6 +449,10 @@ func (s *Service) proposeAction(ctx context.Context, channelAddress string, acti
 	}
 
 	if !res.Agreed {
+		if res.Reason == db.ErrChannelBusy.Error() {
+			// we can retry later, no need to revert
+			return ErrChannelIsBusy
+		}
 		log.Warn().Str("reason", res.Reason).Msg("actions request denied")
 		return ErrDenied
 	}
@@ -499,9 +506,22 @@ func (s *Service) verifyChannel(p *payments.AsyncChannel) (ok bool, isLeft bool)
 	return true, isLeft
 }
 
-func (s *Service) incrementStates(ctx context.Context, channelAddr string, wantResponse bool) error {
-	if err := s.proposeAction(ctx, channelAddr, transport.IncrementStatesAction{WantResponse: wantResponse}, nil); err != nil {
-		return fmt.Errorf("failed to propose action to the party: %w", err)
+func (s *Service) IncrementStates(ctx context.Context, channelAddr string, wantResponse bool) error {
+	channel, err := s.GetActiveChannel(channelAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get channel: %w", err)
 	}
+
+	err = s.db.CreateTask(ctx, "increment-state", channel.Address,
+		"increment-state-"+channel.Address+"-force-"+fmt.Sprint(time.Now().UnixNano()),
+		db.IncrementStatesTask{
+			ChannelAddress: channel.Address,
+			WantResponse:   wantResponse,
+		}, nil, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create increment-state task: %w", err)
+	}
+
 	return nil
 }
