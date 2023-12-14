@@ -14,6 +14,7 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
+	"math/rand"
 	"time"
 )
 
@@ -30,6 +31,7 @@ func (s *Service) addPeersForChannels() error {
 }
 
 func (s *Service) taskExecutor() {
+	sig := make(chan bool)
 	for {
 		task, err := s.db.AcquireTask(context.Background())
 		if err != nil {
@@ -39,7 +41,10 @@ func (s *Service) taskExecutor() {
 		}
 
 		if task == nil {
-			time.Sleep(1 * time.Second)
+			select {
+			case <-sig:
+			case <-time.After(1 * time.Second):
+			}
 			continue
 		}
 
@@ -50,23 +55,29 @@ func (s *Service) taskExecutor() {
 				defer cancel()
 
 				switch task.Type {
-				case "exchange-states":
-					var data db.ChannelTask
-					if err = json.Unmarshal(task.Data, &data); err != nil {
-						return fmt.Errorf("invalid json: %w", err)
-					}
-
-					if err = s.incrementStates(ctx, data.Address, true); err != nil {
-						log.Error().Err(err).Str("channel", data.Address).Msg("failed to exchange states")
-						return err
-					}
 				case "increment-state":
 					var data db.IncrementStatesTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					if err = s.incrementStates(ctx, data.ChannelAddress, data.WantResponse); err != nil {
+					channel, err := s.getVerifiedChannel(data.ChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to load channel: %w", err)
+					}
+
+					if channel.Status != db.ChannelStateActive {
+						// not needed anymore
+						return nil
+					}
+
+					unlock, err := s.db.AcquireChannelLock(ctx, data.ChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to acquire channel lock: %w", err)
+					}
+					defer unlock()
+
+					if err := s.proposeAction(ctx, data.ChannelAddress, transport.IncrementStatesAction{WantResponse: data.WantResponse}, nil); err != nil {
 						return fmt.Errorf("failed to increment state with party: %w", err)
 					}
 				case "confirm-close-virtual":
@@ -90,6 +101,17 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to serialize virtual channel resolve: %w", err)
 					}
 
+					unlock, err := s.db.AcquireChannelLock(ctx, meta.ToChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to acquire channel lock: %w", err)
+					}
+					defer unlock()
+
+					toChannel, err := s.getVerifiedChannel(meta.ToChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to load channel: %w", err)
+					}
+
 					if meta.FromChannelAddress != "" {
 						channel, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
 						if err != nil {
@@ -101,12 +123,14 @@ func (s *Service) taskExecutor() {
 							return fmt.Errorf("failed to find virtual channel with 'from': %w", err)
 						}
 
-						err = s.proposeAction(ctx, meta.ToChannelAddress, transport.ConfirmCloseAction{
-							Key:   data.VirtualKey,
-							State: state,
-						}, nil)
-						if err != nil {
-							return fmt.Errorf("failed to propose action: %w", err)
+						if toChannel.Status == db.ChannelStateActive {
+							err = s.proposeAction(ctx, meta.ToChannelAddress, transport.ConfirmCloseAction{
+								Key:   data.VirtualKey,
+								State: state,
+							}, nil)
+							if err != nil {
+								return fmt.Errorf("failed to propose action: %w", err)
+							}
 						}
 
 						tryTill := time.Unix(vch.Deadline, 0)
@@ -119,7 +143,7 @@ func (s *Service) taskExecutor() {
 						); err != nil {
 							return fmt.Errorf("failed to create close-next-virtual task: %w", err)
 						}
-					} else {
+					} else if toChannel.Status == db.ChannelStateActive {
 						err = s.proposeAction(ctx, meta.ToChannelAddress, transport.ConfirmCloseAction{
 							Key:   data.VirtualKey,
 							State: state,
@@ -155,6 +179,22 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
+					channel, err := s.getVerifiedChannel(data.ChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to load channel: %w", err)
+					}
+
+					if channel.Status != db.ChannelStateActive {
+						// not needed anymore
+						return nil
+					}
+
+					unlock, err := s.db.AcquireChannelLock(ctx, data.ChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to acquire channel lock: %w", err)
+					}
+					defer unlock()
+
 					if err = s.db.CreateVirtualChannelMeta(ctx, &db.VirtualChannelMeta{
 						Key:                data.VirtualKey,
 						Active:             true,
@@ -175,8 +215,8 @@ func (s *Service) taskExecutor() {
 					}); err != nil {
 						if errors.Is(err, ErrDenied) {
 							// ensure that state was not modified on the other side by sending newer state without this conditional
-							if err = s.incrementStates(ctx, data.ChannelAddress, false); err != nil {
-								return fmt.Errorf("failed to increment states: %w", err)
+							if err := s.proposeAction(ctx, data.ChannelAddress, transport.IncrementStatesAction{WantResponse: false}, nil); err != nil {
+								return fmt.Errorf("failed to increment states on virtual channel revert: %w", err)
 							}
 
 							return s.db.Transaction(ctx, func(ctx context.Context) error {
@@ -227,6 +267,16 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
+					channel, err := s.getVerifiedChannel(data.ChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to load channel: %w", err)
+					}
+
+					if channel.Status != db.ChannelStateActive {
+						// not needed anymore
+						return nil
+					}
+
 					err = s.requestAction(ctx, data.ChannelAddress, transport.RequestRemoveVirtualAction{
 						Key: data.Key,
 					})
@@ -243,6 +293,22 @@ func (s *Service) taskExecutor() {
 					if err != nil {
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
 					}
+
+					channel, err := s.getVerifiedChannel(meta.ToChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to load channel: %w", err)
+					}
+
+					if channel.Status != db.ChannelStateActive {
+						// not needed anymore
+						return nil
+					}
+
+					unlock, err := s.db.AcquireChannelLock(ctx, meta.ToChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to acquire channel lock: %w", err)
+					}
+					defer unlock()
 
 					if err = s.proposeAction(ctx, meta.ToChannelAddress, transport.RemoveVirtualAction{
 						Key: data.Key,
@@ -312,6 +378,12 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
+					unlock, err := s.db.AcquireChannelLock(ctx, data.Address)
+					if err != nil {
+						return fmt.Errorf("failed to acquire channel lock: %w", err)
+					}
+					defer unlock()
+
 					req, ch, err := s.getCooperativeCloseRequest(data.Address, nil)
 					if err != nil {
 						if errors.Is(err, ErrNotActive) {
@@ -329,17 +401,6 @@ func (s *Service) taskExecutor() {
 					cl, err := tlb.ToCell(req)
 					if err != nil {
 						return fmt.Errorf("failed to serialize request to cell: %w", err)
-					}
-
-					after := time.Now().Add(3 * time.Minute)
-					if err = s.db.CreateTask(context.Background(), "uncooperative-close", ch.Address+"-uncoop",
-						"uncooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
-						db.ChannelUncooperativeCloseTask{
-							Address:            ch.Address,
-							ChannelInitiatedAt: &ch.InitAt,
-						}, &after, nil,
-					); err != nil {
-						log.Error().Err(err).Str("channel", ch.Address).Msg("failed to create uncooperative close task")
 					}
 
 					log.Info().Str("address", ch.Address).Msg("trying cooperative close")
@@ -443,7 +504,14 @@ func (s *Service) taskExecutor() {
 			if err != nil {
 				log.Warn().Err(err).Str("type", task.Type).Str("id", task.ID).Msg("task execute err, will be retried")
 
-				retryAfter := time.Now().Add(10 * time.Second)
+				// random wait to not lock both sides in same time
+				retryAfter := time.Now()
+				if !errors.Is(err, ErrChannelIsBusy) && !errors.Is(err, db.ErrChannelBusy) {
+					retryAfter = retryAfter.Add(time.Duration(2500+rand.Int63()%8000) * time.Millisecond)
+				} else {
+					retryAfter = retryAfter.Add(time.Duration(10+rand.Int63()%5000) * time.Millisecond)
+				}
+
 				if err = s.db.RetryTask(context.Background(), task, err.Error(), retryAfter); err != nil {
 					log.Error().Err(err).Str("id", task.ID).Msg("failed to set failure for task in db")
 				}
@@ -452,6 +520,12 @@ func (s *Service) taskExecutor() {
 
 			if err = s.db.CompleteTask(context.Background(), task); err != nil {
 				log.Error().Err(err).Str("id", task.ID).Msg("failed to set complete for task in db")
+			}
+
+			select {
+			case sig <- true:
+				// ask queue to take new task without waiting
+			default:
 			}
 		}()
 	}

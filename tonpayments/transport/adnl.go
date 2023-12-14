@@ -32,6 +32,8 @@ type PeerConnection struct {
 	mx sync.Mutex
 }
 
+var ErrNotConnected = fmt.Errorf("not connected with peer")
+
 type Service interface {
 	GetChannelConfig() ChannelConfig
 	ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action) (*payments.SignedSemiChannel, error)
@@ -310,6 +312,7 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 
 	go func() {
 		var wait time.Duration = 0
+		var timeout = 90 * time.Second
 		for {
 			select {
 			case <-peerCtx.Done():
@@ -320,16 +323,20 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 
 			start := time.Now()
 
+			log.Debug().Hex("key", channelKey).Msg("pinging peer...")
+
 			var pong Pong
-			ctx, cancel := context.WithTimeout(peerCtx, 10*time.Second)
-			err := s.doQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong)
+			ctx, cancel := context.WithTimeout(peerCtx, timeout)
+			err := s.doQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong, true)
 			cancel()
 			if err != nil {
+				timeout = 90 * time.Second
 				wait = 3 * time.Second
 				log.Debug().Err(err).Hex("key", channelKey).Msg("failed to ping urgent peer, retrying in 3s")
 				continue
 			}
 
+			timeout = 10 * time.Second
 			wait = 10 * time.Second
 			log.Debug().Hex("key", channelKey).Dur("ping", time.Since(start).Round(time.Millisecond)).Msg("urgent peer successfully pinged")
 		}
@@ -432,7 +439,7 @@ func (s *Server) auth(ctx context.Context, peer *PeerConnection) error {
 	return nil
 }
 
-func (s *Server) preparePeer(ctx context.Context, key []byte) (peer *PeerConnection, err error) {
+func (s *Server) preparePeer(ctx context.Context, key []byte, connect bool) (peer *PeerConnection, err error) {
 	if bytes.Equal(key, s.channelKey.Public().(ed25519.PublicKey)) {
 		return nil, fmt.Errorf("cannot connect to ourself")
 	}
@@ -442,6 +449,10 @@ func (s *Server) preparePeer(ctx context.Context, key []byte) (peer *PeerConnect
 	s.mx.RUnlock()
 
 	if peer == nil {
+		if !connect {
+			return nil, ErrNotConnected
+		}
+
 		if peer, err = s.connect(ctx, key); err != nil {
 			return nil, fmt.Errorf("failed to connect to peer: %w", err)
 		}
@@ -461,7 +472,7 @@ func (s *Server) preparePeer(ctx context.Context, key []byte) (peer *PeerConnect
 
 func (s *Server) GetChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey) (*ChannelConfig, error) {
 	var res ChannelConfig
-	err := s.doQuery(ctx, theirChannelKey, GetChannelConfig{}, &res)
+	err := s.doQuery(ctx, theirChannelKey, GetChannelConfig{}, &res, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
@@ -474,7 +485,7 @@ func (s *Server) ProposeAction(ctx context.Context, channelAddr *address.Address
 		ChannelAddr: channelAddr.Data(),
 		Action:      action,
 		SignedState: state,
-	}, &res)
+	}, &res, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
@@ -486,7 +497,7 @@ func (s *Server) RequestAction(ctx context.Context, channelAddr *address.Address
 	err := s.doQuery(ctx, theirChannelKey, RequestAction{
 		ChannelAddr: channelAddr.Data(),
 		Action:      action,
-	}, &res)
+	}, &res, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
@@ -499,15 +510,15 @@ func (s *Server) RequestInboundChannel(ctx context.Context, capacity *big.Int, o
 		Key:      ourKey,
 		Wallet:   ourWallet.Data(),
 		Capacity: capacity.Bytes(),
-	}, &res)
+	}, &res, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
 	return &res, nil
 }
 
-func (s *Server) doQuery(ctx context.Context, theirKey []byte, req, resp tl.Serializable) error {
-	peer, err := s.preparePeer(ctx, theirKey)
+func (s *Server) doQuery(ctx context.Context, theirKey []byte, req, resp tl.Serializable, connect bool) error {
+	peer, err := s.preparePeer(ctx, theirKey, connect)
 	if err != nil {
 		return fmt.Errorf("failed to prepare peer: %w", err)
 	}

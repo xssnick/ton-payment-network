@@ -67,7 +67,7 @@ func main() {
 
 	// TODO: set secure policy
 	// initialize ton api lite connection wrapper
-	api := ton.NewAPIClient(client, ton.ProofCheckPolicyFast)
+	api := ton.NewAPIClient(client, ton.ProofCheckPolicyFast).WithRetry(2).WithTimeout(5 * time.Second)
 	// api.SetTrustedBlockFromConfig(tonCfg)
 
 	sk := sha256.Sum256([]byte("adnl" + *Name))
@@ -162,6 +162,18 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 			switch cmd {
 			case "list":
 				svc.DebugPrintVirtualChannels()
+			case "inc":
+				println("Input address:")
+				var addr string
+				fmt.Scanln(&addr)
+
+				for i := 0; i < 50; i++ {
+					err = svc.IncrementStates(context.Background(), addr, true)
+					if err != nil {
+						println("failed to increment states with channel:", err.Error())
+						continue
+					}
+				}
 			case "destroy":
 				println("Input address:")
 				var addr string
@@ -173,6 +185,17 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 				println("CHANNEL COOP CLOSE REQUESTED")
+			case "kill":
+				println("Input address:")
+				var addr string
+				fmt.Scanln(&addr)
+
+				err = svc.CloseUncooperative(context.Background(), addr)
+				if err != nil {
+					println("failed to uncoop close channel:", err.Error())
+					continue
+				}
+				println("CHANNEL UNCOOP CLOSE STARTED")
 			case "sign":
 				println("Channel private key:")
 				var strKey string

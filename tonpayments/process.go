@@ -31,8 +31,15 @@ import (
 func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address,
 	signedState payments.SignedSemiChannel, action transport.Action) (*payments.SignedSemiChannel, error) {
 
-	s.mx.Lock()
-	defer s.mx.Unlock()
+	// TODO: not lock unknown not existent channels
+	unlock, err := s.db.AcquireChannelLock(ctx, channelAddr.String())
+	if err != nil {
+		if errors.Is(err, db.ErrChannelBusy) {
+			return nil, ErrChannelIsBusy
+		}
+		return nil, fmt.Errorf("failed to acquire channel lock: %w", err)
+	}
+	defer unlock()
 
 	channel, err := s.getVerifiedChannel(channelAddr.String())
 	if err != nil {
@@ -557,6 +564,28 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			); err != nil {
 				return fmt.Errorf("failed to create confirm-close-virtual task: %w", err)
 			}
+
+			// We start uncooperative close at specific moment to have time
+			// to commit resolve onchain in case partner is irresponsible.
+			// But in the same time we give our partner time to
+			uncooperativeAfter := time.Unix(vch.Deadline-channel.SafeOnchainClosePeriod, 0)
+			minDelay := time.Now().Add(1 * time.Minute)
+			if !uncooperativeAfter.After(minDelay) {
+				uncooperativeAfter = minDelay
+			}
+
+			// Creating aggressive onchain close task, for the future,
+			// in case we will not be able to communicate with party
+			if err = s.db.CreateTask(ctx, "uncooperative-close", channel.Address+"-uncoop",
+				"uncooperative-close-"+channel.Address+"-vc-"+hex.EncodeToString(vch.Key),
+				db.ChannelUncooperativeCloseTask{
+					Address:                 channel.Address,
+					CheckVirtualStillExists: vch.Key,
+				}, &uncooperativeAfter, nil,
+			); err != nil {
+				return fmt.Errorf("failed to create uncooperative close task: %w", err)
+			}
+
 			return nil
 		}); err != nil {
 			return err
