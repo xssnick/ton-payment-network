@@ -23,24 +23,40 @@ import (
 	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"golang.org/x/crypto/ed25519"
+	"math"
 	"math/big"
 	"net"
 	"strings"
 	"time"
 )
 
-var Debug = flag.Bool("debug", false, "debug logs")
+var Verbosity = flag.Int("v", 2, "verbosity")
 var IP = flag.String("ip", "", "ip to listen on and store in DHT")
 var Port = flag.Uint64("port", 9761, "port to listen on and store in DHT")
 var Name = flag.String("name", "", "any string, seed for channel private key")
+var ForceBlock = flag.Uint64("force-block", 0, "master block seqno to start scan from, ignored if 0, otherwise - overrides db value")
 
 func main() {
 	flag.Parse()
 
 	log.Logger = zerolog.New(zerolog.NewConsoleWriter()).With().Timestamp().Logger().Level(zerolog.InfoLevel)
-	if *Debug {
-		log.Logger = log.Logger.Level(zerolog.DebugLevel).With().Logger()
+	scanLog := log.Logger
+	if *Verbosity >= 4 {
+		scanLog = scanLog.Level(zerolog.DebugLevel).With().Logger()
 	}
+
+	if *Verbosity >= 3 {
+		log.Logger = log.Logger.Level(zerolog.DebugLevel).With().Logger()
+	} else if *Verbosity == 2 {
+		log.Logger = log.Logger.Level(zerolog.InfoLevel).With().Logger()
+	} else if *Verbosity == 1 {
+		log.Logger = log.Logger.Level(zerolog.WarnLevel).With().Logger()
+	} else if *Verbosity == 0 {
+		log.Logger = log.Logger.Level(zerolog.ErrorLevel).With().Logger()
+	} else {
+		log.Logger = log.Logger.Level(zerolog.FatalLevel).With().Logger()
+	}
+
 	adnl.Logger = func(v ...any) {}
 
 	if *Name == "" {
@@ -87,10 +103,10 @@ func main() {
 
 	gate := adnl.NewGateway(serverKey)
 
-	prepare(api, *Name, gate, dhtClient, serverKey)
+	prepare(api, *Name, gate, dhtClient, serverKey, scanLog)
 }
 
-func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClient *dht.Client, key ed25519.PrivateKey) {
+func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClient *dht.Client, key ed25519.PrivateKey, scanLog zerolog.Logger) {
 	hash := sha256.Sum256([]byte(name))
 	channelKey := ed25519.NewKeyFromSeed(hash[:])
 
@@ -135,9 +151,19 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 		seqno = bo.Seqno
 	}
 
+	if *ForceBlock > 0 {
+		if *ForceBlock > math.MaxUint32 {
+			log.Fatal().Err(err).Msg("block should be uint32")
+		}
+		seqno = uint32(*ForceBlock)
+	}
+
 	inv := make(chan any)
-	sc := chain.NewScanner(api, payments.AsyncPaymentChannelCodeHash, seqno)
-	go sc.Start(context.Background(), inv)
+	sc := chain.NewScanner(api, payments.AsyncPaymentChannelCodeHash, seqno, scanLog)
+	if err = sc.Start(context.Background(), inv); err != nil {
+		log.Fatal().Err(err).Msg("failed to start chain scanner")
+		return
+	}
 
 	w, err := wallet.FromPrivateKey(api, channelKey, wallet.HighloadV2Verified)
 	if err != nil {
@@ -299,7 +325,9 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				addr, err := svc.DeployChannelWithNode(context.Background(), amt, btsKey)
+				ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+				addr, err := svc.DeployChannelWithNode(ctx, amt, btsKey)
+				cancel()
 				if err != nil {
 					log.Error().Err(err).Msg("failed to deploy channel with node")
 					continue
@@ -330,7 +358,9 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				err = svc.RequestInboundChannel(context.Background(), amt, btsKey)
+				ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+				err = svc.RequestInboundChannel(ctx, amt, btsKey)
+				cancel()
 				if err != nil {
 					log.Error().Err(err).Msg("failed to request deploy channel with node")
 					continue

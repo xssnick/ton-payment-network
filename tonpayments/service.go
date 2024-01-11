@@ -349,6 +349,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 			Str("balance_in", inBalance).
 			Uint64("seqno_their", ch.Their.State.Data.Seqno).
 			Uint64("seqno_our", ch.Our.State.Data.Seqno).
+			Bool("accepting_actions", ch.AcceptingActions).
 			Msg("active onchain channel")
 		for _, kv := range ch.Our.State.Data.Conditionals.All() {
 			vch, _ := payments.ParseVirtualChannelCond(kv.Value)

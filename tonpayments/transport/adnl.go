@@ -73,6 +73,7 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key, channelKey ed25519.Priv
 
 	if serverMode {
 		go func() {
+			updateFailed := false
 			wait := 1 * time.Second
 			// refresh dht records
 			for {
@@ -85,16 +86,20 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key, channelKey ed25519.Priv
 
 				log.Debug().Str("source", "server").Msg("updating our dht record")
 
-				ctx, cancel := context.WithTimeout(s.closeCtx, 100*time.Second)
+				ctx, cancel := context.WithTimeout(s.closeCtx, 150*time.Second)
 				err := s.updateDHT(ctx)
 				cancel()
 
 				if err != nil {
+					updateFailed = true
 					log.Warn().Err(err).Str("source", "server").Msg("failed to update our dht record, will retry in 5 sec")
 
 					// on err, retry sooner
 					wait = 5 * time.Second
 					continue
+				} else if updateFailed {
+					updateFailed = false
+					log.Info().Str("source", "server").Msg("dht record was successfully updated after retry")
 				}
 				wait = 1 * time.Minute
 			}
@@ -111,18 +116,11 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	addr := s.gate.GetAddressList()
 
 	ctxStore, cancel := context.WithTimeout(ctx, 80*time.Second)
-	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 10*time.Minute, s.key, 5)
+	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 30*time.Minute, s.key, 0)
 	cancel()
 	if err != nil && stored == 0 {
 		return err
 	}
-
-	// make sure it was saved
-	_, _, err = s.dht.FindAddresses(ctx, id)
-	if err != nil {
-		return err
-	}
-	log.Debug().Str("source", "server").Int("copies", stored).Msg("our address was updated in dht")
 
 	chanKey := adnl.PublicKeyED25519{Key: s.channelKey.Public().(ed25519.PublicKey)}
 	dhtVal, err := tl.Serialize(NodeAddress{
@@ -133,7 +131,7 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	}
 
 	stored, _, err = s.dht.Store(ctx, chanKey, []byte("payment-node"), 0,
-		dhtVal, dht.UpdateRuleSignature{}, 10*time.Minute, s.channelKey, 5)
+		dhtVal, dht.UpdateRuleSignature{}, 30*time.Minute, s.channelKey, 0)
 	if err != nil {
 		return fmt.Errorf("failed to store node payment-node value in dht: %w", err)
 	}
@@ -312,7 +310,7 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 
 	go func() {
 		var wait time.Duration = 0
-		var timeout = 90 * time.Second
+		var timeout = 150 * time.Second
 		for {
 			select {
 			case <-peerCtx.Done():
@@ -330,7 +328,7 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 			err := s.doQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong, true)
 			cancel()
 			if err != nil {
-				timeout = 90 * time.Second
+				timeout = 150 * time.Second
 				wait = 3 * time.Second
 				log.Debug().Err(err).Hex("key", channelKey).Msg("failed to ping urgent peer, retrying in 3s")
 				continue
@@ -367,7 +365,7 @@ func (s *Server) connect(ctx context.Context, channelKey ed25519.PublicKey) (*Pe
 		Index: 0,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to find address in dht of %s: %w", hex.EncodeToString(channelKey), err)
+		return nil, fmt.Errorf("failed to find payment-node in dht of %s: %w", hex.EncodeToString(channelKey), err)
 	}
 
 	var nodeAddr NodeAddress

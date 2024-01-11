@@ -502,7 +502,12 @@ func (s *Service) taskExecutor() {
 				return nil
 			}()
 			if err != nil {
-				log.Warn().Err(err).Str("type", task.Type).Str("id", task.ID).Msg("task execute err, will be retried")
+				lg := log.Warn
+				if errors.Is(err, ErrChannelIsBusy) || errors.Is(err, db.ErrChannelBusy) || errors.Is(err, transport.ErrNotConnected) {
+					// for not critical retryable errors we will not flood console in normal mode
+					lg = log.Debug
+				}
+				lg().Err(err).Str("type", task.Type).Str("id", task.ID).Msg("task execute err, will be retried")
 
 				// random wait to not lock both sides in same time
 				retryAfter := time.Now()
