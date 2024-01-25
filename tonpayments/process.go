@@ -373,20 +373,51 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			}
 		} else {
 			toExecute = func(ctx context.Context) error {
-				// TODO: check if we accept virtual channels to us
-
-				if err = s.db.CreateVirtualChannelMeta(ctx, &db.VirtualChannelMeta{
+				meta := &db.VirtualChannelMeta{
 					Key:                vch.Key,
 					Active:             true,
 					FromChannelAddress: channel.Address,
 					CreatedAt:          time.Now(),
-				}); err != nil {
+				}
+
+				if currentInstruction.FinalState != nil {
+					var state payments.VirtualChannelState
+					if err = tlb.LoadFromCell(&state, currentInstruction.FinalState.BeginParse()); err != nil {
+						return fmt.Errorf("failed to parse virtual channel state: %w", err)
+					}
+
+					if !state.Verify(vch.Key) {
+						return fmt.Errorf("final state is incorrect")
+					}
+
+					if state.Amount.Nano().Cmp(vch.Capacity) != 0 {
+						return fmt.Errorf("final state should use full capacity")
+					}
+
+					if err = meta.AddKnownResolve(meta.Key, &state); err != nil {
+						return fmt.Errorf("failed to add channel condition resolve: %w", err)
+					}
+
+					tryTill := time.Unix(vch.Deadline, 0)
+					if err = s.db.CreateTask(ctx, "close-next-virtual", channel.Address,
+						"close-next-"+hex.EncodeToString(vch.Key),
+						db.CloseNextVirtualTask{
+							VirtualKey: vch.Key,
+							State:      currentInstruction.FinalState.ToBOC(),
+						}, nil, &tryTill,
+					); err != nil {
+						return fmt.Errorf("failed to create close-next-virtual task: %w", err)
+					}
+				}
+
+				if err = s.db.CreateVirtualChannelMeta(ctx, meta); err != nil {
 					return fmt.Errorf("failed to update virtual channel meta: %w", err)
 				}
 
 				log.Info().Hex("key", data.ChannelKey).
 					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 					Msg("virtual channel opened with us")
+
 				return nil
 			}
 		}
@@ -448,6 +479,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 	}); err != nil {
 		return nil, err
 	}
+	s.touchWorker()
 
 	return &channel.Our.SignedSemiChannel, nil
 }
@@ -523,6 +555,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		); err != nil {
 			return fmt.Errorf("failed to create remove-virtual task: %w", err)
 		}
+		s.touchWorker()
 	case transport.CloseVirtualAction:
 		if !channel.AcceptingActions {
 			return fmt.Errorf("channel is currently not accepting new actions")
@@ -590,6 +623,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		}); err != nil {
 			return err
 		}
+		s.touchWorker()
 	case transport.CooperativeCloseAction:
 		var req payments.CooperativeClose
 		err = tlb.LoadFromCell(&req, data.SignedCloseRequest.BeginParse())

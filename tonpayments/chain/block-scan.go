@@ -358,6 +358,7 @@ func (v *Scanner) fetchBlock(ctx context.Context, master *ton.BlockIDExt) (trans
 
 				var block *tlb.Block
 				{
+					ctx := ctx
 					for z := 0; z < 20; z++ { // TODO: retry without loosing
 						ctx, err = v.api.Client().StickyContextNextNode(ctx)
 						if err != nil {

@@ -3,6 +3,7 @@ package tonpayments
 import (
 	"bytes"
 	"fmt"
+	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
@@ -12,22 +13,24 @@ import (
 	"time"
 )
 
-func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport.Action, details any) error {
+func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport.Action, details any) (func(), error) {
+	var onSuccess func()
+
 	switch ch := action.(type) {
 	case transport.IncrementStatesAction:
 	case transport.OpenVirtualAction:
 		vch := details.(payments.VirtualChannel)
 
 		if vch.Capacity.Sign() <= 0 {
-			return fmt.Errorf("invalid capacity")
+			return nil, fmt.Errorf("invalid capacity")
 		}
 
 		if vch.Fee.Sign() < 0 {
-			return fmt.Errorf("invalid fee")
+			return nil, fmt.Errorf("invalid fee")
 		}
 
 		if vch.Deadline < time.Now().Unix() {
-			return fmt.Errorf("deadline expired")
+			return nil, fmt.Errorf("deadline expired")
 		}
 
 		val := vch.Serialize()
@@ -35,7 +38,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		for _, kv := range channel.Our.State.Data.Conditionals.All() {
 			if bytes.Equal(kv.Value.Hash(), val.Hash()) {
 				// idempotency
-				return nil
+				return onSuccess, nil
 			}
 		}
 
@@ -49,68 +52,84 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		}
 
 		if slot == -1 {
-			return fmt.Errorf("virtual channels limit has been reached")
+			return nil, fmt.Errorf("virtual channels limit has been reached")
 		}
 
 		if err := channel.Our.State.Data.Conditionals.SetIntKey(big.NewInt(int64(slot)), val); err != nil {
-			return fmt.Errorf("failed to set condition: %w", err)
+			return nil, fmt.Errorf("failed to set condition: %w", err)
 		}
 
 		ourTargetBalance, err := channel.CalcBalance(false)
 		if err != nil {
-			return fmt.Errorf("failed to calc our side balance with target: %w", err)
+			return nil, fmt.Errorf("failed to calc our side balance with target: %w", err)
 		}
 
 		if ourTargetBalance.Sign() == -1 {
-			return fmt.Errorf("not enough available balance with target")
+			return nil, fmt.Errorf("not enough available balance with target")
 		}
 	case transport.RemoveVirtualAction:
-		idx, _, err := channel.Our.State.FindVirtualChannel(ch.Key)
+		idx, vch, err := channel.Our.State.FindVirtualChannel(ch.Key)
 		if err != nil {
 			// idempotency, if not found we consider it already closed
-			return nil
+			return onSuccess, nil
 		}
 
 		if err = channel.Our.State.Data.Conditionals.DeleteIntKey(idx); err != nil {
-			return err
+			return nil, err
+		}
+
+		onSuccess = func() {
+			log.Info().Hex("key", vch.Key).
+				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
+				Str("channel", channel.Address).
+				Msg("virtual channel successfully removed")
 		}
 	case transport.ConfirmCloseAction:
 		var vState payments.VirtualChannelState
 		if err := tlb.LoadFromCell(&vState, ch.State.BeginParse()); err != nil {
-			return fmt.Errorf("failed to load virtual channel state cell: %w", err)
+			return nil, fmt.Errorf("failed to load virtual channel state cell: %w", err)
 		}
 
 		if !vState.Verify(ch.Key) {
-			return fmt.Errorf("incorrect channel state signature")
+			return nil, fmt.Errorf("incorrect channel state signature")
 		}
 
 		idx, vch, err := channel.Our.State.FindVirtualChannel(ch.Key)
 		if err != nil {
 			// idempotency, if not found we consider it already closed
-			return nil
+			return onSuccess, nil
 		}
 
 		if vch.Deadline < time.Now().Unix() {
-			return fmt.Errorf("virtual channel has expired")
+			return nil, fmt.Errorf("virtual channel has expired")
 		}
 
 		if err = channel.Our.State.Data.Conditionals.DeleteIntKey(idx); err != nil {
-			return err
+			return nil, err
 		}
 
 		sent := new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), vState.Amount.Nano())
 		sent = sent.Add(sent, vch.Fee)
 		channel.Our.State.Data.Sent = tlb.FromNanoTON(sent)
+
+		onSuccess = func() {
+			log.Info().Hex("key", vch.Key).
+				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
+				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
+				Str("amount", vState.Amount.String()).
+				Str("channel", channel.Address).
+				Msg("virtual channel close confirmed")
+		}
 	default:
-		return fmt.Errorf("unexpected action type: %s", reflect.TypeOf(ch).String())
+		return nil, fmt.Errorf("unexpected action type: %s", reflect.TypeOf(ch).String())
 	}
 
 	channel.Our.State.Data.Seqno++
 	cl, err := tlb.ToCell(channel.Our.State)
 	if err != nil {
-		return fmt.Errorf("failed to serialize state for signing: %w", err)
+		return nil, fmt.Errorf("failed to serialize state for signing: %w", err)
 	}
 	channel.Our.Signature = payments.Signature{Value: cl.Sign(s.key)}
 
-	return nil
+	return onSuccess, nil
 }

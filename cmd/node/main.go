@@ -14,7 +14,7 @@ import (
 	"github.com/xssnick/ton-payment-network/tonpayments/chain"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/db/leveldb"
-	transport2 "github.com/xssnick/ton-payment-network/tonpayments/transport"
+	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/liteclient"
@@ -43,6 +43,12 @@ func main() {
 	scanLog := log.Logger
 	if *Verbosity >= 4 {
 		scanLog = scanLog.Level(zerolog.DebugLevel).With().Logger()
+	}
+
+	if *Verbosity >= 5 {
+		dht.Logger = func(v ...any) {
+			log.Logger.Debug().Msg(fmt.Sprintln(v...))
+		}
 	}
 
 	if *Verbosity >= 3 {
@@ -110,8 +116,6 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 	hash := sha256.Sum256([]byte(name))
 	channelKey := ed25519.NewKeyFromSeed(hash[:])
 
-	println("YOUR PUB KEY:", hex.EncodeToString(channelKey.Public().(ed25519.PublicKey)))
-
 	isServer := false
 	if *IP != "" {
 		isServer = true
@@ -139,7 +143,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 		return
 	}
 
-	tr := transport2.NewServer(dhtClient, gate, key, channelKey, isServer)
+	tr := transport.NewServer(dhtClient, gate, key, channelKey, isServer)
 
 	var seqno uint32
 	if bo, err := fdb.GetBlockOffset(context.Background()); err != nil {
@@ -178,6 +182,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 		ConditionalCloseDuration: 180,
 	})
 	tr.SetService(svc)
+	log.Info().Hex("pubkey", channelKey.Public().(ed25519.PublicKey)).Msg("node initialized")
 
 	go func() {
 	nextCommand:
@@ -366,7 +371,7 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 				println("DEPLOY REQUESTED")
-			case "open":
+			case "open", "send":
 				println("Receivers keys ',' separated:")
 				var strKeys string
 				fmt.Scanln(&strKeys)
@@ -403,14 +408,14 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				var tunChain []transport2.TunnelChainPart
+				var tunChain []transport.TunnelChainPart
 				for i, parsedKey := range parsedKeys {
 					fee := big.NewInt(0)
 					if len(parsedKeys)-i > 1 {
 						fee = new(big.Int).Mul(tlb.MustFromTON("0.01").Nano(), big.NewInt(int64(len(parsedKeys)-i)-1))
 					}
 
-					tunChain = append(tunChain, transport2.TunnelChainPart{
+					tunChain = append(tunChain, transport.TunnelChainPart{
 						Target:   parsedKey,
 						Capacity: amt.Nano(),
 						Fee:      fee,
@@ -418,8 +423,8 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					})
 				}
 
-				vPub, vPriv, _ := ed25519.GenerateKey(nil)
-				vc, firstInstructionKey, tun, err := transport2.GenerateTunnel(vPub, tunChain, 5)
+				_, vPriv, _ := ed25519.GenerateKey(nil)
+				vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 5, cmd == "send")
 				if err != nil {
 					println("failed to generate tunnel:", err.Error())
 					continue
@@ -433,7 +438,9 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 					continue
 				}
 
-				println("VIRTUAL CHANNEL OPENING REQUESTED, PRIVATE KEY:", hex.EncodeToString(vPriv.Seed()))
+				if cmd != "send" {
+					println("VIRTUAL CHANNEL OPENING REQUESTED, PRIVATE KEY:", hex.EncodeToString(vPriv.Seed()))
+				}
 			default:
 				println("UNKNOWN COMMAND " + cmd)
 			}

@@ -31,7 +31,6 @@ func (s *Service) addPeersForChannels() error {
 }
 
 func (s *Service) taskExecutor() {
-	sig := make(chan bool)
 	for {
 		task, err := s.db.AcquireTask(context.Background())
 		if err != nil {
@@ -42,7 +41,7 @@ func (s *Service) taskExecutor() {
 
 		if task == nil {
 			select {
-			case <-sig:
+			case <-s.workerSignal:
 			case <-time.After(1 * time.Second):
 			}
 			continue
@@ -527,11 +526,16 @@ func (s *Service) taskExecutor() {
 				log.Error().Err(err).Str("id", task.ID).Msg("failed to set complete for task in db")
 			}
 
-			select {
-			case sig <- true:
-				// ask queue to take new task without waiting
-			default:
-			}
+			s.touchWorker()
 		}()
+	}
+}
+
+// touchWorker - forces worker to check db tasks
+func (s *Service) touchWorker() {
+	select {
+	case s.workerSignal <- true:
+		// ask queue to take new task without waiting
+	default:
 	}
 }

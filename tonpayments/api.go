@@ -148,6 +148,7 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 	if err != nil {
 		return fmt.Errorf("failed to create open task: %w", err)
 	}
+	s.touchWorker()
 
 	return nil
 }

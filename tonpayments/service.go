@@ -82,6 +82,7 @@ type Service struct {
 	contractMaker        *payments.Client
 	closingConfig        payments.ClosingConfig
 	virtualChannelsLimit int
+	workerSignal         chan bool
 
 	// TODO: channel based lock
 	mx sync.Mutex
@@ -101,6 +102,7 @@ func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wa
 		contractMaker:        payments.NewPaymentChannelClient(api),
 		closingConfig:        closingConfig,
 		virtualChannelsLimit: 3000,
+		workerSignal:         make(chan bool, 1),
 	}
 }
 
@@ -435,7 +437,8 @@ func (s *Service) proposeAction(ctx context.Context, channelAddress string, acti
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	if err := s.updateOurStateWithAction(channel, action, details); err != nil {
+	onSuccess, err := s.updateOurStateWithAction(channel, action, details)
+	if err != nil {
 		return fmt.Errorf("failed to prepare actions for the next node - %w: %v", ErrNotPossible, err)
 	}
 
@@ -475,6 +478,10 @@ func (s *Service) proposeAction(ctx context.Context, channelAddress string, acti
 	channel.Their.SignedSemiChannel = theirState
 	if err = s.db.UpdateChannel(ctx, channel); err != nil {
 		return fmt.Errorf("failed to update channel in db: %w", err)
+	}
+
+	if onSuccess != nil {
+		onSuccess()
 	}
 
 	return nil
@@ -523,6 +530,7 @@ func (s *Service) IncrementStates(ctx context.Context, channelAddr string, wantR
 	if err != nil {
 		return fmt.Errorf("failed to create increment-state task: %w", err)
 	}
+	s.touchWorker()
 
 	return nil
 }

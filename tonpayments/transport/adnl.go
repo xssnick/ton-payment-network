@@ -86,7 +86,7 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key, channelKey ed25519.Priv
 
 				log.Debug().Str("source", "server").Msg("updating our dht record")
 
-				ctx, cancel := context.WithTimeout(s.closeCtx, 150*time.Second)
+				ctx, cancel := context.WithTimeout(s.closeCtx, 240*time.Second)
 				err := s.updateDHT(ctx)
 				cancel()
 
@@ -100,8 +100,10 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key, channelKey ed25519.Priv
 				} else if updateFailed {
 					updateFailed = false
 					log.Info().Str("source", "server").Msg("dht record was successfully updated after retry")
+				} else {
+					log.Debug().Str("source", "server").Msg("dht record was successfully updated")
 				}
-				wait = 1 * time.Minute
+				wait = 3 * time.Minute
 			}
 		}()
 	}
@@ -115,7 +117,7 @@ func (s *Server) SetService(svc Service) {
 func (s *Server) updateDHT(ctx context.Context) error {
 	addr := s.gate.GetAddressList()
 
-	ctxStore, cancel := context.WithTimeout(ctx, 80*time.Second)
+	ctxStore, cancel := context.WithTimeout(ctx, 120*time.Second)
 	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 30*time.Minute, s.key, 0)
 	cancel()
 	if err != nil && stored == 0 {
