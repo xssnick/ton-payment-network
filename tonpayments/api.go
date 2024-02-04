@@ -20,7 +20,22 @@ import (
 )
 
 var ErrNoResolveExists = errors.New("cannot close channel without known state")
-var ErrResolveNotRequired = errors.New("resolve is not required")
+
+func (s *Service) GetChannel(ctx context.Context, addr string) (*db.Channel, error) {
+	channel, err := s.db.GetChannel(ctx, addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get channel: %w", err)
+	}
+	return channel, nil
+}
+
+func (s *Service) ListChannels(ctx context.Context, key ed25519.PublicKey, status db.ChannelStatus) ([]*db.Channel, error) {
+	channels, err := s.db.GetChannels(ctx, key, status)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get channels: %w", err)
+	}
+	return channels, nil
+}
 
 func (s *Service) DeployChannelWithNode(ctx context.Context, capacity tlb.Coins, nodeKey ed25519.PublicKey) (*address.Address, error) {
 	cfg, err := s.transport.GetChannelConfig(ctx, nodeKey)
@@ -36,7 +51,7 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 	channelId := make([]byte, 16)
 	copy(channelId, nodeKey[:15])
 
-	channels, err := s.db.GetChannelsWithKey(ctx, nodeKey)
+	channels, err := s.db.GetChannels(ctx, nodeKey, db.ChannelStateAny)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get channels: %w", err)
 	}
@@ -65,7 +80,6 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		}
 		channelId[15]++
 	}
-	println("CH ID", hex.EncodeToString(channelId[0:]))
 
 	if !found {
 		return nil, fmt.Errorf("too many channels are already open")
@@ -96,7 +110,7 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 		return fmt.Errorf("chain is empty")
 	}
 
-	channels, err := s.db.GetChannelsWithKey(ctx, with)
+	channels, err := s.db.GetChannels(ctx, with, db.ChannelStateActive)
 	if err != nil {
 		return fmt.Errorf("failed to get active channels: %w", err)
 	}
@@ -104,10 +118,6 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 	needAmount := new(big.Int).Add(vch.Fee, vch.Capacity)
 	var channel *db.Channel
 	for _, ch := range channels {
-		if ch.Status != db.ChannelStateActive {
-			continue
-		}
-
 		balance, err := ch.CalcBalance(false)
 		if err != nil {
 			return fmt.Errorf("failed to calc channel balance: %w", err)
@@ -134,7 +144,7 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 	}
 
 	tryTill := time.Unix(vch.Deadline, 0)
-	err = s.db.CreateTask(ctx, "open-virtual", channel.Address,
+	err = s.db.CreateTask(ctx, PaymentsTaskPool, "open-virtual", channel.Address,
 		"open-virtual-"+hex.EncodeToString(vch.Key),
 		db.OpenVirtualTask{
 			ChannelAddress: channel.Address,
@@ -255,13 +265,13 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 	return nil
 }
 
-func (s *Service) CloseUncooperative(ctx context.Context, addr string) error {
+func (s *Service) RequestUncooperativeClose(ctx context.Context, addr string) error {
 	channel, err := s.GetActiveChannel(addr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	if err = s.db.CreateTask(ctx, "uncooperative-close", channel.Address+"-uncoop",
+	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", channel.Address+"-uncoop",
 		"uncooperative-close-"+channel.Address+"-"+fmt.Sprint(channel.InitAt.Unix()),
 		db.ChannelUncooperativeCloseTask{
 			Address: channel.Address,
@@ -332,7 +342,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 
 	// Creating aggressive onchain close task, for the future,
 	// in case we will not be able to communicate with party
-	if err = s.db.CreateTask(ctx, "uncooperative-close", ch.Address+"-uncoop",
+	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", ch.Address+"-uncoop",
 		"uncooperative-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
 		db.ChannelUncooperativeCloseTask{
 			Address:                 ch.Address,
@@ -347,18 +357,6 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		State: stateCell,
 	}); err != nil {
 		return fmt.Errorf("failed to request action from the node: %w", err)
-	}
-	return nil
-}
-
-func (s *Service) RequestInboundChannel(ctx context.Context, capacity tlb.Coins, theirKey ed25519.PublicKey) error {
-	res, err := s.transport.RequestInboundChannel(ctx, capacity.Nano(), s.wallet.Address(), s.key.Public().(ed25519.PublicKey), theirKey)
-	if err != nil {
-		return fmt.Errorf("failed to request inbound channel: %w", err)
-	}
-
-	if !res.Agreed {
-		return fmt.Errorf("inbound channel request declined with reason: %s", res.Reason)
 	}
 	return nil
 }
@@ -406,7 +404,7 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 			return fmt.Errorf("failed to update channel: %w", err)
 		}
 
-		if err = s.db.CreateTask(ctx, "cooperative-close", ch.Address,
+		if err = s.db.CreateTask(ctx, PaymentsTaskPool, "cooperative-close", ch.Address,
 			"cooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
 			db.ChannelUncooperativeCloseTask{
 				Address:            ch.Address,
@@ -417,7 +415,7 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 		}
 
 		after := time.Now().Add(5 * time.Minute)
-		if err = s.db.CreateTask(ctx, "uncooperative-close", ch.Address+"-uncoop",
+		if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", ch.Address+"-uncoop",
 			"uncooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
 			db.ChannelUncooperativeCloseTask{
 				Address:            ch.Address,
@@ -507,7 +505,7 @@ func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payme
 	return &ourReq, channel, nil
 }
 
-func (s *Service) StartUncooperativeClose(ctx context.Context, channelAddr string) error {
+func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr string) error {
 	channel, err := s.GetActiveChannel(channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
@@ -567,7 +565,7 @@ func (s *Service) StartUncooperativeClose(ctx context.Context, channelAddr strin
 	return nil
 }
 
-func (s *Service) ChallengeChannelState(ctx context.Context, channelAddr string) error {
+func (s *Service) challengeChannelState(ctx context.Context, channelAddr string) error {
 	channel, err := s.getVerifiedChannel(channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
@@ -623,7 +621,7 @@ func (s *Service) ChallengeChannelState(ctx context.Context, channelAddr string)
 	return nil
 }
 
-func (s *Service) FinishUncooperativeChannelClose(ctx context.Context, channelAddr string) error {
+func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAddr string) error {
 	channel, err := s.getVerifiedChannel(channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
@@ -661,7 +659,7 @@ func (s *Service) FinishUncooperativeChannelClose(ctx context.Context, channelAd
 	return nil
 }
 
-func (s *Service) SettleChannelConditionals(ctx context.Context, channelAddr string) error {
+func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr string) error {
 	channel, err := s.getVerifiedChannel(channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)

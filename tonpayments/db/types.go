@@ -21,6 +21,7 @@ const (
 	ChannelStateInactive ChannelStatus = iota
 	ChannelStateActive
 	ChannelStateClosing
+	ChannelStateAny ChannelStatus = 100
 )
 
 var ErrAlreadyExists = errors.New("already exists")
@@ -163,6 +164,8 @@ func (s *Side) MarshalJSON() ([]byte, error) {
 }
 
 func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
+	// TODO: cache calculated
+
 	ch.mx.RLock()
 	defer ch.mx.RUnlock()
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -11,7 +10,9 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments"
+	"github.com/xssnick/ton-payment-network/tonpayments/api"
 	"github.com/xssnick/ton-payment-network/tonpayments/chain"
+	"github.com/xssnick/ton-payment-network/tonpayments/config"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/db/leveldb"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
@@ -31,9 +32,12 @@ import (
 )
 
 var Verbosity = flag.Int("v", 2, "verbosity")
-var IP = flag.String("ip", "", "ip to listen on and store in DHT")
-var Port = flag.Uint64("port", 9761, "port to listen on and store in DHT")
-var Name = flag.String("name", "", "any string, seed for channel private key")
+var DaemonMode = flag.Bool("daemon", false, "daemon mode (disables command reader)")
+var Webhook = flag.String("webhook", "", "HTTP webhook address")
+var API = flag.String("api", "", "HTTP API listen address")
+var APICredentialsLogin = flag.String("api-login", "", "HTTP API credentials login")
+var APICredentialsPassword = flag.String("api-password", "", "HTTP API credentials password")
+var ConfigPath = flag.String("config", "payment-network-config.json", "config path")
 var ForceBlock = flag.Uint64("force-block", 0, "master block seqno to start scan from, ignored if 0, otherwise - overrides db value")
 
 func main() {
@@ -65,8 +69,14 @@ func main() {
 
 	adnl.Logger = func(v ...any) {}
 
-	if *Name == "" {
-		log.Fatal().Msg("-name flag should be set")
+	if *ConfigPath == "" {
+		log.Fatal().Msg("-config should have value or be not presented")
+		return
+	}
+
+	cfg, err := config.LoadConfig(*ConfigPath)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to load config")
 		return
 	}
 
@@ -74,9 +84,9 @@ func main() {
 
 	client := liteclient.NewConnectionPool()
 
-	tonCfg, err := liteclient.GetConfigFromUrl(context.Background(), "https://ton.org/testnet-global.config.json")
+	tonCfg, err := liteclient.GetConfigFromUrl(context.Background(), cfg.NetworkConfigUrl)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to get config")
+		log.Fatal().Err(err).Msg("failed to get network config")
 		return
 	}
 
@@ -87,15 +97,19 @@ func main() {
 		return
 	}
 
-	// TODO: set secure policy
+	policy := ton.ProofCheckPolicyFast
+	if cfg.SecureProofPolicy {
+		policy = ton.ProofCheckPolicySecure
+	}
+
 	// initialize ton api lite connection wrapper
-	api := ton.NewAPIClient(client, ton.ProofCheckPolicyFast).WithRetry(2).WithTimeout(5 * time.Second)
-	// api.SetTrustedBlockFromConfig(tonCfg)
+	apiClient := ton.NewAPIClient(client, policy).WithRetry(2).WithTimeout(5 * time.Second)
+	if cfg.SecureProofPolicy {
+		apiClient.SetTrustedBlockFromConfig(tonCfg)
+	}
 
-	sk := sha256.Sum256([]byte("adnl" + *Name))
-
-	serverKey := ed25519.NewKeyFromSeed(sk[:])
-	dhtGate := adnl.NewGateway(serverKey)
+	_, dhtKey, err := ed25519.GenerateKey(nil)
+	dhtGate := adnl.NewGateway(dhtKey)
 	if err = dhtGate.StartClient(); err != nil {
 		log.Fatal().Err(err).Msg("failed to init adnl gateway for dht")
 		return
@@ -107,26 +121,17 @@ func main() {
 		return
 	}
 
-	gate := adnl.NewGateway(serverKey)
+	gate := adnl.NewGateway(cfg.ADNLServerKey)
 
-	prepare(api, *Name, gate, dhtClient, serverKey, scanLog)
-}
-
-func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClient *dht.Client, key ed25519.PrivateKey, scanLog zerolog.Logger) {
-	hash := sha256.Sum256([]byte(name))
-	channelKey := ed25519.NewKeyFromSeed(hash[:])
-
-	isServer := false
-	if *IP != "" {
-		isServer = true
-		ip := net.ParseIP(*IP)
+	if cfg.ExternalIP != "" {
+		ip := net.ParseIP(cfg.ExternalIP)
 		if ip == nil {
 			log.Fatal().Msg("incorrect ip format")
 			return
 		}
 
 		gate.SetExternalIP(ip.To4())
-		if err := gate.StartServer(fmt.Sprintf(":%d", *Port)); err != nil {
+		if err := gate.StartServer(cfg.NodeListenAddr); err != nil {
 			log.Fatal().Err(err).Msg("failed to init adnl gateway")
 			return
 		}
@@ -137,13 +142,13 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 		}
 	}
 
-	fdb, err := leveldb.NewDB("./db/" + name)
+	fdb, err := leveldb.NewDB(cfg.DBPath, cfg.PaymentNodePrivateKey.Public().(ed25519.PublicKey))
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init leveldb")
 		return
 	}
 
-	tr := transport.NewServer(dhtClient, gate, key, channelKey, isServer)
+	tr := transport.NewServer(dhtClient, gate, cfg.ADNLServerKey, cfg.PaymentNodePrivateKey, cfg.ExternalIP != "")
 
 	var seqno uint32
 	if bo, err := fdb.GetBlockOffset(context.Background()); err != nil {
@@ -163,289 +168,283 @@ func prepare(api ton.APIClientWrapped, name string, gate *adnl.Gateway, dhtClien
 	}
 
 	inv := make(chan any)
-	sc := chain.NewScanner(api, payments.AsyncPaymentChannelCodeHash, seqno, scanLog)
+	sc := chain.NewScanner(apiClient, payments.AsyncPaymentChannelCodeHash, seqno, scanLog)
 	if err = sc.Start(context.Background(), inv); err != nil {
 		log.Fatal().Err(err).Msg("failed to start chain scanner")
 		return
 	}
 
-	w, err := wallet.FromPrivateKey(api, channelKey, wallet.HighloadV2Verified)
+	w, err := wallet.FromPrivateKey(apiClient, cfg.PaymentNodePrivateKey, wallet.HighloadV2Verified)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init wallet")
 		return
 	}
 	log.Info().Str("addr", w.WalletAddress().String()).Msg("wallet initialized")
 
-	svc := tonpayments.NewService(api, fdb, tr, w, inv, channelKey, payments.ClosingConfig{
-		QuarantineDuration:       600,
-		MisbehaviorFine:          tlb.MustFromTON("0.015"),
-		ConditionalCloseDuration: 180,
-	})
+	svc := tonpayments.NewService(apiClient, fdb, tr, w, inv, cfg.PaymentNodePrivateKey, cfg.ChannelConfig)
 	tr.SetService(svc)
-	log.Info().Hex("pubkey", channelKey.Public().(ed25519.PublicKey)).Msg("node initialized")
+	log.Info().Hex("pubkey", cfg.PaymentNodePrivateKey.Public().(ed25519.PublicKey)).Msg("node initialized")
 
-	go func() {
-	nextCommand:
-		for {
-			var cmd string
-			fmt.Scanln(&cmd)
-
-			switch cmd {
-			case "list":
-				svc.DebugPrintVirtualChannels()
-			case "inc":
-				println("Input address:")
-				var addr string
-				fmt.Scanln(&addr)
-
-				for i := 0; i < 50; i++ {
-					err = svc.IncrementStates(context.Background(), addr, true)
-					if err != nil {
-						println("failed to increment states with channel:", err.Error())
-						continue
-					}
+	if !*DaemonMode {
+		go func() {
+			for {
+				if err := commandReader(svc); err != nil {
+					log.Error().Err(err).Msg("command failed")
 				}
-			case "destroy":
-				println("Input address:")
-				var addr string
-				fmt.Scanln(&addr)
+			}
+		}()
+	}
 
-				err = svc.RequestCooperativeClose(context.Background(), addr)
-				if err != nil {
-					println("failed to coop close channel:", err.Error())
-					continue
-				}
-				println("CHANNEL COOP CLOSE REQUESTED")
-			case "kill":
-				println("Input address:")
-				var addr string
-				fmt.Scanln(&addr)
+	if *API != "" {
+		var credentials *api.Credentials
+		if *APICredentialsLogin != "" || *APICredentialsPassword != "" {
+			if *APICredentialsLogin == "" || *APICredentialsPassword == "" {
+				log.Fatal().Msg("both api login and password must be set in the same time")
+				return
+			}
 
-				err = svc.CloseUncooperative(context.Background(), addr)
-				if err != nil {
-					println("failed to uncoop close channel:", err.Error())
-					continue
-				}
-				println("CHANNEL UNCOOP CLOSE STARTED")
-			case "sign":
-				println("Channel private key:")
-				var strKey string
-				fmt.Scanln(&strKey)
-
-				btsKey, err := hex.DecodeString(strKey)
-				if err != nil {
-					println("incorrect format of key")
-					continue
-				}
-				if len(btsKey) != 32 {
-					println("incorrect len of key")
-					continue
-				}
-
-				println("Input amount:")
-				var strAmt string
-				fmt.Scanln(&strAmt)
-
-				amt, err := tlb.FromTON(strAmt)
-				if err != nil {
-					println("incorrect format of amount")
-					continue
-				}
-
-				vcKey := ed25519.NewKeyFromSeed(btsKey)
-				st := &payments.VirtualChannelState{
-					Amount: amt,
-				}
-				st.Sign(vcKey)
-
-				cll, err := st.ToCell()
-				if err != nil {
-					println("failed to serialize cell")
-					continue
-				}
-
-				println("KEY STATE:", hex.EncodeToString(vcKey.Public().(ed25519.PublicKey))+hex.EncodeToString(cll.ToBOC()))
-			case "close":
-				println("Input key+state:")
-				var state string
-				fmt.Scanln(&state)
-
-				btsState, err := hex.DecodeString(state)
-				if err != nil {
-					println("incorrect format of state")
-					continue
-				}
-				if len(btsState) <= 32 {
-					println("incorrect len of state")
-					continue
-				}
-
-				stateCell, err := cell.FromBOC(btsState[32:])
-				if err != nil {
-					println("incorrect state boc")
-					continue
-				}
-
-				var st payments.VirtualChannelState
-				err = tlb.LoadFromCell(&st, stateCell.BeginParse())
-				if err != nil {
-					println("incorrect state cell")
-					continue
-				}
-
-				err = svc.AddVirtualChannelResolve(context.Background(), btsState[:32], st)
-				if err != nil {
-					println("failed to add resolve to channel:", err.Error())
-					continue
-				}
-
-				err = svc.CloseVirtualChannel(context.Background(), btsState[:32])
-				if err != nil {
-					println("failed to close channel:", err.Error())
-					continue
-				}
-				println("VIRTUAL CHANNEL CLOSE REQUESTED")
-			case "deploy_out":
-				println("With node key:")
-				var strKey string
-				fmt.Scanln(&strKey)
-
-				btsKey, err := hex.DecodeString(strKey)
-				if err != nil {
-					println("incorrect format of key")
-					continue
-				}
-				if len(btsKey) != 32 {
-					println("incorrect len of key")
-					continue
-				}
-
-				println("Input amount:")
-				var strAmt string
-				fmt.Scanln(&strAmt)
-
-				amt, err := tlb.FromTON(strAmt)
-				if err != nil {
-					println("incorrect format of amount")
-					continue
-				}
-
-				ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
-				addr, err := svc.DeployChannelWithNode(ctx, amt, btsKey)
-				cancel()
-				if err != nil {
-					log.Error().Err(err).Msg("failed to deploy channel with node")
-					continue
-				}
-				println("DEPLOYED:", addr.String())
-			case "deploy_in":
-				println("With node key:")
-				var strKey string
-				fmt.Scanln(&strKey)
-
-				btsKey, err := hex.DecodeString(strKey)
-				if err != nil {
-					println("incorrect format of key")
-					continue
-				}
-				if len(btsKey) != 32 {
-					println("incorrect len of key")
-					continue
-				}
-
-				println("Input amount:")
-				var strAmt string
-				fmt.Scanln(&strAmt)
-
-				amt, err := tlb.FromTON(strAmt)
-				if err != nil {
-					println("incorrect format of amount")
-					continue
-				}
-
-				ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
-				err = svc.RequestInboundChannel(ctx, amt, btsKey)
-				cancel()
-				if err != nil {
-					log.Error().Err(err).Msg("failed to request deploy channel with node")
-					continue
-				}
-				println("DEPLOY REQUESTED")
-			case "open", "send":
-				println("Receivers keys ',' separated:")
-				var strKeys string
-				fmt.Scanln(&strKeys)
-
-				keys := strings.Split(strings.ReplaceAll(strKeys, " ", ""), ",")
-
-				var with []byte
-				var parsedKeys [][]byte
-				for _, strKey := range keys {
-					btsKey, err := hex.DecodeString(strKey)
-					if err != nil {
-						println("incorrect format of key")
-						continue nextCommand
-					}
-					if len(btsKey) != 32 {
-						println("incorrect len of key")
-						continue nextCommand
-					}
-
-					if with == nil {
-						with = btsKey
-					}
-
-					parsedKeys = append(parsedKeys, btsKey)
-				}
-
-				println("Input amount (exclude fee, 0.01 per node):")
-				var strAmt string
-				fmt.Scanln(&strAmt)
-
-				amt, err := tlb.FromTON(strAmt)
-				if err != nil {
-					println("incorrect format of amount")
-					continue
-				}
-
-				var tunChain []transport.TunnelChainPart
-				for i, parsedKey := range parsedKeys {
-					fee := big.NewInt(0)
-					if len(parsedKeys)-i > 1 {
-						fee = new(big.Int).Mul(tlb.MustFromTON("0.01").Nano(), big.NewInt(int64(len(parsedKeys)-i)-1))
-					}
-
-					tunChain = append(tunChain, transport.TunnelChainPart{
-						Target:   parsedKey,
-						Capacity: amt.Nano(),
-						Fee:      fee,
-						Deadline: time.Now().Add(1*time.Hour + (30*time.Minute)*time.Duration(len(parsedKeys)-i)),
-					})
-				}
-
-				_, vPriv, _ := ed25519.GenerateKey(nil)
-				vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 5, cmd == "send")
-				if err != nil {
-					println("failed to generate tunnel:", err.Error())
-					continue
-				}
-
-				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-				err = svc.OpenVirtualChannel(ctx, with, firstInstructionKey, vPriv, tun, vc)
-				cancel()
-				if err != nil {
-					log.Error().Err(err).Msg("failed to open virtual channel with node")
-					continue
-				}
-
-				if cmd != "send" {
-					println("VIRTUAL CHANNEL OPENING REQUESTED, PRIVATE KEY:", hex.EncodeToString(vPriv.Seed()))
-				}
-			default:
-				println("UNKNOWN COMMAND " + cmd)
+			credentials = &api.Credentials{
+				Login:    *APICredentialsLogin,
+				Password: *APICredentialsPassword,
 			}
 		}
-	}()
+
+		go func() {
+			log.Info().Str("api", *API).Str("webhook", *Webhook).Msg("api initialized")
+
+			if err := api.NewServer(*API, *Webhook, svc, fdb, credentials).Start(); err != nil {
+				log.Error().Err(err).Msg("failed to start api server")
+			}
+		}()
+	}
 
 	svc.Start()
+}
+
+func commandReader(svc *tonpayments.Service) error {
+	var cmd string
+	_, _ = fmt.Scanln(&cmd)
+
+	switch cmd {
+	case "list":
+		svc.DebugPrintVirtualChannels()
+	case "inc":
+		log.Info().Msg("input channel address to run increment state test:")
+		var addr string
+		_, _ = fmt.Scanln(&addr)
+
+		for i := 0; i < 30; i++ {
+			if err := svc.IncrementStates(context.Background(), addr, true); err != nil {
+				return fmt.Errorf("failed to increment states with channel: %w", err)
+			}
+		}
+	case "destroy":
+		log.Info().Msg("to start cooperative close input channel address:")
+		var addr string
+		_, _ = fmt.Scanln(&addr)
+
+		if err := svc.RequestCooperativeClose(context.Background(), addr); err != nil {
+			return fmt.Errorf("failed to close channel cooperatively: %w", err)
+		}
+		log.Info().Msg("cooperative channel closure attempt has been started")
+	case "kill":
+		log.Info().Msg("to start uncooperative close input channel address:")
+		var addr string
+		_, _ = fmt.Scanln(&addr)
+
+		if err := svc.RequestUncooperativeClose(context.Background(), addr); err != nil {
+			return fmt.Errorf("failed to close channel uncooperatively: %w", err)
+		}
+		log.Info().Msg("uncooperative channel closure has been started")
+	case "sign":
+		log.Info().Msg("input virtual channel private key:")
+		var strKey string
+		_, _ = fmt.Scanln(&strKey)
+
+		btsKey, err := hex.DecodeString(strKey)
+		if err != nil {
+			return fmt.Errorf("incorrect format of key: %w", err)
+		}
+		if len(btsKey) != 32 {
+			return fmt.Errorf("incorrect len of key: %d, should be 32", len(btsKey))
+		}
+
+		log.Info().Msg("input amount:")
+		var strAmt string
+		_, _ = fmt.Scanln(&strAmt)
+
+		amt, err := tlb.FromTON(strAmt)
+		if err != nil {
+			return fmt.Errorf("incorrect format of amount: %w", err)
+		}
+
+		vcKey := ed25519.NewKeyFromSeed(btsKey)
+		st := &payments.VirtualChannelState{
+			Amount: amt,
+		}
+		st.Sign(vcKey)
+
+		cll, err := st.ToCell()
+		if err != nil {
+			return fmt.Errorf("failed to serialize cell: %w", err)
+		}
+
+		log.Info().Str("signed_state", hex.EncodeToString(vcKey.Public().(ed25519.PublicKey))+hex.EncodeToString(cll.ToBOC())).Msg("state was signed")
+	case "close":
+		log.Info().Msg("enter the virtual channel final state hex:")
+
+		var state string
+		_, _ = fmt.Scanln(&state)
+
+		btsState, err := hex.DecodeString(state)
+		if err != nil {
+			return fmt.Errorf("incorrect format of state: %w", err)
+		}
+		if len(btsState) <= 32 {
+			return fmt.Errorf("incorrect len of state")
+		}
+
+		stateCell, err := cell.FromBOC(btsState[32:])
+		if err != nil {
+			return fmt.Errorf("incorrect state BoC: %w", err)
+		}
+
+		var st payments.VirtualChannelState
+		err = tlb.LoadFromCell(&st, stateCell.BeginParse())
+		if err != nil {
+			return fmt.Errorf("incorrect state cell: %w", err)
+		}
+
+		err = svc.AddVirtualChannelResolve(context.Background(), btsState[:32], st)
+		if err != nil {
+			return fmt.Errorf("failed to add resolve to channel: %w", err)
+		}
+
+		err = svc.CloseVirtualChannel(context.Background(), btsState[:32])
+		if err != nil {
+			return fmt.Errorf("failed to close channel: %w", err)
+		}
+		log.Info().Msg("virtual channel closure requested")
+	case "deploy":
+		log.Info().Msg("enter the key of node to deploy channel with:")
+
+		var strKey string
+		_, _ = fmt.Scanln(&strKey)
+
+		btsKey, err := hex.DecodeString(strKey)
+		if err != nil {
+			return fmt.Errorf("incorrect format of key: %w", err)
+		}
+		if len(btsKey) != 32 {
+			return fmt.Errorf("incorrect len of key: %d, should be 32", len(btsKey))
+		}
+
+		log.Info().Msg("input amount:")
+		var strAmt string
+		_, _ = fmt.Scanln(&strAmt)
+
+		amt, err := tlb.FromTON(strAmt)
+		if err != nil {
+			return fmt.Errorf("incorrect format of amount: %w", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+		addr, err := svc.DeployChannelWithNode(ctx, amt, btsKey)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("failed to deploy channel with node: %w", err)
+		}
+		log.Info().Str("address", addr.String()).Msg("onchain channel deployed")
+	case "open", "send":
+		log.Info().Msg("enter nodes to tunnel virtual channel through, including receiver (',' separated):")
+		var strKeys string
+		_, _ = fmt.Scanln(&strKeys)
+
+		keys := strings.Split(strings.ReplaceAll(strKeys, " ", ""), ",")
+
+		var with []byte
+		var parsedKeys [][]byte
+		for _, strKey := range keys {
+			btsKey, err := hex.DecodeString(strKey)
+			if err != nil {
+				return fmt.Errorf("incorrect format of key: %w", err)
+			}
+			if len(btsKey) != 32 {
+				return fmt.Errorf("incorrect len of key: %d, should be 32", len(btsKey))
+			}
+
+			if with == nil {
+				with = btsKey
+			}
+
+			parsedKeys = append(parsedKeys, btsKey)
+		}
+
+		log.Info().Msg("input amount, excluding tunnelling fee:")
+
+		var strAmt string
+		_, _ = fmt.Scanln(&strAmt)
+
+		amt, err := tlb.FromTON(strAmt)
+		if err != nil {
+			return fmt.Errorf("incorrect format of amount: %w", err)
+		}
+
+		log.Info().Msg("input fee amount per each proxy node:")
+
+		var strAmtFee string
+		_, _ = fmt.Scanln(&strAmtFee)
+
+		amtFee, err := tlb.FromTON(strAmtFee)
+		if err != nil {
+			return fmt.Errorf("incorrect format of fee amount: %w", err)
+		}
+
+		fullAmt := new(big.Int).Set(amt.Nano())
+		var tunChain []transport.TunnelChainPart
+		for i, parsedKey := range parsedKeys {
+			fee := big.NewInt(0)
+			if len(parsedKeys)-i > 1 {
+				fee = new(big.Int).Mul(amtFee.Nano(), big.NewInt(int64(len(parsedKeys)-i)-1))
+				fullAmt = fullAmt.Add(fullAmt, fee)
+			}
+
+			tunChain = append(tunChain, transport.TunnelChainPart{
+				Target:   parsedKey,
+				Capacity: amt.Nano(),
+				Fee:      fee,
+				Deadline: time.Now().Add(1*time.Hour + (30*time.Minute)*time.Duration(len(parsedKeys)-i)),
+			})
+		}
+
+		_, vPriv, _ := ed25519.GenerateKey(nil)
+		vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 5, cmd == "send")
+		if err != nil {
+			return fmt.Errorf("failed to generate tunnel: %w", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		err = svc.OpenVirtualChannel(ctx, with, firstInstructionKey, vPriv, tun, vc)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("failed to open virtual channel with node: %w", err)
+		}
+
+		if cmd != "send" {
+			log.Info().
+				Str("private_key", hex.EncodeToString(vPriv.Seed())).
+				Str("total_amount", tlb.FromNanoTON(fullAmt).String()).
+				Str("capacity", amt.String()).
+				Msg("virtual channel opening requested")
+		} else {
+			log.Info().
+				Str("total_amount", tlb.FromNanoTON(fullAmt).String()).
+				Str("amount", amt.String()).
+				Msg("virtual transfer requested")
+		}
+	default:
+		return fmt.Errorf("unknown command: %s", cmd)
+	}
+
+	return nil
 }

@@ -23,7 +23,7 @@ func init() {
 
 	tl.Register(Decision{}, "payments.decision agreed:Bool reason:string = payments.Decision")
 	tl.Register(ProposalDecision{}, "payments.proposalDecision agreed:Bool reason:string signedState:bytes = payments.ProposalDecision")
-	tl.Register(ChannelConfig{}, "payments.channelConfig excessFee:bytes walletAddr:int256 quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.ChannelConfig")
+	tl.Register(ChannelConfig{}, "payments.channelConfig excessFee:bytes virtualTunnelFee:bytes walletAddr:int256 quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.ChannelConfig")
 	tl.Register(AuthenticateToSign{}, "payments.authenticateToSign a:int256 b:int256 timestamp:long = payments.AuthenticateToSign")
 	tl.Register(NodeAddress{}, "payments.nodeAddress adnl_addr:int256 = payments.NodeAddress")
 
@@ -38,7 +38,6 @@ func init() {
 	tl.Register(GetChannelConfig{}, "payments.getChannelConfig = payments.Request")
 	tl.Register(RequestAction{}, "payments.requestAction channelAddr:int256 action:payments.Action = payments.Request")
 	tl.Register(ProposeAction{}, "payments.proposeAction channelAddr:int256 action:payments.Action state:bytes = payments.Request")
-	tl.Register(RequestInboundChannel{}, "payments.requestInboundChannel key:int256 wallet:int256 capacity:bytes = payments.Request")
 	tl.Register(Authenticate{}, "payments.authenticate key:int256 timestamp:long signature:bytes = payments.Authenticate")
 
 	tl.Register(InstructionContainer{}, "payments.instructionContainer hash:int256 data:bytes = payments.InstructionContainer")
@@ -76,14 +75,6 @@ type AuthenticateToSign struct {
 	A         []byte `tl:"int256"`
 	B         []byte `tl:"int256"`
 	Timestamp int64  `tl:"long"`
-}
-
-// RequestInboundChannel - request party to deploy channel with us,
-// and initialize it with Capacity amount, to send us coins
-type RequestInboundChannel struct {
-	Key      []byte `tl:"int256"`
-	Wallet   []byte `tl:"int256"`
-	Capacity []byte `tl:"bytes"`
 }
 
 // ProposeAction - request party to update state with action,
@@ -200,6 +191,7 @@ type GetChannelConfig struct{}
 // ChannelConfig - response of GetChannelConfig
 type ChannelConfig struct {
 	ExcessFee                []byte `tl:"bytes"`
+	VirtualTunnelFee         []byte `tl:"bytes"`
 	WalletAddr               []byte `tl:"int256"`
 	QuarantineDuration       uint32 `tl:"int"`
 	MisbehaviorFine          []byte `tl:"bytes"`

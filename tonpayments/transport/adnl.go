@@ -15,7 +15,6 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
-	"math/big"
 	"math/rand"
 	"sync"
 	"time"
@@ -38,7 +37,6 @@ type Service interface {
 	GetChannelConfig() ChannelConfig
 	ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action) (*payments.SignedSemiChannel, error)
 	ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action Action) error
-	ProcessInboundChannelRequest(ctx context.Context, capacity *big.Int, walletAddr *address.Address, key ed25519.PublicKey) error
 }
 
 type Server struct {
@@ -237,17 +235,6 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			}
 		case Ping:
 			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Pong{Value: q.Value}); err != nil {
-				return err
-			}
-		case RequestInboundChannel:
-			res := Decision{Agreed: true}
-			err := s.svc.ProcessInboundChannelRequest(ctx, new(big.Int).SetBytes(q.Capacity), address.NewAddress(0, 0, q.Wallet), q.Key)
-			if err != nil {
-				res.Agreed = false
-				res.Reason = err.Error()
-			}
-
-			if err = peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, res); err != nil {
 				return err
 			}
 		case ProposeAction:
@@ -498,19 +485,6 @@ func (s *Server) RequestAction(ctx context.Context, channelAddr *address.Address
 		ChannelAddr: channelAddr.Data(),
 		Action:      action,
 	}, &res, false)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
-	}
-	return &res, nil
-}
-
-func (s *Server) RequestInboundChannel(ctx context.Context, capacity *big.Int, ourWallet *address.Address, ourKey, theirKey []byte) (*Decision, error) {
-	var res Decision
-	err := s.doQuery(ctx, theirKey, RequestInboundChannel{
-		Key:      ourKey,
-		Wallet:   ourWallet.Data(),
-		Capacity: capacity.Bytes(),
-	}, &res, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}

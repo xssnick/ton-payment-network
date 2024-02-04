@@ -2,6 +2,7 @@ package leveldb
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/iterator"
@@ -11,7 +12,8 @@ import (
 )
 
 type DB struct {
-	_db *leveldb.DB
+	_db    *leveldb.DB
+	pubKey ed25519.PublicKey
 
 	channelLocks map[string]*sync.Mutex
 
@@ -53,7 +55,7 @@ type executor interface {
 	NewIterator(slice *util.Range, ro *opt.ReadOptions) iterator.Iterator
 }
 
-func NewDB(path string) (*DB, error) {
+func NewDB(path string, pubKey ed25519.PublicKey) (*DB, error) {
 	db, err := leveldb.OpenFile(path, nil)
 	if err != nil {
 		return nil, err
@@ -62,6 +64,7 @@ func NewDB(path string) (*DB, error) {
 	return &DB{
 		channelLocks: map[string]*sync.Mutex{},
 		_db:          db,
+		pubKey:       pubKey,
 	}, nil
 }
 

@@ -72,9 +72,3 @@ type IncrementStatesTask struct {
 type RemoveVirtualTask struct {
 	Key []byte
 }
-
-type DeployInboundTask struct {
-	Key           []byte
-	Capacity      string
-	WalletAddress string
-}

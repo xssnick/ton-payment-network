@@ -93,7 +93,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 
 		toExecute = func(ctx context.Context) error {
 			if data.WantResponse {
-				err = s.db.CreateTask(ctx, "increment-state", channel.Address,
+				err = s.db.CreateTask(ctx, PaymentsTaskPool, "increment-state", channel.Address,
 					"increment-state-"+channel.Address+"-"+fmt.Sprint(channel.Our.State.Data.Seqno),
 					db.IncrementStatesTask{
 						ChannelAddress: channel.Address,
@@ -306,11 +306,11 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			}
 
 			ourFee := new(big.Int).Sub(vch.Fee, nextFee)
-			if ourFee.Cmp(s.virtualChannelFee.Nano()) == -1 {
-				return nil, fmt.Errorf("min fee to open channel is %s TON", s.virtualChannelFee.String())
+			if ourFee.Cmp(s.virtualChannelProxyFee.Nano()) == -1 {
+				return nil, fmt.Errorf("min fee to open channel is %s TON", s.virtualChannelProxyFee.String())
 			}
 
-			targetChannels, err := s.db.GetChannelsWithKey(context.Background(), currentInstruction.NextTarget)
+			targetChannels, err := s.db.GetChannels(context.Background(), currentInstruction.NextTarget, db.ChannelStateAny)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get target channel: %w", err)
 			}
@@ -347,7 +347,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 				data.InstructionKey = currentInstruction.NextInstructionKey
 
 				tryTill := time.Unix(currentInstruction.NextDeadline, 0)
-				err = s.db.CreateTask(ctx, "open-virtual", target.Address,
+				err = s.db.CreateTask(ctx, PaymentsTaskPool, "open-virtual", target.Address,
 					"open-virtual-"+hex.EncodeToString(vch.Key),
 					db.OpenVirtualTask{
 						PrevChannelAddress: channel.Address,
@@ -399,7 +399,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 					}
 
 					tryTill := time.Unix(vch.Deadline, 0)
-					if err = s.db.CreateTask(ctx, "close-next-virtual", channel.Address,
+					if err = s.db.CreateTask(ctx, PaymentsTaskPool, "close-next-virtual", channel.Address,
 						"close-next-"+hex.EncodeToString(vch.Key),
 						db.CloseNextVirtualTask{
 							VirtualKey: vch.Key,
@@ -484,39 +484,6 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 	return &channel.Our.SignedSemiChannel, nil
 }
 
-func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *big.Int, walletAddr *address.Address, key ed25519.PublicKey) error {
-	list, err := s.db.GetChannelsWithKey(context.Background(), key)
-	if err != nil {
-		return fmt.Errorf("failed to get active channels: %w", err)
-	}
-
-	usedCapacity := new(big.Int).Set(capacity)
-	for _, channel := range list {
-		if channel.Status != db.ChannelStateInactive {
-			usedCapacity.Add(usedCapacity, channel.OurOnchain.Deposited)
-		}
-	}
-
-	if usedCapacity.Cmp(s.maxOutboundCapacity.Nano()) == 1 {
-		return fmt.Errorf("maximum outbound capacity reached")
-	}
-
-	// TODO: also check inside task to not allow ddos
-
-	if err = s.db.CreateTask(ctx, "deploy-inbound", walletAddr.String(),
-		"deploy-inbound-"+hex.EncodeToString(key)+"-"+fmt.Sprint(time.Now().Unix()/30),
-		db.DeployInboundTask{
-			Key:           key,
-			Capacity:      capacity.String(),
-			WalletAddress: walletAddr.String(),
-		}, nil, nil,
-	); err != nil {
-		return fmt.Errorf("failed to create deploy-inbound task: %w", err)
-	}
-
-	return nil
-}
-
 func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action transport.Action) error {
 	s.mx.Lock()
 	defer s.mx.Unlock()
@@ -547,7 +514,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		}
 
 		tryTill := time.Unix(vch.Deadline, 0)
-		if err = s.db.CreateTask(context.Background(), "remove-virtual", channel.Address,
+		if err = s.db.CreateTask(context.Background(), PaymentsTaskPool, "remove-virtual", channel.Address,
 			"remove-virtual-"+hex.EncodeToString(vch.Key),
 			db.RemoveVirtualTask{
 				Key: data.Key,
@@ -589,7 +556,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			}
 
 			tryTill := time.Unix(vch.Deadline+(channel.SafeOnchainClosePeriod/2), 0)
-			if err = s.db.CreateTask(ctx, "confirm-close-virtual", channel.Address,
+			if err = s.db.CreateTask(ctx, PaymentsTaskPool, "confirm-close-virtual", channel.Address,
 				"confirm-close-virtual-"+hex.EncodeToString(vch.Key),
 				db.ConfirmCloseVirtualTask{
 					VirtualKey: data.Key,
@@ -609,7 +576,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 
 			// Creating aggressive onchain close task, for the future,
 			// in case we will not be able to communicate with party
-			if err = s.db.CreateTask(ctx, "uncooperative-close", channel.Address+"-uncoop",
+			if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", channel.Address+"-uncoop",
 				"uncooperative-close-"+channel.Address+"-vc-"+hex.EncodeToString(vch.Key),
 				db.ChannelUncooperativeCloseTask{
 					Address:                 channel.Address,

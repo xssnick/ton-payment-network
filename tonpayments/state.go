@@ -44,7 +44,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 
 		var slot = -1
 		// TODO: we are looking for a free slot to keep it compact, [make it better]
-		for i := 0; i < s.virtualChannelsLimit; i++ {
+		for i := 0; i < s.virtualChannelsLimitPerChannel; i++ {
 			if channel.Our.State.Data.Conditionals.GetByIntKey(big.NewInt(int64(i))) == nil {
 				slot = i
 				break

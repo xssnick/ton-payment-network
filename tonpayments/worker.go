@@ -10,7 +10,6 @@ import (
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
-	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
@@ -19,7 +18,7 @@ import (
 )
 
 func (s *Service) addPeersForChannels() error {
-	list, err := s.db.GetActiveChannels(context.Background())
+	list, err := s.db.GetChannels(context.Background(), nil, db.ChannelStateActive)
 	if err != nil {
 		return err
 	}
@@ -31,8 +30,10 @@ func (s *Service) addPeersForChannels() error {
 }
 
 func (s *Service) taskExecutor() {
+	tick := time.Tick(1 * time.Second)
+
 	for {
-		task, err := s.db.AcquireTask(context.Background())
+		task, err := s.db.AcquireTask(context.Background(), PaymentsTaskPool)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to acquire task from db")
 			time.Sleep(3 * time.Second)
@@ -42,7 +43,7 @@ func (s *Service) taskExecutor() {
 		if task == nil {
 			select {
 			case <-s.workerSignal:
-			case <-time.After(1 * time.Second):
+			case <-tick:
 			}
 			continue
 		}
@@ -133,7 +134,7 @@ func (s *Service) taskExecutor() {
 						}
 
 						tryTill := time.Unix(vch.Deadline, 0)
-						if err = s.db.CreateTask(ctx, "close-next-virtual", meta.FromChannelAddress,
+						if err = s.db.CreateTask(ctx, PaymentsTaskPool, "close-next-virtual", meta.FromChannelAddress,
 							"close-next-"+hex.EncodeToString(data.VirtualKey),
 							db.CloseNextVirtualTask{
 								VirtualKey: data.VirtualKey,
@@ -234,7 +235,7 @@ func (s *Service) taskExecutor() {
 									tryTill := time.Unix(data.Deadline, 0)
 									// consider virtual channel unsuccessful and gracefully removed
 									// and notify previous party that we are ready to release locked coins.
-									err = s.db.CreateTask(ctx, "ask-remove-virtual", data.PrevChannelAddress,
+									err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-remove-virtual", data.PrevChannelAddress,
 										"ask-remove-virtual-"+hex.EncodeToString(data.VirtualKey),
 										db.AskRemoveVirtualTask{
 											ChannelAddress: data.PrevChannelAddress,
@@ -320,7 +321,7 @@ func (s *Service) taskExecutor() {
 
 							// Creating aggressive onchain close task, for the future,
 							// in case we will not be able to communicate with party
-							if err = s.db.CreateTask(ctx, "uncooperative-close", meta.ToChannelAddress+"-uncoop",
+							if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", meta.ToChannelAddress+"-uncoop",
 								"uncooperative-close-"+meta.ToChannelAddress+"-vc-"+hex.EncodeToString(data.Key),
 								db.ChannelUncooperativeCloseTask{
 									Address:                 meta.ToChannelAddress,
@@ -360,7 +361,7 @@ func (s *Service) taskExecutor() {
 						tryTill := time.Unix(vch.Deadline, 0)
 						// consider virtual channel unsuccessful and gracefully removed
 						// and notify previous party that we are ready to release locked coins.
-						err = s.db.CreateTask(ctx, "ask-remove-virtual", meta.FromChannelAddress,
+						err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-remove-virtual", meta.FromChannelAddress,
 							"ask-remove-virtual-"+hex.EncodeToString(data.Key),
 							db.AskRemoveVirtualTask{
 								ChannelAddress: meta.FromChannelAddress,
@@ -442,7 +443,7 @@ func (s *Service) taskExecutor() {
 					ctxTx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 					defer cancel()
 
-					if err = s.StartUncooperativeClose(ctxTx, data.Address); err != nil {
+					if err = s.startUncooperativeClose(ctxTx, data.Address); err != nil {
 						log.Error().Err(err).Str("channel", data.Address).Msg("failed to start uncooperative close")
 						return err
 					}
@@ -455,7 +456,7 @@ func (s *Service) taskExecutor() {
 					ctxTx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 					defer cancel()
 
-					if err = s.ChallengeChannelState(ctxTx, data.Address); err != nil {
+					if err = s.challengeChannelState(ctxTx, data.Address); err != nil {
 						log.Error().Err(err).Str("channel", data.Address).Msg("failed to challenge state")
 						return err
 					}
@@ -468,7 +469,7 @@ func (s *Service) taskExecutor() {
 					ctxTx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 					defer cancel()
 
-					if err = s.SettleChannelConditionals(ctxTx, data.Address); err != nil {
+					if err = s.settleChannelConditionals(ctxTx, data.Address); err != nil {
 						log.Error().Err(err).Str("channel", data.Address).Msg("failed to settle conditionals")
 						return err
 					}
@@ -478,22 +479,10 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					if err = s.FinishUncooperativeChannelClose(ctx, data.Address); err != nil {
+					if err = s.finishUncooperativeChannelClose(ctx, data.Address); err != nil {
 						log.Error().Err(err).Str("channel", data.Address).Msg("failed to finish close")
 						return err
 					}
-				case "deploy-inbound":
-					var data db.DeployInboundTask
-					if err = json.Unmarshal(task.Data, &data); err != nil {
-						return fmt.Errorf("invalid json: %w", err)
-					}
-
-					capacity, _ := new(big.Int).SetString(data.Capacity, 10)
-					addr, err := s.deployChannelWithNode(context.Background(), data.Key, address.MustParseAddr(data.WalletAddress), tlb.FromNanoTON(capacity))
-					if err != nil {
-						return fmt.Errorf("deploy of requested channel is failed: %w", err)
-					}
-					log.Info().Str("addr", addr.String()).Msg("requested channel is deployed")
 				default:
 					log.Error().Err(err).Str("type", task.Type).Str("id", task.ID).Msg("unknown task type, skipped")
 					return fmt.Errorf("unknown task type")
@@ -522,7 +511,7 @@ func (s *Service) taskExecutor() {
 				return
 			}
 
-			if err = s.db.CompleteTask(context.Background(), task); err != nil {
+			if err = s.db.CompleteTask(context.Background(), PaymentsTaskPool, task); err != nil {
 				log.Error().Err(err).Str("id", task.ID).Msg("failed to set complete for task in db")
 			}
 
