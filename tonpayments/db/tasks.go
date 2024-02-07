@@ -47,6 +47,7 @@ type ConfirmCloseVirtualTask struct {
 type CloseNextVirtualTask struct {
 	VirtualKey []byte
 	State      []byte
+	IsTransfer bool
 }
 
 type OpenVirtualTask struct {

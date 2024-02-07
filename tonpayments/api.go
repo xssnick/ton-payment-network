@@ -163,27 +163,6 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 	return nil
 }
 
-func (s *Service) GetVirtualChannelResolveAmount(ctx context.Context, virtualKey ed25519.PublicKey) (tlb.Coins, error) {
-	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			return tlb.Coins{}, fmt.Errorf("virtual channel is not exists")
-		}
-		return tlb.Coins{}, fmt.Errorf("failed to load virtual channel meta: %w", err)
-	}
-
-	if !meta.Active {
-		return tlb.Coins{}, fmt.Errorf("virtual channel is inactive")
-	}
-
-	resolve := meta.GetKnownResolve(virtualKey)
-	if resolve == nil {
-		return tlb.Coins{}, ErrNoResolveExists
-	}
-
-	return resolve.Amount, nil
-}
-
 func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error {
 	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
 	if err != nil {
@@ -193,8 +172,8 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 		return fmt.Errorf("failed to load virtual channel meta: %w", err)
 	}
 
-	if meta.FromChannelAddress != "" {
-		ch, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
+	if meta.Incoming != nil {
+		ch, err := s.db.GetChannel(ctx, meta.Incoming.ChannelAddress)
 		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				return fmt.Errorf("onchain channel with source not exists")
@@ -222,7 +201,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 		}
 	} else {
 		// in case we are the final point, check against our channel
-		ch, err := s.db.GetChannel(ctx, meta.ToChannelAddress)
+		ch, err := s.db.GetChannel(ctx, meta.Outgoing.ChannelAddress)
 		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				return fmt.Errorf("onchain channel with target not exists")
@@ -250,7 +229,8 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 		}
 	}
 
-	if !meta.Active {
+	// TODO: maybe allow in want state, but need to check concurrency cases
+	if meta.Status != db.VirtualChannelStateActive {
 		return fmt.Errorf("virtual channel is inactive")
 	}
 
@@ -258,6 +238,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 		return fmt.Errorf("failed to add channel condition resolve: %w", err)
 	}
 
+	meta.UpdatedAt = time.Now()
 	if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 		return fmt.Errorf("failed to update channel in db: %w", err)
 	}
@@ -291,13 +272,17 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		return fmt.Errorf("failed to load virtual channel meta: %w", err)
 	}
 
-	unlock, err := s.db.AcquireChannelLock(ctx, meta.FromChannelAddress)
+	if meta.Incoming == nil {
+		return fmt.Errorf("cannot close outgoing channel")
+	}
+
+	unlock, err := s.db.AcquireChannelLock(ctx, meta.Incoming.ChannelAddress)
 	if err != nil {
 		return fmt.Errorf("failed to acquire channel lock: %w", err)
 	}
 	defer unlock()
 
-	ch, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
+	ch, err := s.db.GetChannel(ctx, meta.Incoming.ChannelAddress)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			return fmt.Errorf("onchain channel with source not exists")
@@ -326,7 +311,8 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		return fmt.Errorf("failed to serialize state to cell: %w", err)
 	}
 
-	meta.ReadyToReleaseCoins = true
+	meta.Status = db.VirtualChannelStateWantClose
+	meta.UpdatedAt = time.Now()
 	if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 		return fmt.Errorf("failed to update channel in db: %w", err)
 	}

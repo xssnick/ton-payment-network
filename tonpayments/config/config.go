@@ -3,6 +3,8 @@ package config
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,15 +23,16 @@ type ChannelConfig struct {
 }
 
 type Config struct {
-	ADNLServerKey         ed25519.PrivateKey
-	PaymentNodePrivateKey ed25519.PrivateKey
-	APIListenAddr         string
-	NodeListenAddr        string
-	ExternalIP            string
-	NetworkConfigUrl      string
-	DBPath                string
-	SecureProofPolicy     bool
-	ChannelConfig         ChannelConfig
+	ADNLServerKey                  ed25519.PrivateKey
+	PaymentNodePrivateKey          ed25519.PrivateKey
+	APIListenAddr                  string
+	WebhooksSignatureHMACSHA256Key string
+	NodeListenAddr                 string
+	ExternalIP                     string
+	NetworkConfigUrl               string
+	DBPath                         string
+	SecureProofPolicy              bool
+	ChannelConfig                  ChannelConfig
 }
 
 func checkIPAddress(ip string) string {
@@ -144,15 +147,21 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 
+		whKey := make([]byte, 32)
+		if _, err = rand.Read(whKey); err != nil {
+			return nil, err
+		}
+
 		cfg := &Config{
-			ADNLServerKey:         nodePriv,
-			PaymentNodePrivateKey: priv,
-			APIListenAddr:         "0.0.0.0:8096",
-			NodeListenAddr:        "0.0.0.0:17555",
-			ExternalIP:            "",
-			NetworkConfigUrl:      "https://ton.org/testnet-global.config.json",
-			DBPath:                "./payment-node-db",
-			SecureProofPolicy:     false,
+			ADNLServerKey:                  nodePriv,
+			PaymentNodePrivateKey:          priv,
+			APIListenAddr:                  "0.0.0.0:8096",
+			NodeListenAddr:                 "0.0.0.0:17555",
+			ExternalIP:                     "",
+			NetworkConfigUrl:               "https://ton.org/testnet-global.config.json",
+			DBPath:                         "./payment-node-db",
+			WebhooksSignatureHMACSHA256Key: base64.StdEncoding.EncodeToString(whKey),
+			SecureProofPolicy:              false,
 			ChannelConfig: ChannelConfig{
 				VirtualChannelProxyFee:      "0.01",
 				QuarantineDurationSec:       600,

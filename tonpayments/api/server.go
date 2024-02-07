@@ -11,11 +11,13 @@ import (
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
+	"github.com/xssnick/tonutils-go/tvm/cell"
 	"net/http"
 	"time"
 )
 
 type Queue interface {
+	CreateTask(ctx context.Context, poolName, typ, queue, id string, data any, executeAfter, executeTill *time.Time) error
 	AcquireTask(ctx context.Context, poolName string) (*db.Task, error)
 	RetryTask(ctx context.Context, task *db.Task, reason string, retryAt time.Time) error
 	CompleteTask(ctx context.Context, poolName string, task *db.Task) error
@@ -47,6 +49,7 @@ type Server struct {
 	svc            Service
 	queue          Queue
 	webhook        string
+	webhookKey     string
 	webhookSignal  chan bool
 	srv            http.Server
 	sender         http.Client
@@ -58,11 +61,12 @@ type Credentials struct {
 	Password string
 }
 
-func NewServer(addr, webhook string, svc Service, queue Queue, credentials *Credentials) *Server {
+func NewServer(addr, webhook, webhookKey string, svc Service, queue Queue, credentials *Credentials) *Server {
 	s := &Server{
-		svc:     svc,
-		queue:   queue,
-		webhook: webhook,
+		svc:        svc,
+		queue:      queue,
+		webhook:    webhook,
+		webhookKey: webhookKey,
 		sender: http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -91,6 +95,7 @@ func NewServer(addr, webhook string, svc Service, queue Queue, credentials *Cred
 }
 
 func (s *Server) Start() error {
+	go s.startWebhooksSender()
 	return s.srv.ListenAndServe()
 }
 
@@ -140,4 +145,26 @@ func parseKey(key string) (ed25519.PublicKey, error) {
 		return nil, fmt.Errorf("incorrect key length, should be 32")
 	}
 	return ed25519.PublicKey(k), nil
+}
+
+func parseState(state string, key ed25519.PublicKey) (payments.VirtualChannelState, error) {
+	s, err := hex.DecodeString(state)
+	if err != nil {
+		return payments.VirtualChannelState{}, fmt.Errorf("failed to decode state from hex: %w", err)
+	}
+
+	cll, err := cell.FromBOC(s)
+	if err != nil {
+		return payments.VirtualChannelState{}, fmt.Errorf("failed to parse state: %w", err)
+	}
+
+	var st payments.VirtualChannelState
+	if err = tlb.LoadFromCell(&st, cll.BeginParse()); err != nil {
+		return payments.VirtualChannelState{}, fmt.Errorf("failed to parse last known resolve state: %w", err)
+	}
+
+	if !st.Verify(key) {
+		return payments.VirtualChannelState{}, fmt.Errorf("failed to verify last known resolve state: %w", err)
+	}
+	return st, nil
 }

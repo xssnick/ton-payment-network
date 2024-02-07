@@ -209,13 +209,18 @@ func main() {
 			}
 		}
 
-		go func() {
-			log.Info().Str("api", *API).Str("webhook", *Webhook).Msg("api initialized")
+		srv := api.NewServer(*API, *Webhook, cfg.WebhooksSignatureHMACSHA256Key, svc, fdb, credentials)
+		if *Webhook != "" {
+			svc.SetWebhook(srv)
+		}
 
-			if err := api.NewServer(*API, *Webhook, svc, fdb, credentials).Start(); err != nil {
+		go func() {
+			if err := srv.Start(); err != nil {
 				log.Error().Err(err).Msg("failed to start api server")
 			}
 		}()
+
+		log.Info().Str("api", *API).Str("webhook", *Webhook).Msg("api initialized")
 	}
 
 	svc.Start()

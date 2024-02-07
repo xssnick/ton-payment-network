@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -179,7 +180,7 @@ func (s *Server) handleChannelGet(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 	var addr *address.Address
-	if q := r.URL.Query().Get("key"); q != "" {
+	if q := r.URL.Query().Get("address"); q != "" {
 		addr, err = address.ParseAddr(q)
 		if err != nil {
 			writeErr(w, 400, "incorrect address format: "+err.Error())
@@ -187,6 +188,7 @@ func (s *Server) handleChannelGet(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		writeErr(w, 400, "channel address is not passed")
+		return
 	}
 
 	ch, err := s.svc.GetChannel(r.Context(), addr.String())
@@ -250,4 +252,20 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 		UpdatedAt: c.UpdatedAt,
 		CreatedAt: c.CreatedAt,
 	}, nil
+}
+
+func (s *Server) PushChannelEvent(ctx context.Context, ch *db.Channel) error {
+	res, err := convertChannel(ch)
+	if err != nil {
+		return fmt.Errorf("failed to convert channel: %w", err)
+	}
+
+	if err = s.queue.CreateTask(ctx, WebhooksTaskPool, "onchain-channel-event", "events",
+		ch.Address+"-"+fmt.Sprint(res.UpdatedAt.UnixNano()),
+		res, nil, nil,
+	); err != nil {
+		return fmt.Errorf("failed to create ask-remove-virtual task: %w", err)
+	}
+
+	return nil
 }

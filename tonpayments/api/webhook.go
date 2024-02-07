@@ -3,6 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"github.com/rs/zerolog/log"
@@ -23,7 +26,7 @@ type WebhookResponse struct {
 	Success bool `json:"success"`
 }
 
-func (s *Server) startWebhooksSender() error {
+func (s *Server) startWebhooksSender() {
 	tick := time.Tick(1 * time.Second)
 
 	for {
@@ -58,12 +61,14 @@ func (s *Server) startWebhooksSender() error {
 					return fmt.Errorf("failed to serialize body: %w", err)
 				}
 
-				req, err := http.NewRequestWithContext(ctx, "POST", s.webhook, nil)
+				req, err := http.NewRequestWithContext(ctx, "POST", s.webhook, buf)
 				if err != nil {
 					return fmt.Errorf("failed to build request: %w", err)
 				}
 
-				// TODO: sign hmac
+				hm := hmac.New(sha256.New, []byte(s.webhookKey))
+				hm.Write(buf.Bytes())
+				req.Header.Set("Signature", base64.StdEncoding.EncodeToString(hm.Sum(nil)))
 
 				resp, err := s.sender.Do(req)
 				if err != nil {
@@ -89,8 +94,7 @@ func (s *Server) startWebhooksSender() error {
 			if err != nil {
 				log.Warn().Err(err).Str("type", task.Type).Str("id", task.ID).Msg("task execute err, will be retried")
 
-				// random wait to not lock both sides in same time
-				retryAfter := time.Now().Add(300 * time.Millisecond)
+				retryAfter := time.Now().Add(1000 * time.Millisecond)
 				if err = s.queue.RetryTask(context.Background(), task, err.Error(), retryAfter); err != nil {
 					log.Error().Err(err).Str("id", task.ID).Msg("failed to set failure for task in db")
 				}

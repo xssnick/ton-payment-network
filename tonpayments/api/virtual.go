@@ -31,12 +31,13 @@ type VirtualSide struct {
 }
 
 type VirtualChannel struct {
-	Key             string       `json:"key"`
-	Active          bool         `json:"active"`
-	LastKnownAmount string       `json:"last_known_amount"`
-	CreatedAt       time.Time    `json:"created_at"`
-	Outgoing        *VirtualSide `json:"outgoing"`
-	Incoming        *VirtualSide `json:"incoming"`
+	Key       string       `json:"key"`
+	Status    string       `json:"status"`
+	Amount    string       `json:"amount"`
+	Outgoing  *VirtualSide `json:"outgoing"`
+	Incoming  *VirtualSide `json:"incoming"`
+	CreatedAt time.Time    `json:"created_at"`
+	UpdatedAt time.Time    `json:"updated_at"`
 }
 
 func (s *Server) handleVirtualGet(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +58,13 @@ func (s *Server) handleVirtualGet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "channel address is not passed")
 	}
 
-	res, err := s.getVirtual(r.Context(), key)
+	meta, err := s.svc.GetVirtualChannelMeta(r.Context(), key)
+	if err != nil {
+		writeErr(w, 500, "failed to get virtual channel meta: "+err.Error())
+		return
+	}
+
+	res, err := s.getVirtual(r.Context(), meta)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -74,7 +81,7 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 	var addr *address.Address
-	if q := r.URL.Query().Get("addr"); q != "" {
+	if q := r.URL.Query().Get("address"); q != "" {
 		addr, err = address.ParseAddr(q)
 		if err != nil {
 			writeErr(w, 400, "incorrect address format: "+err.Error())
@@ -82,6 +89,7 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		writeErr(w, 400, "channel address is not passed")
+		return
 	}
 
 	ch, err := s.svc.GetChannel(r.Context(), addr.String())
@@ -90,16 +98,21 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var our, their []*VirtualChannel
+	var our, their = make([]*VirtualChannel, 0), make([]*VirtualChannel, 0)
 
-	// TODO: can be too heavy, optimize
 	for _, kv := range ch.Their.State.Data.Conditionals.All() {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
 			continue
 		}
 
-		res, err := s.getVirtual(r.Context(), vch.Key)
+		meta, err := s.svc.GetVirtualChannelMeta(r.Context(), vch.Key)
+		if err != nil {
+			writeErr(w, 500, "failed to get virtual channel meta: "+err.Error())
+			return
+		}
+
+		res, err := s.getVirtual(r.Context(), meta)
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -113,7 +126,13 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		res, err := s.getVirtual(r.Context(), vch.Key)
+		meta, err := s.svc.GetVirtualChannelMeta(r.Context(), vch.Key)
+		if err != nil {
+			writeErr(w, 500, "failed to get virtual channel meta: "+err.Error())
+			return
+		}
+
+		res, err := s.getVirtual(r.Context(), meta)
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -127,17 +146,29 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 	}{their, our})
 }
 
-func (s *Server) getVirtual(ctx context.Context, key ed25519.PublicKey) (*VirtualChannel, error) {
-	meta, err := s.svc.GetVirtualChannelMeta(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get virtual channel: %w", err)
+func (s *Server) getVirtual(ctx context.Context, meta *db.VirtualChannelMeta) (*VirtualChannel, error) {
+	var status string
+	switch meta.Status {
+	case db.VirtualChannelStateActive:
+		status = "active"
+	case db.VirtualChannelStateClosed:
+		status = "closed"
+	case db.VirtualChannelStateRemoved:
+		status = "removed"
+	case db.VirtualChannelStateWantRemove:
+		status = "want_remove"
+	case db.VirtualChannelStateWantClose:
+		status = "want_close"
+	default:
+		return nil, fmt.Errorf("unknown virtual channel %s state: %d", hex.EncodeToString(meta.Key), meta.Status)
 	}
 
 	res := &VirtualChannel{
-		Key:             hex.EncodeToString(meta.Key),
-		Active:          meta.Active,
-		CreatedAt:       meta.CreatedAt,
-		LastKnownAmount: "0",
+		Key:       hex.EncodeToString(meta.Key),
+		Status:    status,
+		CreatedAt: meta.CreatedAt,
+		UpdatedAt: meta.UpdatedAt,
+		Amount:    "0",
 	}
 
 	if len(meta.LastKnownResolve) > 0 {
@@ -155,45 +186,25 @@ func (s *Server) getVirtual(ctx context.Context, key ed25519.PublicKey) (*Virtua
 			return nil, fmt.Errorf("failed to verify last known resolve state: %w", err)
 		}
 
-		res.LastKnownAmount = st.Amount.String()
+		res.Amount = st.Amount.String()
 	}
 
-	if res.Active {
-		if meta.FromChannelAddress != "" {
-			from, err := s.svc.GetChannel(ctx, meta.FromChannelAddress)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get 'from' channel: %w", err)
-			}
-
-			_, vch, err := from.Their.State.FindVirtualChannel(meta.Key)
-			if err != nil {
-				return nil, fmt.Errorf("failed to find virtual 'from' channel: %w", err)
-			}
-
+	if meta.Status != db.VirtualChannelStateClosed && meta.Status != db.VirtualChannelStateRemoved {
+		if meta.Incoming != nil {
 			res.Incoming = &VirtualSide{
-				ChannelAddress: meta.FromChannelAddress,
-				Capacity:       tlb.FromNanoTON(vch.Capacity).String(),
-				Fee:            tlb.FromNanoTON(vch.Fee).String(),
-				DeadlineAt:     time.Unix(vch.Deadline, 0),
+				ChannelAddress: meta.Incoming.ChannelAddress,
+				Capacity:       meta.Incoming.Capacity,
+				Fee:            meta.Incoming.Fee,
+				DeadlineAt:     meta.Incoming.Deadline,
 			}
 		}
 
-		if meta.ToChannelAddress != "" {
-			to, err := s.svc.GetChannel(ctx, meta.ToChannelAddress)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get 'to channel: %w", err)
-			}
-
-			_, vch, err := to.Our.State.FindVirtualChannel(meta.Key)
-			if err != nil {
-				return nil, fmt.Errorf("failed to find virtual 'to' channel: %w", err)
-			}
-
+		if meta.Outgoing != nil {
 			res.Outgoing = &VirtualSide{
-				ChannelAddress: meta.FromChannelAddress,
-				Capacity:       tlb.FromNanoTON(vch.Capacity).String(),
-				Fee:            tlb.FromNanoTON(vch.Fee).String(),
-				DeadlineAt:     time.Unix(vch.Deadline, 0),
+				ChannelAddress: meta.Outgoing.ChannelAddress,
+				Capacity:       meta.Outgoing.Capacity,
+				Fee:            meta.Outgoing.Fee,
+				DeadlineAt:     meta.Outgoing.Deadline,
 			}
 		}
 	}
@@ -204,7 +215,7 @@ func (s *Server) getVirtual(ctx context.Context, key ed25519.PublicKey) (*Virtua
 func (s *Server) handleVirtualState(w http.ResponseWriter, r *http.Request) {
 	type request struct {
 		Key   string `json:"key"`
-		State []byte `json:"state"`
+		State string `json:"state"`
 	}
 
 	if r.Method != "POST" {
@@ -224,20 +235,9 @@ func (s *Server) handleVirtualState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cll, err := cell.FromBOC(req.State)
+	st, err := parseState(req.State, key)
 	if err != nil {
-		writeErr(w, 400, "failed to parse state: "+err.Error())
-		return
-	}
-
-	var st payments.VirtualChannelState
-	if err = tlb.LoadFromCell(&st, cll.BeginParse()); err != nil {
-		writeErr(w, 400, "failed to parse last known resolve state: "+err.Error())
-		return
-	}
-
-	if !st.Verify(key) {
-		writeErr(w, 400, "failed to verify last known resolve state: "+err.Error())
+		writeErr(w, 400, err.Error())
 		return
 	}
 
@@ -252,7 +252,7 @@ func (s *Server) handleVirtualState(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleVirtualClose(w http.ResponseWriter, r *http.Request) {
 	type request struct {
 		Key   string `json:"key"`
-		State []byte `json:"state"`
+		State string `json:"state"`
 	}
 
 	if r.Method != "POST" {
@@ -272,20 +272,9 @@ func (s *Server) handleVirtualClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cll, err := cell.FromBOC(req.State)
+	st, err := parseState(req.State, key)
 	if err != nil {
-		writeErr(w, 400, "failed to parse state: "+err.Error())
-		return
-	}
-
-	var st payments.VirtualChannelState
-	if err = tlb.LoadFromCell(&st, cll.BeginParse()); err != nil {
-		writeErr(w, 400, "failed to parse last known resolve state: "+err.Error())
-		return
-	}
-
-	if !st.Verify(key) {
-		writeErr(w, 400, "failed to verify last known resolve state: "+err.Error())
+		writeErr(w, 400, err.Error())
 		return
 	}
 
@@ -486,4 +475,22 @@ func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 		Status:   "pending",
 		Deadline: deadlines[len(req.NodesChain)-1],
 	})
+}
+
+func (s *Server) PushVirtualChannelEvent(ctx context.Context, event db.VirtualChannelEventType, meta *db.VirtualChannelMeta) error {
+	vc, err := s.getVirtual(ctx, meta)
+	if err != nil {
+		return fmt.Errorf("failed to get virtual channel: %w", err)
+	}
+
+	if err := s.queue.CreateTask(ctx, WebhooksTaskPool, "virtual-channel-event", "events",
+		vc.Key+"-"+string(event)+"-"+fmt.Sprint(meta.UpdatedAt),
+		db.VirtualChannelEvent{
+			EventType:      event,
+			VirtualChannel: vc,
+		}, nil, nil,
+	); err != nil {
+		return fmt.Errorf("failed to create virtual-channel-event task: %w", err)
+	}
+	return nil
 }

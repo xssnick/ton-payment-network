@@ -135,7 +135,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil, fmt.Errorf("failed to load virtual channel meta: %w", err)
 		}
 
-		if vch.Deadline >= time.Now().Unix() && !meta.ReadyToReleaseCoins {
+		if vch.Deadline >= time.Now().Unix() && meta.Status != db.VirtualChannelStateWantRemove {
 			return nil, fmt.Errorf("virtual channel is not expired")
 		}
 
@@ -144,9 +144,16 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 		}
 
 		toExecute = func(ctx context.Context) error {
-			meta.Active = false
+			meta.Status = db.VirtualChannelStateRemoved
+			meta.UpdatedAt = time.Now()
 			if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 				return fmt.Errorf("failed to update virtual channel meta: %w", err)
+			}
+
+			if s.webhook != nil {
+				if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeRemove, meta); err != nil {
+					return fmt.Errorf("failed to push virtual channel close event: %w", err)
+				}
 			}
 
 			log.Info().Hex("key", data.Key).Msg("virtual channel removed")
@@ -195,10 +202,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil, fmt.Errorf("failed to load virtual channel meta: %w", err)
 		}
 
-		if !meta.Active {
-			return nil, fmt.Errorf("virtual channel is inactive")
-		}
-		if !meta.ReadyToReleaseCoins {
+		if meta.Status != db.VirtualChannelStateWantClose {
 			return nil, fmt.Errorf("virtual channel close was not requested")
 		}
 
@@ -215,9 +219,16 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 		}
 
 		toExecute = func(ctx context.Context) error {
-			meta.Active = false
+			meta.Status = db.VirtualChannelStateClosed
+			meta.UpdatedAt = time.Now()
 			if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 				return fmt.Errorf("failed to update virtual channel meta: %w", err)
+			}
+
+			if s.webhook != nil {
+				if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeClose, meta); err != nil {
+					return fmt.Errorf("failed to push virtual channel close event: %w", err)
+				}
 			}
 
 			log.Info().Hex("key", data.Key).
@@ -374,10 +385,16 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 		} else {
 			toExecute = func(ctx context.Context) error {
 				meta := &db.VirtualChannelMeta{
-					Key:                vch.Key,
-					Active:             true,
-					FromChannelAddress: channel.Address,
-					CreatedAt:          time.Now(),
+					Key:    vch.Key,
+					Status: db.VirtualChannelStateActive,
+					Incoming: &db.VirtualChannelMetaSide{
+						ChannelAddress: channel.Address,
+						Capacity:       tlb.FromNanoTON(vch.Capacity).String(),
+						Fee:            tlb.FromNanoTON(vch.Fee).String(),
+						Deadline:       time.Unix(vch.Deadline, 0),
+					},
+					CreatedAt: time.Now(),
+					UpdatedAt: time.Now(),
 				}
 
 				if currentInstruction.FinalState != nil {
@@ -404,6 +421,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 						db.CloseNextVirtualTask{
 							VirtualKey: vch.Key,
 							State:      currentInstruction.FinalState.ToBOC(),
+							IsTransfer: true,
 						}, nil, &tryTill,
 					); err != nil {
 						return fmt.Errorf("failed to create close-next-virtual task: %w", err)
@@ -412,6 +430,12 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 
 				if err = s.db.CreateVirtualChannelMeta(ctx, meta); err != nil {
 					return fmt.Errorf("failed to update virtual channel meta: %w", err)
+				}
+
+				if currentInstruction.FinalState == nil && s.webhook != nil {
+					if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeOpen, meta); err != nil {
+						return fmt.Errorf("failed to push virtual channel close event: %w", err)
+					}
 				}
 
 				log.Info().Hex("key", data.ChannelKey).

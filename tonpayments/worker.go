@@ -101,19 +101,19 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to serialize virtual channel resolve: %w", err)
 					}
 
-					unlock, err := s.db.AcquireChannelLock(ctx, meta.ToChannelAddress)
+					unlock, err := s.db.AcquireChannelLock(ctx, meta.Outgoing.ChannelAddress)
 					if err != nil {
 						return fmt.Errorf("failed to acquire channel lock: %w", err)
 					}
 					defer unlock()
 
-					toChannel, err := s.getVerifiedChannel(meta.ToChannelAddress)
+					toChannel, err := s.db.GetChannel(ctx, meta.Outgoing.ChannelAddress)
 					if err != nil {
 						return fmt.Errorf("failed to load channel: %w", err)
 					}
 
-					if meta.FromChannelAddress != "" {
-						channel, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
+					if meta.Incoming != nil {
+						channel, err := s.db.GetChannel(ctx, meta.Incoming.ChannelAddress)
 						if err != nil {
 							return fmt.Errorf("failed to load 'from' channel: %w", err)
 						}
@@ -124,7 +124,7 @@ func (s *Service) taskExecutor() {
 						}
 
 						if toChannel.Status == db.ChannelStateActive {
-							err = s.proposeAction(ctx, meta.ToChannelAddress, transport.ConfirmCloseAction{
+							err = s.proposeAction(ctx, meta.Outgoing.ChannelAddress, transport.ConfirmCloseAction{
 								Key:   data.VirtualKey,
 								State: state,
 							}, nil)
@@ -134,7 +134,7 @@ func (s *Service) taskExecutor() {
 						}
 
 						tryTill := time.Unix(vch.Deadline, 0)
-						if err = s.db.CreateTask(ctx, PaymentsTaskPool, "close-next-virtual", meta.FromChannelAddress,
+						if err = s.db.CreateTask(ctx, PaymentsTaskPool, "close-next-virtual", meta.Incoming.ChannelAddress,
 							"close-next-"+hex.EncodeToString(data.VirtualKey),
 							db.CloseNextVirtualTask{
 								VirtualKey: data.VirtualKey,
@@ -144,7 +144,7 @@ func (s *Service) taskExecutor() {
 							return fmt.Errorf("failed to create close-next-virtual task: %w", err)
 						}
 					} else if toChannel.Status == db.ChannelStateActive {
-						err = s.proposeAction(ctx, meta.ToChannelAddress, transport.ConfirmCloseAction{
+						err = s.proposeAction(ctx, meta.Outgoing.ChannelAddress, transport.ConfirmCloseAction{
 							Key:   data.VirtualKey,
 							State: state,
 						}, nil)
@@ -172,6 +172,16 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to request virtual channel close: %w", err)
 					}
 
+					if data.IsTransfer && s.webhook != nil {
+						meta, err := s.db.GetVirtualChannelMeta(ctx, data.VirtualKey)
+						if err != nil {
+							return fmt.Errorf("failed to load virtual channel meta: %w", err)
+						}
+
+						if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeTransfer, meta); err != nil {
+							return fmt.Errorf("failed to push virtual channel transfer event: %w", err)
+						}
+					}
 					return nil
 				case "open-virtual":
 					var data db.OpenVirtualTask
@@ -195,18 +205,45 @@ func (s *Service) taskExecutor() {
 					}
 					defer unlock()
 
-					if err = s.db.CreateVirtualChannelMeta(ctx, &db.VirtualChannelMeta{
-						Key:                data.VirtualKey,
-						Active:             true,
-						FromChannelAddress: data.PrevChannelAddress,
-						ToChannelAddress:   data.ChannelAddress,
-						CreatedAt:          time.Now(),
-					}); err != nil && !errors.Is(err, db.ErrAlreadyExists) {
+					nextCap, _ := new(big.Int).SetString(data.Capacity, 10)
+					nextFee, _ := new(big.Int).SetString(data.Fee, 10)
+
+					meta := &db.VirtualChannelMeta{
+						Key:    data.VirtualKey,
+						Status: db.VirtualChannelStatePending,
+						Outgoing: &db.VirtualChannelMetaSide{
+							ChannelAddress: data.ChannelAddress,
+							Capacity:       tlb.FromNanoTON(nextCap).String(),
+							Fee:            tlb.FromNanoTON(nextFee).String(),
+							Deadline:       time.Unix(data.Deadline, 0),
+						},
+						CreatedAt: time.Now(),
+						UpdatedAt: time.Now(),
+					}
+
+					if data.PrevChannelAddress != "" {
+						prev, err := s.db.GetChannel(ctx, data.PrevChannelAddress)
+						if err != nil {
+							return fmt.Errorf("failed to get prev channel: %w", err)
+						}
+
+						_, prevVch, err := prev.Their.State.FindVirtualChannel(meta.Key)
+						if err != nil {
+							return fmt.Errorf("failed to find prev virtual channel: %w", err)
+						}
+
+						meta.Incoming = &db.VirtualChannelMetaSide{
+							ChannelAddress: data.PrevChannelAddress,
+							Capacity:       tlb.FromNanoTON(prevVch.Capacity).String(),
+							Fee:            tlb.FromNanoTON(prevVch.Fee).String(),
+							Deadline:       time.Unix(prevVch.Deadline, 0),
+						}
+					}
+
+					if err = s.db.CreateVirtualChannelMeta(ctx, meta); err != nil && !errors.Is(err, db.ErrAlreadyExists) {
 						return fmt.Errorf("failed to create virtual channel meta: %w", err)
 					}
 
-					nextCap, _ := new(big.Int).SetString(data.Capacity, 10)
-					nextFee, _ := new(big.Int).SetString(data.Fee, 10)
 					if err = s.proposeAction(ctx, data.ChannelAddress, data.Action, payments.VirtualChannel{
 						Key:      data.VirtualKey,
 						Capacity: nextCap,
@@ -225,7 +262,8 @@ func (s *Service) taskExecutor() {
 									return fmt.Errorf("failed to load virtual channel meta: %w", err)
 								}
 
-								meta.ReadyToReleaseCoins = true
+								meta.Status = db.VirtualChannelStateWantRemove
+								meta.UpdatedAt = time.Now()
 								if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 									return fmt.Errorf("failed to update virtual channel meta: %w", err)
 								}
@@ -254,6 +292,18 @@ func (s *Service) taskExecutor() {
 							return nil
 						}
 						return fmt.Errorf("failed to propose actions to the next node: %w", err)
+					}
+
+					meta.Status = db.VirtualChannelStateActive
+					meta.UpdatedAt = time.Now()
+					if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
+						return fmt.Errorf("failed to update virtual channel meta: %w", err)
+					}
+
+					if s.webhook != nil {
+						if err = s.webhook.PushVirtualChannelEvent(context.Background(), db.VirtualChannelEventTypeOpen, meta); err != nil {
+							return fmt.Errorf("failed to push virtual channel open event: %w", err)
+						}
 					}
 
 					log.Info().Hex("key", data.VirtualKey).
@@ -294,7 +344,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
 					}
 
-					channel, err := s.getVerifiedChannel(meta.ToChannelAddress)
+					channel, err := s.db.GetChannel(ctx, meta.Outgoing.ChannelAddress)
 					if err != nil {
 						return fmt.Errorf("failed to load channel: %w", err)
 					}
@@ -304,13 +354,13 @@ func (s *Service) taskExecutor() {
 						return nil
 					}
 
-					unlock, err := s.db.AcquireChannelLock(ctx, meta.ToChannelAddress)
+					unlock, err := s.db.AcquireChannelLock(ctx, meta.Outgoing.ChannelAddress)
 					if err != nil {
 						return fmt.Errorf("failed to acquire channel lock: %w", err)
 					}
 					defer unlock()
 
-					if err = s.proposeAction(ctx, meta.ToChannelAddress, transport.RemoveVirtualAction{
+					if err = s.proposeAction(ctx, meta.Outgoing.ChannelAddress, transport.RemoveVirtualAction{
 						Key: data.Key,
 					}, nil); err != nil {
 						if !errors.Is(err, ErrNotPossible) {
@@ -321,14 +371,14 @@ func (s *Service) taskExecutor() {
 
 							// Creating aggressive onchain close task, for the future,
 							// in case we will not be able to communicate with party
-							if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", meta.ToChannelAddress+"-uncoop",
-								"uncooperative-close-"+meta.ToChannelAddress+"-vc-"+hex.EncodeToString(data.Key),
+							if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", meta.Outgoing.ChannelAddress+"-uncoop",
+								"uncooperative-close-"+meta.Outgoing.ChannelAddress+"-vc-"+hex.EncodeToString(data.Key),
 								db.ChannelUncooperativeCloseTask{
-									Address:                 meta.ToChannelAddress,
+									Address:                 meta.Outgoing.ChannelAddress,
 									CheckVirtualStillExists: data.Key,
 								}, &uncooperativeAfter, nil,
 							); err != nil {
-								log.Warn().Err(err).Str("channel", meta.ToChannelAddress).Msg("failed to create uncooperative close task")
+								log.Warn().Err(err).Str("channel", meta.Outgoing.ChannelAddress).Msg("failed to create uncooperative close task")
 							}
 						}
 
@@ -341,14 +391,15 @@ func (s *Service) taskExecutor() {
 					}
 
 					// next party accepted remove, so we are ready to release coins to previous party
-					meta.ReadyToReleaseCoins = true
+					meta.Status = db.VirtualChannelStateWantRemove
+					meta.UpdatedAt = time.Now()
 					if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 						return fmt.Errorf("failed to update virtual channel meta: %w", err)
 					}
 
 					// if we are not the first node of the tunnel
-					if meta.FromChannelAddress != "" {
-						channel, err := s.db.GetChannel(ctx, meta.FromChannelAddress)
+					if meta.Incoming != nil {
+						channel, err := s.db.GetChannel(ctx, meta.Incoming.ChannelAddress)
 						if err != nil {
 							return fmt.Errorf("failed to load 'from' channel: %w", err)
 						}
@@ -361,10 +412,10 @@ func (s *Service) taskExecutor() {
 						tryTill := time.Unix(vch.Deadline, 0)
 						// consider virtual channel unsuccessful and gracefully removed
 						// and notify previous party that we are ready to release locked coins.
-						err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-remove-virtual", meta.FromChannelAddress,
+						err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-remove-virtual", meta.Incoming.ChannelAddress,
 							"ask-remove-virtual-"+hex.EncodeToString(data.Key),
 							db.AskRemoveVirtualTask{
-								ChannelAddress: meta.FromChannelAddress,
+								ChannelAddress: meta.Incoming.ChannelAddress,
 								Key:            data.Key,
 							}, nil, &tryTill,
 						)

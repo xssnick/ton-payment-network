@@ -36,6 +36,11 @@ type Transport interface {
 	ProposeAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, state *cell.Cell, action transport.Action) (*transport.ProposalDecision, error)
 }
 
+type Webhook interface {
+	PushChannelEvent(ctx context.Context, ch *db.Channel) error
+	PushVirtualChannelEvent(ctx context.Context, event db.VirtualChannelEventType, meta *db.VirtualChannelMeta) error
+}
+
 type DB interface {
 	Transaction(ctx context.Context, f func(ctx context.Context) error) error
 	CreateTask(ctx context.Context, poolName, typ, queue, id string, data any, executeAfter, executeTill *time.Time) error
@@ -72,6 +77,7 @@ type Service struct {
 	transport Transport
 	updates   chan any
 	db        DB
+	webhook   Webhook
 
 	key ed25519.PrivateKey
 
@@ -106,6 +112,10 @@ func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wa
 		virtualChannelsLimitPerChannel: 3000,
 		workerSignal:                   make(chan bool, 1),
 	}
+}
+
+func (s *Service) SetWebhook(webhook Webhook) {
+	s.webhook = webhook
 }
 
 func (s *Service) GetChannelConfig() transport.ChannelConfig {
@@ -318,6 +328,17 @@ func (s *Service) Start() {
 				s.transport.AddUrgentPeer(channel.TheirOnchain.Key)
 				break
 			}
+
+			if s.webhook != nil {
+				for {
+					if err = s.webhook.PushChannelEvent(context.Background(), channel); err != nil {
+						log.Error().Err(err).Msg("failed to push channel webhook to queue, retrying...")
+						time.Sleep(1 * time.Second)
+						continue
+					}
+					break
+				}
+			}
 		}
 	}
 }
@@ -326,6 +347,11 @@ func (s *Service) DebugPrintVirtualChannels() {
 	chs, err := s.db.GetChannels(context.Background(), nil, db.ChannelStateActive)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get active channels")
+		return
+	}
+
+	if len(chs) == 0 {
+		log.Info().Msg("no active channels")
 		return
 	}
 
