@@ -38,7 +38,7 @@ type Service interface {
 }
 
 type Success struct {
-	Success bool
+	Success bool `json:"success"`
 }
 
 type Error struct {
