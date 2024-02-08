@@ -9,6 +9,7 @@ import (
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/tl"
+	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math"
 	"math/big"
@@ -22,7 +23,7 @@ func init() {
 
 	tl.Register(Decision{}, "payments.decision agreed:Bool reason:string = payments.Decision")
 	tl.Register(ProposalDecision{}, "payments.proposalDecision agreed:Bool reason:string signedState:bytes = payments.ProposalDecision")
-	tl.Register(ChannelConfig{}, "payments.channelConfig excessFee:bytes walletAddr:int256 quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.ChannelConfig")
+	tl.Register(ChannelConfig{}, "payments.channelConfig excessFee:bytes virtualTunnelFee:bytes walletAddr:int256 quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.ChannelConfig")
 	tl.Register(AuthenticateToSign{}, "payments.authenticateToSign a:int256 b:int256 timestamp:long = payments.AuthenticateToSign")
 	tl.Register(NodeAddress{}, "payments.nodeAddress adnl_addr:int256 = payments.NodeAddress")
 
@@ -37,12 +38,11 @@ func init() {
 	tl.Register(GetChannelConfig{}, "payments.getChannelConfig = payments.Request")
 	tl.Register(RequestAction{}, "payments.requestAction channelAddr:int256 action:payments.Action = payments.Request")
 	tl.Register(ProposeAction{}, "payments.proposeAction channelAddr:int256 action:payments.Action state:bytes = payments.Request")
-	tl.Register(RequestInboundChannel{}, "payments.requestInboundChannel key:int256 wallet:int256 capacity:bytes = payments.Request")
 	tl.Register(Authenticate{}, "payments.authenticate key:int256 timestamp:long signature:bytes = payments.Authenticate")
 
 	tl.Register(InstructionContainer{}, "payments.instructionContainer hash:int256 data:bytes = payments.InstructionContainer")
 	tl.Register(InstructionsToSign{}, "payments.instructionsToSign list:(vector payments.instructionContainer) = payments.InstructionsToSign")
-	tl.Register(OpenVirtualInstruction{}, "payments.openVirtualInstruction target:int256 expectedFee:bytes expectedCapacity:bytes expectedDeadline:long nextTarget:int256 nextFee:bytes nextCapacity:bytes nextDeadline:long = payments.OpenVirtualInstruction")
+	tl.Register(OpenVirtualInstruction{}, "payments.openVirtualInstruction target:int256 expectedFee:bytes expectedCapacity:bytes expectedDeadline:long nextTarget:int256 nextFee:bytes nextCapacity:bytes nextDeadline:long finalState:bytes = payments.OpenVirtualInstruction")
 }
 
 type Action any
@@ -75,14 +75,6 @@ type AuthenticateToSign struct {
 	A         []byte `tl:"int256"`
 	B         []byte `tl:"int256"`
 	Timestamp int64  `tl:"long"`
-}
-
-// RequestInboundChannel - request party to deploy channel with us,
-// and initialize it with Capacity amount, to send us coins
-type RequestInboundChannel struct {
-	Key      []byte `tl:"int256"`
-	Wallet   []byte `tl:"int256"`
-	Capacity []byte `tl:"bytes"`
 }
 
 // ProposeAction - request party to update state with action,
@@ -148,6 +140,10 @@ type OpenVirtualInstruction struct {
 	NextCapacity []byte `tl:"bytes"`
 	NextDeadline int64  `tl:"long"`
 
+	// can be set for the final receiver, so virtual channel will be closed immediately,
+	// can be used for simple transfers with immediate delivery
+	FinalState *cell.Cell `tl:"cell optional"`
+
 	instructionPrivateKey ed25519.PrivateKey `tl:"-"`
 }
 
@@ -195,6 +191,7 @@ type GetChannelConfig struct{}
 // ChannelConfig - response of GetChannelConfig
 type ChannelConfig struct {
 	ExcessFee                []byte `tl:"bytes"`
+	VirtualTunnelFee         []byte `tl:"bytes"`
 	WalletAddr               []byte `tl:"int256"`
 	QuarantineDuration       uint32 `tl:"int"`
 	MisbehaviorFine          []byte `tl:"bytes"`
@@ -203,11 +200,33 @@ type ChannelConfig struct {
 
 func (a *OpenVirtualAction) SetInstructions(actions []OpenVirtualInstruction, key ed25519.PrivateKey) error {
 	a.Instructions = InstructionsToSign{}
+
+	maxLen := 0
+	serializedActions := make([][]byte, len(actions))
 	for i := 0; i < len(actions); i++ {
 		data, err := tl.Serialize(actions[i], true)
 		if err != nil {
 			return fmt.Errorf("failed to serialize action data: %w", err)
 		}
+		serializedActions[i] = data
+		if len(data) > maxLen {
+			maxLen = len(data)
+		}
+	}
+
+	// randomly increase len to complicate external analysis for instructions count
+	fuzz, err := rand.Int(rand.Reader, big.NewInt(512))
+	if err != nil {
+		return err
+	}
+	maxLen += int(fuzz.Int64())
+
+	for i := 0; i < len(actions); i++ {
+		lenDiff := maxLen - len(serializedActions[i])
+		// add random stub data to hide real size
+		data := append(serializedActions[i], make([]byte, lenDiff)...)
+		// fill padding with random bytes to avoid potential zero padding attacks
+		_, _ = rand.Read(data[len(serializedActions[i]):])
 
 		sharedKey, err := adnl.SharedKey(actions[i].instructionPrivateKey, actions[i].Target)
 		if err != nil {
@@ -282,13 +301,13 @@ type TunnelChainPart struct {
 	Deadline time.Time
 }
 
-func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uint8) (payments.VirtualChannel, ed25519.PublicKey, []OpenVirtualInstruction, error) {
+func GenerateTunnel(key ed25519.PrivateKey, chain []TunnelChainPart, stubSize uint8, withFinalState bool) (payments.VirtualChannel, ed25519.PublicKey, []OpenVirtualInstruction, error) {
 	if len(chain) == 0 {
 		return payments.VirtualChannel{}, nil, nil, fmt.Errorf("chain is empty")
 	}
 
 	vc := payments.VirtualChannel{
-		Key:      key,
+		Key:      key.Public().(ed25519.PublicKey),
 		Capacity: chain[0].Capacity,
 		Fee:      chain[0].Fee,
 		Deadline: chain[0].Deadline.UTC().Unix(),
@@ -326,6 +345,16 @@ func GenerateTunnel(key ed25519.PublicKey, chain []TunnelChainPart, stubSize uin
 			inst.NextFee = chain[i].Fee.Bytes()
 			inst.NextCapacity = chain[i].Capacity.Bytes()
 			inst.NextDeadline = chain[i].Deadline.UTC().Unix()
+			if withFinalState {
+				state := payments.VirtualChannelState{Amount: tlb.FromNanoTON(chain[i].Capacity)}
+				state.Sign(key)
+
+				fs, err := tlb.ToCell(state)
+				if err != nil {
+					return payments.VirtualChannel{}, nil, nil, fmt.Errorf("failed to serialize final state: %w", err)
+				}
+				inst.FinalState = fs
+			}
 		}
 
 		list = append(list, inst)

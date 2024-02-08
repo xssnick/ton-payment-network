@@ -93,7 +93,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 
 		toExecute = func(ctx context.Context) error {
 			if data.WantResponse {
-				err = s.db.CreateTask(ctx, "increment-state", channel.Address,
+				err = s.db.CreateTask(ctx, PaymentsTaskPool, "increment-state", channel.Address,
 					"increment-state-"+channel.Address+"-"+fmt.Sprint(channel.Our.State.Data.Seqno),
 					db.IncrementStatesTask{
 						ChannelAddress: channel.Address,
@@ -135,7 +135,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil, fmt.Errorf("failed to load virtual channel meta: %w", err)
 		}
 
-		if vch.Deadline >= time.Now().Unix() && !meta.ReadyToReleaseCoins {
+		if vch.Deadline >= time.Now().Unix() && meta.Status != db.VirtualChannelStateWantRemove {
 			return nil, fmt.Errorf("virtual channel is not expired")
 		}
 
@@ -144,9 +144,16 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 		}
 
 		toExecute = func(ctx context.Context) error {
-			meta.Active = false
+			meta.Status = db.VirtualChannelStateRemoved
+			meta.UpdatedAt = time.Now()
 			if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 				return fmt.Errorf("failed to update virtual channel meta: %w", err)
+			}
+
+			if s.webhook != nil {
+				if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeRemove, meta); err != nil {
+					return fmt.Errorf("failed to push virtual channel close event: %w", err)
+				}
 			}
 
 			log.Info().Hex("key", data.Key).Msg("virtual channel removed")
@@ -195,10 +202,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil, fmt.Errorf("failed to load virtual channel meta: %w", err)
 		}
 
-		if !meta.Active {
-			return nil, fmt.Errorf("virtual channel is inactive")
-		}
-		if !meta.ReadyToReleaseCoins {
+		if meta.Status != db.VirtualChannelStateWantClose {
 			return nil, fmt.Errorf("virtual channel close was not requested")
 		}
 
@@ -215,9 +219,16 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 		}
 
 		toExecute = func(ctx context.Context) error {
-			meta.Active = false
+			meta.Status = db.VirtualChannelStateClosed
+			meta.UpdatedAt = time.Now()
 			if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
 				return fmt.Errorf("failed to update virtual channel meta: %w", err)
+			}
+
+			if s.webhook != nil {
+				if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeClose, meta); err != nil {
+					return fmt.Errorf("failed to push virtual channel close event: %w", err)
+				}
 			}
 
 			log.Info().Hex("key", data.Key).
@@ -306,11 +317,11 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			}
 
 			ourFee := new(big.Int).Sub(vch.Fee, nextFee)
-			if ourFee.Cmp(s.virtualChannelFee.Nano()) == -1 {
-				return nil, fmt.Errorf("min fee to open channel is %s TON", s.virtualChannelFee.String())
+			if ourFee.Cmp(s.virtualChannelProxyFee.Nano()) == -1 {
+				return nil, fmt.Errorf("min fee to open channel is %s TON", s.virtualChannelProxyFee.String())
 			}
 
-			targetChannels, err := s.db.GetChannelsWithKey(context.Background(), currentInstruction.NextTarget)
+			targetChannels, err := s.db.GetChannels(context.Background(), currentInstruction.NextTarget, db.ChannelStateAny)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get target channel: %w", err)
 			}
@@ -347,7 +358,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 				data.InstructionKey = currentInstruction.NextInstructionKey
 
 				tryTill := time.Unix(currentInstruction.NextDeadline, 0)
-				err = s.db.CreateTask(ctx, "open-virtual", target.Address,
+				err = s.db.CreateTask(ctx, PaymentsTaskPool, "open-virtual", target.Address,
 					"open-virtual-"+hex.EncodeToString(vch.Key),
 					db.OpenVirtualTask{
 						PrevChannelAddress: channel.Address,
@@ -373,20 +384,64 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			}
 		} else {
 			toExecute = func(ctx context.Context) error {
-				// TODO: check if we accept virtual channels to us
+				meta := &db.VirtualChannelMeta{
+					Key:    vch.Key,
+					Status: db.VirtualChannelStateActive,
+					Incoming: &db.VirtualChannelMetaSide{
+						ChannelAddress: channel.Address,
+						Capacity:       tlb.FromNanoTON(vch.Capacity).String(),
+						Fee:            tlb.FromNanoTON(vch.Fee).String(),
+						Deadline:       time.Unix(vch.Deadline, 0),
+					},
+					CreatedAt: time.Now(),
+					UpdatedAt: time.Now(),
+				}
 
-				if err = s.db.CreateVirtualChannelMeta(ctx, &db.VirtualChannelMeta{
-					Key:                vch.Key,
-					Active:             true,
-					FromChannelAddress: channel.Address,
-					CreatedAt:          time.Now(),
-				}); err != nil {
+				if currentInstruction.FinalState != nil {
+					var state payments.VirtualChannelState
+					if err = tlb.LoadFromCell(&state, currentInstruction.FinalState.BeginParse()); err != nil {
+						return fmt.Errorf("failed to parse virtual channel state: %w", err)
+					}
+
+					if !state.Verify(vch.Key) {
+						return fmt.Errorf("final state is incorrect")
+					}
+
+					if state.Amount.Nano().Cmp(vch.Capacity) != 0 {
+						return fmt.Errorf("final state should use full capacity")
+					}
+
+					if err = meta.AddKnownResolve(meta.Key, &state); err != nil {
+						return fmt.Errorf("failed to add channel condition resolve: %w", err)
+					}
+
+					tryTill := time.Unix(vch.Deadline, 0)
+					if err = s.db.CreateTask(ctx, PaymentsTaskPool, "close-next-virtual", channel.Address,
+						"close-next-"+hex.EncodeToString(vch.Key),
+						db.CloseNextVirtualTask{
+							VirtualKey: vch.Key,
+							State:      currentInstruction.FinalState.ToBOC(),
+							IsTransfer: true,
+						}, nil, &tryTill,
+					); err != nil {
+						return fmt.Errorf("failed to create close-next-virtual task: %w", err)
+					}
+				}
+
+				if err = s.db.CreateVirtualChannelMeta(ctx, meta); err != nil {
 					return fmt.Errorf("failed to update virtual channel meta: %w", err)
+				}
+
+				if currentInstruction.FinalState == nil && s.webhook != nil {
+					if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeOpen, meta); err != nil {
+						return fmt.Errorf("failed to push virtual channel close event: %w", err)
+					}
 				}
 
 				log.Info().Hex("key", data.ChannelKey).
 					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 					Msg("virtual channel opened with us")
+
 				return nil
 			}
 		}
@@ -448,41 +503,9 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 	}); err != nil {
 		return nil, err
 	}
+	s.touchWorker()
 
 	return &channel.Our.SignedSemiChannel, nil
-}
-
-func (s *Service) ProcessInboundChannelRequest(ctx context.Context, capacity *big.Int, walletAddr *address.Address, key ed25519.PublicKey) error {
-	list, err := s.db.GetChannelsWithKey(context.Background(), key)
-	if err != nil {
-		return fmt.Errorf("failed to get active channels: %w", err)
-	}
-
-	usedCapacity := new(big.Int).Set(capacity)
-	for _, channel := range list {
-		if channel.Status != db.ChannelStateInactive {
-			usedCapacity.Add(usedCapacity, channel.OurOnchain.Deposited)
-		}
-	}
-
-	if usedCapacity.Cmp(s.maxOutboundCapacity.Nano()) == 1 {
-		return fmt.Errorf("maximum outbound capacity reached")
-	}
-
-	// TODO: also check inside task to not allow ddos
-
-	if err = s.db.CreateTask(ctx, "deploy-inbound", walletAddr.String(),
-		"deploy-inbound-"+hex.EncodeToString(key)+"-"+fmt.Sprint(time.Now().Unix()/30),
-		db.DeployInboundTask{
-			Key:           key,
-			Capacity:      capacity.String(),
-			WalletAddress: walletAddr.String(),
-		}, nil, nil,
-	); err != nil {
-		return fmt.Errorf("failed to create deploy-inbound task: %w", err)
-	}
-
-	return nil
 }
 
 func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action transport.Action) error {
@@ -515,7 +538,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		}
 
 		tryTill := time.Unix(vch.Deadline, 0)
-		if err = s.db.CreateTask(context.Background(), "remove-virtual", channel.Address,
+		if err = s.db.CreateTask(context.Background(), PaymentsTaskPool, "remove-virtual", channel.Address,
 			"remove-virtual-"+hex.EncodeToString(vch.Key),
 			db.RemoveVirtualTask{
 				Key: data.Key,
@@ -523,6 +546,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		); err != nil {
 			return fmt.Errorf("failed to create remove-virtual task: %w", err)
 		}
+		s.touchWorker()
 	case transport.CloseVirtualAction:
 		if !channel.AcceptingActions {
 			return fmt.Errorf("channel is currently not accepting new actions")
@@ -556,7 +580,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			}
 
 			tryTill := time.Unix(vch.Deadline+(channel.SafeOnchainClosePeriod/2), 0)
-			if err = s.db.CreateTask(ctx, "confirm-close-virtual", channel.Address,
+			if err = s.db.CreateTask(ctx, PaymentsTaskPool, "confirm-close-virtual", channel.Address,
 				"confirm-close-virtual-"+hex.EncodeToString(vch.Key),
 				db.ConfirmCloseVirtualTask{
 					VirtualKey: data.Key,
@@ -576,7 +600,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 
 			// Creating aggressive onchain close task, for the future,
 			// in case we will not be able to communicate with party
-			if err = s.db.CreateTask(ctx, "uncooperative-close", channel.Address+"-uncoop",
+			if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", channel.Address+"-uncoop",
 				"uncooperative-close-"+channel.Address+"-vc-"+hex.EncodeToString(vch.Key),
 				db.ChannelUncooperativeCloseTask{
 					Address:                 channel.Address,
@@ -590,6 +614,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		}); err != nil {
 			return err
 		}
+		s.touchWorker()
 	case transport.CooperativeCloseAction:
 		var req payments.CooperativeClose
 		err = tlb.LoadFromCell(&req, data.SignedCloseRequest.BeginParse())

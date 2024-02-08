@@ -202,6 +202,7 @@ func (s *SignedSemiChannel) Verify(key ed25519.PublicKey) error {
 var ErrNotFound = fmt.Errorf("not found")
 
 func (s *SemiChannel) FindVirtualChannel(key ed25519.PublicKey) (*big.Int, *VirtualChannel, error) {
+	// TODO: optimize to kinda hashmap
 	for _, kv := range s.Data.Conditionals.All() {
 		vch, err := ParseVirtualChannelCond(kv.Value)
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rs/zerolog/log"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
@@ -88,10 +89,19 @@ func (d *DB) GetChannel(ctx context.Context, addr string) (*db.Channel, error) {
 		return nil, fmt.Errorf("failed to decode json data: %w", err)
 	}
 
+	if err = channel.Our.Verify(d.pubKey); err != nil {
+		log.Warn().Msg(channel.Our.State.Dump())
+		return nil, fmt.Errorf("looks like our db state was tampered: %w", err)
+	}
+	if err = channel.Their.Verify(channel.TheirOnchain.Key); err != nil {
+		log.Warn().Msg(channel.Their.State.Dump())
+		return nil, fmt.Errorf("looks like their db state was tampered: %w", err)
+	}
+
 	return channel, nil
 }
 
-func (d *DB) GetChannelsWithKey(ctx context.Context, key ed25519.PublicKey) ([]*db.Channel, error) {
+func (d *DB) GetChannels(ctx context.Context, key ed25519.PublicKey, status db.ChannelStatus) ([]*db.Channel, error) {
 	tx := d.getExecutor(ctx)
 
 	iter := tx.NewIterator(util.BytesPrefix([]byte("ch:")), nil)
@@ -105,7 +115,16 @@ func (d *DB) GetChannelsWithKey(ctx context.Context, key ed25519.PublicKey) ([]*
 			return nil, fmt.Errorf("failed to decode json data: %w", err)
 		}
 
-		if bytes.Equal(channel.TheirOnchain.Key, key) {
+		if (status == db.ChannelStateAny || channel.Status == status) && (key == nil || bytes.Equal(channel.TheirOnchain.Key, key)) {
+			if err := channel.Our.Verify(d.pubKey); err != nil {
+				log.Warn().Msg(channel.Our.State.Dump())
+				return nil, fmt.Errorf("looks like our db state was tampered: %w", err)
+			}
+			if err := channel.Their.Verify(channel.TheirOnchain.Key); err != nil {
+				log.Warn().Msg(channel.Their.State.Dump())
+				return nil, fmt.Errorf("looks like their db state was tampered: %w", err)
+			}
+
 			channels = append(channels, channel)
 		}
 	}
@@ -117,33 +136,7 @@ func (d *DB) GetChannelsWithKey(ctx context.Context, key ed25519.PublicKey) ([]*
 	return channels, nil
 }
 
-func (d *DB) GetActiveChannels(ctx context.Context) ([]*db.Channel, error) {
-	tx := d.getExecutor(ctx)
-
-	iter := tx.NewIterator(util.BytesPrefix([]byte("ch:")), nil)
-	defer iter.Release()
-
-	// TODO: optimize, use indexing
-	var channels []*db.Channel
-	for iter.Next() {
-		var channel *db.Channel
-		if err := json.Unmarshal(iter.Value(), &channel); err != nil {
-			return nil, fmt.Errorf("failed to decode json data: %w", err)
-		}
-
-		if channel.Status == db.ChannelStateActive {
-			channels = append(channels, channel)
-		}
-	}
-
-	if err := iter.Error(); err != nil {
-		return nil, err
-	}
-
-	return channels, nil
-}
-
-func (d *DB) AcquireChannelLock(ctx context.Context, addr string) (func(), error) {
+func (d *DB) AcquireChannelLock(_ context.Context, addr string) (func(), error) {
 	d.mx.Lock()
 	l, ok := d.channelLocks[addr]
 	if !ok {

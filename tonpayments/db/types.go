@@ -15,26 +15,59 @@ import (
 	"time"
 )
 
+type VirtualChannelEventType string
+
+const (
+	VirtualChannelEventTypeOpen     VirtualChannelEventType = "open"
+	VirtualChannelEventTypeClose    VirtualChannelEventType = "close"
+	VirtualChannelEventTypeTransfer VirtualChannelEventType = "transfer"
+	VirtualChannelEventTypeRemove   VirtualChannelEventType = "remove"
+)
+
+type VirtualChannelEvent struct {
+	EventType      VirtualChannelEventType `json:"event_type"`
+	VirtualChannel any                     `json:"virtual_channel"`
+}
+
 type ChannelStatus uint8
+type VirtualChannelStatus uint8
 
 const (
 	ChannelStateInactive ChannelStatus = iota
 	ChannelStateActive
 	ChannelStateClosing
+	ChannelStateAny ChannelStatus = 100
+)
+
+const (
+	VirtualChannelStateActive VirtualChannelStatus = iota + 1
+	VirtualChannelStateWantClose
+	VirtualChannelStateClosed
+	VirtualChannelStateWantRemove
+	VirtualChannelStateRemoved
+	VirtualChannelStatePending
 )
 
 var ErrAlreadyExists = errors.New("already exists")
 var ErrNotFound = errors.New("not found")
 var ErrChannelBusy = fmt.Errorf("channel is busy")
 
+type VirtualChannelMetaSide struct {
+	ChannelAddress string
+	Capacity       string
+	Fee            string
+	Deadline       time.Time
+}
+
 type VirtualChannelMeta struct {
-	Key                 []byte
-	Active              bool
-	FromChannelAddress  string
-	ToChannelAddress    string
-	LastKnownResolve    []byte
-	ReadyToReleaseCoins bool
-	CreatedAt           time.Time
+	Key              []byte
+	Status           VirtualChannelStatus
+	Incoming         *VirtualChannelMetaSide
+	Outgoing         *VirtualChannelMetaSide
+	LastKnownResolve []byte
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type Channel struct {
@@ -163,6 +196,8 @@ func (s *Side) MarshalJSON() ([]byte, error) {
 }
 
 func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
+	// TODO: cache calculated
+
 	ch.mx.RLock()
 	defer ch.mx.RUnlock()
 

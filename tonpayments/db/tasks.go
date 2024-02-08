@@ -47,6 +47,7 @@ type ConfirmCloseVirtualTask struct {
 type CloseNextVirtualTask struct {
 	VirtualKey []byte
 	State      []byte
+	IsTransfer bool
 }
 
 type OpenVirtualTask struct {
@@ -71,10 +72,4 @@ type IncrementStatesTask struct {
 
 type RemoveVirtualTask struct {
 	Key []byte
-}
-
-type DeployInboundTask struct {
-	Key           []byte
-	Capacity      string
-	WalletAddress string
 }
