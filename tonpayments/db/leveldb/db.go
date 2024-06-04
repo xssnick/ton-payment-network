@@ -15,8 +15,6 @@ type DB struct {
 	_db    *leveldb.DB
 	pubKey ed25519.PublicKey
 
-	channelLocks map[string]*sync.Mutex
-
 	mx sync.Mutex
 }
 
@@ -62,9 +60,8 @@ func NewDB(path string, pubKey ed25519.PublicKey) (*DB, error) {
 	}
 
 	return &DB{
-		channelLocks: map[string]*sync.Mutex{},
-		_db:          db,
-		pubKey:       pubKey,
+		_db:    db,
+		pubKey: pubKey,
 	}, nil
 }
 

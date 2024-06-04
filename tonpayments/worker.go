@@ -61,23 +61,18 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					channel, err := s.getVerifiedChannel(data.ChannelAddress)
+					channel, lockId, unlock, err := s.AcquireChannel(ctx, data.ChannelAddress)
 					if err != nil {
-						return fmt.Errorf("failed to load channel: %w", err)
+						return fmt.Errorf("failed to acquire channel: %w", err)
 					}
+					defer unlock()
 
 					if channel.Status != db.ChannelStateActive {
 						// not needed anymore
 						return nil
 					}
 
-					unlock, err := s.db.AcquireChannelLock(ctx, data.ChannelAddress)
-					if err != nil {
-						return fmt.Errorf("failed to acquire channel lock: %w", err)
-					}
-					defer unlock()
-
-					if err := s.proposeAction(ctx, data.ChannelAddress, transport.IncrementStatesAction{WantResponse: data.WantResponse}, nil); err != nil {
+					if err := s.proposeAction(ctx, lockId, data.ChannelAddress, transport.IncrementStatesAction{WantResponse: data.WantResponse}, nil); err != nil {
 						return fmt.Errorf("failed to increment state with party: %w", err)
 					}
 				case "confirm-close-virtual":
@@ -101,16 +96,11 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to serialize virtual channel resolve: %w", err)
 					}
 
-					unlock, err := s.db.AcquireChannelLock(ctx, meta.Outgoing.ChannelAddress)
+					toChannel, lockId, unlock, err := s.AcquireChannel(ctx, meta.Outgoing.ChannelAddress)
 					if err != nil {
-						return fmt.Errorf("failed to acquire channel lock: %w", err)
+						return fmt.Errorf("failed to acquire 'to' channel: %w", err)
 					}
 					defer unlock()
-
-					toChannel, err := s.db.GetChannel(ctx, meta.Outgoing.ChannelAddress)
-					if err != nil {
-						return fmt.Errorf("failed to load channel: %w", err)
-					}
 
 					if meta.Incoming != nil {
 						channel, err := s.db.GetChannel(ctx, meta.Incoming.ChannelAddress)
@@ -124,7 +114,7 @@ func (s *Service) taskExecutor() {
 						}
 
 						if toChannel.Status == db.ChannelStateActive {
-							err = s.proposeAction(ctx, meta.Outgoing.ChannelAddress, transport.ConfirmCloseAction{
+							err = s.proposeAction(ctx, lockId, meta.Outgoing.ChannelAddress, transport.ConfirmCloseAction{
 								Key:   data.VirtualKey,
 								State: state,
 							}, nil)
@@ -144,7 +134,7 @@ func (s *Service) taskExecutor() {
 							return fmt.Errorf("failed to create close-next-virtual task: %w", err)
 						}
 					} else if toChannel.Status == db.ChannelStateActive {
-						err = s.proposeAction(ctx, meta.Outgoing.ChannelAddress, transport.ConfirmCloseAction{
+						err = s.proposeAction(ctx, lockId, meta.Outgoing.ChannelAddress, transport.ConfirmCloseAction{
 							Key:   data.VirtualKey,
 							State: state,
 						}, nil)
@@ -189,21 +179,16 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					channel, err := s.getVerifiedChannel(data.ChannelAddress)
+					channel, lockId, unlock, err := s.AcquireChannel(ctx, data.ChannelAddress)
 					if err != nil {
-						return fmt.Errorf("failed to load channel: %w", err)
+						return fmt.Errorf("failed to acquire channel: %w", err)
 					}
+					defer unlock()
 
 					if channel.Status != db.ChannelStateActive {
 						// not needed anymore
 						return nil
 					}
-
-					unlock, err := s.db.AcquireChannelLock(ctx, data.ChannelAddress)
-					if err != nil {
-						return fmt.Errorf("failed to acquire channel lock: %w", err)
-					}
-					defer unlock()
 
 					nextCap, _ := new(big.Int).SetString(data.Capacity, 10)
 					nextFee, _ := new(big.Int).SetString(data.Fee, 10)
@@ -244,7 +229,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to create virtual channel meta: %w", err)
 					}
 
-					if err = s.proposeAction(ctx, data.ChannelAddress, data.Action, payments.VirtualChannel{
+					if err = s.proposeAction(ctx, lockId, data.ChannelAddress, data.Action, payments.VirtualChannel{
 						Key:      data.VirtualKey,
 						Capacity: nextCap,
 						Fee:      nextFee,
@@ -252,7 +237,7 @@ func (s *Service) taskExecutor() {
 					}); err != nil {
 						if errors.Is(err, ErrDenied) {
 							// ensure that state was not modified on the other side by sending newer state without this conditional
-							if err := s.proposeAction(ctx, data.ChannelAddress, transport.IncrementStatesAction{WantResponse: false}, nil); err != nil {
+							if err := s.proposeAction(ctx, lockId, data.ChannelAddress, transport.IncrementStatesAction{WantResponse: false}, nil); err != nil {
 								return fmt.Errorf("failed to increment states on virtual channel revert: %w", err)
 							}
 
@@ -317,7 +302,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					channel, err := s.getVerifiedChannel(data.ChannelAddress)
+					channel, err := s.db.GetChannel(ctx, data.ChannelAddress)
 					if err != nil {
 						return fmt.Errorf("failed to load channel: %w", err)
 					}
@@ -344,23 +329,18 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
 					}
 
-					channel, err := s.db.GetChannel(ctx, meta.Outgoing.ChannelAddress)
+					channel, lockId, unlock, err := s.AcquireChannel(ctx, meta.Outgoing.ChannelAddress)
 					if err != nil {
-						return fmt.Errorf("failed to load channel: %w", err)
+						return fmt.Errorf("failed to acquire channel: %w", err)
 					}
+					defer unlock()
 
 					if channel.Status != db.ChannelStateActive {
 						// not needed anymore
 						return nil
 					}
 
-					unlock, err := s.db.AcquireChannelLock(ctx, meta.Outgoing.ChannelAddress)
-					if err != nil {
-						return fmt.Errorf("failed to acquire channel lock: %w", err)
-					}
-					defer unlock()
-
-					if err = s.proposeAction(ctx, meta.Outgoing.ChannelAddress, transport.RemoveVirtualAction{
+					if err = s.proposeAction(ctx, lockId, meta.Outgoing.ChannelAddress, transport.RemoveVirtualAction{
 						Key: data.Key,
 					}, nil); err != nil {
 						if !errors.Is(err, ErrNotPossible) {
@@ -429,13 +409,13 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					unlock, err := s.db.AcquireChannelLock(ctx, data.Address)
+					_, _, unlock, err := s.AcquireChannel(ctx, data.Address)
 					if err != nil {
-						return fmt.Errorf("failed to acquire channel lock: %w", err)
+						return fmt.Errorf("failed to acquire channel: %w", err)
 					}
 					defer unlock()
 
-					req, ch, err := s.getCooperativeCloseRequest(data.Address, nil)
+					req, ch, err := s.getCooperativeCloseRequest(ctx, data.Address, nil)
 					if err != nil {
 						if errors.Is(err, ErrNotActive) {
 							// expected channel already closed
@@ -467,7 +447,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					channel, err := s.getVerifiedChannel(data.Address)
+					channel, err := s.db.GetChannel(ctx, data.Address)
 					if err != nil {
 						return fmt.Errorf("failed to get channel: %w", err)
 					}

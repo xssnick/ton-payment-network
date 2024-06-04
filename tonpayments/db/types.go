@@ -210,11 +210,16 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), s1chain.Deposited)
 	balance = balance.Sub(balance, s1.State.Data.Sent.Nano())
 
-	for _, kv := range s1.State.Data.Conditionals.All() {
+	all, err := s1.State.Data.Conditionals.LoadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load conditions: %w", err)
+	}
+
+	for _, kv := range all {
 		// TODO: support other types of conditions
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse condition %d", kv.Key.BeginParse().MustLoadUInt(32))
+			return nil, fmt.Errorf("failed to parse condition %d", kv.Key.MustLoadUInt(32))
 		}
 		balance = balance.Sub(balance, new(big.Int).Add(vch.Capacity, vch.Fee))
 	}

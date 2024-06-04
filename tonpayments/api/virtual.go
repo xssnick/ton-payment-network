@@ -100,7 +100,13 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 
 	var our, their = make([]*VirtualChannel, 0), make([]*VirtualChannel, 0)
 
-	for _, kv := range ch.Their.State.Data.Conditionals.All() {
+	allTheir, err := ch.Their.State.Data.Conditionals.LoadAll()
+	if err != nil {
+		writeErr(w, 500, "failed to load their conditionals: "+err.Error())
+		return
+	}
+
+	for _, kv := range allTheir {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
 			continue
@@ -120,7 +126,13 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 		their = append(their, res)
 	}
 
-	for _, kv := range ch.Our.State.Data.Conditionals.All() {
+	allOur, err := ch.Our.State.Data.Conditionals.LoadAll()
+	if err != nil {
+		writeErr(w, 500, "failed to load our conditionals: "+err.Error())
+		return
+	}
+
+	for _, kv := range allOur {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
 			continue

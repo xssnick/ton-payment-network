@@ -174,7 +174,14 @@ func main() {
 		return
 	}
 
-	w, err := wallet.FromPrivateKey(apiClient, cfg.PaymentNodePrivateKey, wallet.HighloadV2Verified)
+	w, err := wallet.FromPrivateKey(apiClient, cfg.PaymentNodePrivateKey, wallet.ConfigHighloadV3{
+		MessageTTL: 3*60 + 30,
+		MessageBuilder: func(ctx context.Context, subWalletId uint32) (id uint32, createdAt int64, err error) {
+			createdAt = time.Now().Unix() - 30 // something older than last master block, to pass through LS external's time validation
+			id = uint32(createdAt)             // TODO: store seqno in db
+			return
+		},
+	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init wallet")
 		return
@@ -243,6 +250,18 @@ func commandReader(svc *tonpayments.Service) error {
 				return fmt.Errorf("failed to increment states with channel: %w", err)
 			}
 		}
+		log.Info().Msg("tasks created")
+	case "inc-hard":
+		log.Info().Msg("input channel address to run increment state test:")
+		var addr string
+		_, _ = fmt.Scanln(&addr)
+
+		for i := 0; i < 3000; i++ {
+			if err := svc.IncrementStates(context.Background(), addr, true); err != nil {
+				return fmt.Errorf("failed to increment states with channel: %w", err)
+			}
+		}
+		log.Info().Msg("tasks created")
 	case "destroy":
 		log.Info().Msg("to start cooperative close input channel address:")
 		var addr string

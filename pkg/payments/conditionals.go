@@ -83,9 +83,7 @@ func (c *VirtualChannel) Serialize() *cell.Cell {
 		EndCell()
 }
 
-func ParseVirtualChannelCond(c *cell.Cell) (*VirtualChannel, error) {
-	s := c.BeginParse()
-
+func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 	fee, err := readIntOP(s)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse fee: %w", err)

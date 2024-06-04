@@ -28,11 +28,11 @@ import (
 // 3. Receiver triggers ProcessAction and approves
 // 4. Node in chain repeats this steps in background, if it is not initial sender.
 
-func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address,
+func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lockId int64, channelAddr *address.Address,
 	signedState payments.SignedSemiChannel, action transport.Action) (*payments.SignedSemiChannel, error) {
+	lockId = -lockId // force negate, to not collide with our locks
 
-	// TODO: not lock unknown not existent channels
-	unlock, err := s.db.AcquireChannelLock(ctx, channelAddr.String())
+	channel, _, unlock, err := s.AcquireChannel(ctx, channelAddr.String(), lockId)
 	if err != nil {
 		if errors.Is(err, db.ErrChannelBusy) {
 			return nil, ErrChannelIsBusy
@@ -40,16 +40,6 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 		return nil, fmt.Errorf("failed to acquire channel lock: %w", err)
 	}
 	defer unlock()
-
-	channel, err := s.getVerifiedChannel(channelAddr.String())
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			// our party proposed action with channel we don't know,
-			// we will try to find it onchain and register (asynchronously)
-			go s.discoverChannel(channelAddr)
-		}
-		return nil, err
-	}
 
 	if channel.Status != db.ChannelStateActive {
 		return nil, fmt.Errorf("channel is not active")
@@ -113,7 +103,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil
 		}
 	case transport.RemoveVirtualAction:
-		index, _, err := signedState.State.FindVirtualChannel(data.Key)
+		_, _, err = signedState.State.FindVirtualChannel(data.Key)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
 			return nil, fmt.Errorf("failed to find virtual channel in their new state: %w", err)
 		}
@@ -139,7 +129,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil, fmt.Errorf("virtual channel is not expired")
 		}
 
-		if err = channel.Their.State.Data.Conditionals.SetIntKey(index, nil); err != nil {
+		if err = channel.Their.State.Data.Conditionals.DeleteIntKey(index); err != nil {
 			return nil, fmt.Errorf("failed to remove condition with index %s: %w", index.String(), err)
 		}
 
@@ -160,7 +150,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, chan
 			return nil
 		}
 	case transport.ConfirmCloseAction:
-		index, _, err := signedState.State.FindVirtualChannel(data.Key)
+		_, _, err = signedState.State.FindVirtualChannel(data.Key)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
 			return nil, fmt.Errorf("failed to find virtual channel in their new state: %w", err)
 		}
@@ -512,7 +502,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
-	channel, err := s.GetActiveChannel(channelAddr.String())
+	channel, err := s.GetActiveChannel(ctx, channelAddr.String())
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}

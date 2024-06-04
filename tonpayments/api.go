@@ -247,7 +247,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 }
 
 func (s *Service) RequestUncooperativeClose(ctx context.Context, addr string) error {
-	channel, err := s.GetActiveChannel(addr)
+	channel, err := s.GetActiveChannel(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -276,19 +276,14 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		return fmt.Errorf("cannot close outgoing channel")
 	}
 
-	unlock, err := s.db.AcquireChannelLock(ctx, meta.Incoming.ChannelAddress)
-	if err != nil {
-		return fmt.Errorf("failed to acquire channel lock: %w", err)
-	}
-	defer unlock()
-
-	ch, err := s.db.GetChannel(ctx, meta.Incoming.ChannelAddress)
+	ch, _, unlock, err := s.AcquireChannel(ctx, meta.Incoming.ChannelAddress)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			return fmt.Errorf("onchain channel with source not exists")
 		}
-		return fmt.Errorf("failed to load channel: %w", err)
+		return fmt.Errorf("failed to acquire channel: %w", err)
 	}
+	defer unlock()
 
 	_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
 	if err != nil {
@@ -348,7 +343,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 }
 
 func (s *Service) executeCooperativeClose(ctx context.Context, partyReq *payments.CooperativeClose, channelAddr string) error {
-	ourReq, channel, err := s.getCooperativeCloseRequest(channelAddr, partyReq)
+	ourReq, channel, err := s.getCooperativeCloseRequest(ctx, channelAddr, partyReq)
 	if err != nil {
 		return fmt.Errorf("failed to prepare close channel request: %w", err)
 	}
@@ -379,7 +374,7 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
-	_, ch, err := s.getCooperativeCloseRequest(channelAddr, nil)
+	_, ch, err := s.getCooperativeCloseRequest(ctx, channelAddr, nil)
 	if err != nil {
 		return fmt.Errorf("failed to prepare close channel request: %w", err)
 	}
@@ -414,13 +409,18 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 	})
 }
 
-func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payments.CooperativeClose) (*payments.CooperativeClose, *db.Channel, error) {
-	channel, err := s.GetActiveChannel(channelAddr)
+func (s *Service) getCooperativeCloseRequest(ctx context.Context, channelAddr string, partyReq *payments.CooperativeClose) (*payments.CooperativeClose, *db.Channel, error) {
+	channel, err := s.GetActiveChannel(ctx, channelAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	for _, kv := range channel.Our.State.Data.Conditionals.All() {
+	allOur, err := channel.Our.State.Data.Conditionals.LoadAll()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load our cond dict: %w", err)
+	}
+
+	for _, kv := range allOur {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
@@ -432,7 +432,12 @@ func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payme
 		}
 	}
 
-	for _, kv := range channel.Their.State.Data.Conditionals.All() {
+	allTheir, err := channel.Their.State.Data.Conditionals.LoadAll()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load their cond dict: %w", err)
+	}
+
+	for _, kv := range allTheir {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
@@ -492,7 +497,7 @@ func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payme
 }
 
 func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr string) error {
-	channel, err := s.GetActiveChannel(channelAddr)
+	channel, err := s.GetActiveChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -552,7 +557,7 @@ func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr strin
 }
 
 func (s *Service) challengeChannelState(ctx context.Context, channelAddr string) error {
-	channel, err := s.getVerifiedChannel(channelAddr)
+	channel, err := s.db.GetChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -608,7 +613,7 @@ func (s *Service) challengeChannelState(ctx context.Context, channelAddr string)
 }
 
 func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAddr string) error {
-	channel, err := s.getVerifiedChannel(channelAddr)
+	channel, err := s.db.GetChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -646,12 +651,12 @@ func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAd
 }
 
 func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr string) error {
-	channel, err := s.getVerifiedChannel(channelAddr)
+	channel, err := s.db.GetChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	if channel.Their.State.Data.Conditionals.Size() == 0 {
+	if channel.Their.State.Data.Conditionals.IsEmpty() {
 		return nil
 	}
 
@@ -677,8 +682,14 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 	msg.Signed.ChannelID = channel.ID
 	msg.Signed.B = channel.Their.SignedSemiChannel
 	msg.Signed.ConditionalsToSettle = cell.NewDict(32)
+
 	// TODO: get all conditions and make inputs for known
-	for _, kv := range channel.Their.State.Data.Conditionals.All() {
+	all, err := channel.Their.State.Data.Conditionals.LoadAll()
+	if err != nil {
+		return fmt.Errorf("failed to load their conditions dict: %w", err)
+	}
+
+	for _, kv := range all {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to parse virtual channel")
@@ -698,15 +709,17 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 				continue
 			}
 
-			if err = msg.Signed.ConditionalsToSettle.Set(kv.Key, rc); err != nil {
+			if err = msg.Signed.ConditionalsToSettle.Set(kv.Key.MustToCell(), rc); err != nil {
 				log.Warn().Err(err).Msg("failed to store known virtual channel state in request")
 				continue
 			}
+
+			// TODO: max 30 per message, for each some coins
 		}
 	}
 
 	// TODO: maybe wait for some deadline if not all states resolved, before settle
-	if msg.Signed.ConditionalsToSettle.Size() == 0 {
+	if msg.Signed.ConditionalsToSettle.IsEmpty() {
 		log.Warn().Msg("no known resolves for existing conditions")
 		return nil
 	}
@@ -729,9 +742,13 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 		return fmt.Errorf("failed to serialize message to cell: %w", err)
 	}
 
-	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
+	// TODO: build many, max 50 per tx
+	var messages []*wallet.Message
+	messages = append(messages, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
+
+	tx, _, err := s.wallet.SendManyWaitTransaction(ctx, messages)
 	if err != nil {
-		return fmt.Errorf("failed to send internal message to channel: %w", err)
+		return fmt.Errorf("failed to send internal messages to channel: %w", err)
 	}
 	log.Info().Hex("hash", tx.Hash).Msg("settle conditions transaction completed")
 

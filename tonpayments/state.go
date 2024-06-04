@@ -2,19 +2,25 @@ package tonpayments
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/tlb"
+	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
 	"reflect"
 	"time"
 )
 
-func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport.Action, details any) (func(), error) {
+func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport.Action, details any) (func(), *cell.Cell, error) {
 	var onSuccess func()
+
+	var idempotency bool
+	dictRoot := cell.CreateProofSkeleton()
 
 	switch ch := action.(type) {
 	case transport.IncrementStatesAction:
@@ -22,60 +28,79 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		vch := details.(payments.VirtualChannel)
 
 		if vch.Capacity.Sign() <= 0 {
-			return nil, fmt.Errorf("invalid capacity")
+			return nil, nil, fmt.Errorf("invalid capacity")
 		}
 
 		if vch.Fee.Sign() < 0 {
-			return nil, fmt.Errorf("invalid fee")
+			return nil, nil, fmt.Errorf("invalid fee")
 		}
 
 		if vch.Deadline < time.Now().Unix() {
-			return nil, fmt.Errorf("deadline expired")
+			return nil, nil, fmt.Errorf("deadline expired")
 		}
 
 		val := vch.Serialize()
 
-		for _, kv := range channel.Our.State.Data.Conditionals.All() {
-			if bytes.Equal(kv.Value.Hash(), val.Hash()) {
-				// idempotency
-				return onSuccess, nil
-			}
-		}
+		key := big.NewInt(int64(binary.LittleEndian.Uint32(vch.Key)))
+		keyCell := cell.BeginCell().MustStoreBigInt(key, 32).EndCell()
 
-		var slot = -1
-		// TODO: we are looking for a free slot to keep it compact, [make it better]
-		for i := 0; i < s.virtualChannelsLimitPerChannel; i++ {
-			if channel.Our.State.Data.Conditionals.GetByIntKey(big.NewInt(int64(i))) == nil {
-				slot = i
+		sl, proofValueBranch, err := channel.Our.State.Data.Conditionals.LoadValueWithProof(keyCell, dictRoot)
+		if err == nil {
+			if bytes.Equal(sl.MustToCell().Hash(), val.Hash()) {
+				// idempotency
+				proofValueBranch.SetRecursive()
+				idempotency = true
 				break
 			}
+			return nil, nil, fmt.Errorf("virtual channel with the same key prefix and different content is already exists")
+		} else if !errors.Is(err, cell.ErrNoSuchKeyInDict) {
+			return nil, nil, fmt.Errorf("failed to load our condition: %w", err)
 		}
 
-		if slot == -1 {
-			return nil, fmt.Errorf("virtual channels limit has been reached")
+		// TODO: check virtual channels limit
+
+		if err := channel.Our.State.Data.Conditionals.SetIntKey(key, val); err != nil {
+			return nil, nil, fmt.Errorf("failed to set condition: %w", err)
 		}
 
-		if err := channel.Our.State.Data.Conditionals.SetIntKey(big.NewInt(int64(slot)), val); err != nil {
-			return nil, fmt.Errorf("failed to set condition: %w", err)
+		_, proofValueBranch, err = channel.Our.State.Data.Conditionals.LoadValueWithProof(keyCell, dictRoot)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to find key for proof branch: %w", err)
 		}
+		// include whole value cell in proof
+		proofValueBranch.SetRecursive()
 
 		ourTargetBalance, err := channel.CalcBalance(false)
 		if err != nil {
-			return nil, fmt.Errorf("failed to calc our side balance with target: %w", err)
+			return nil, nil, fmt.Errorf("failed to calc our side balance with target: %w", err)
 		}
 
 		if ourTargetBalance.Sign() == -1 {
-			return nil, fmt.Errorf("not enough available balance with target")
+			return nil, nil, fmt.Errorf("not enough available balance with target")
 		}
 	case transport.RemoveVirtualAction:
-		idx, vch, err := channel.Our.State.FindVirtualChannel(ch.Key)
+		idx, vch, err := channel.Our.State.FindVirtualChannelWithProof(ch.Key, dictRoot)
 		if err != nil {
-			// idempotency, if not found we consider it already closed
-			return onSuccess, nil
+			if errors.Is(err, payments.ErrNotFound) {
+				// idempotency, if not found we consider it already closed
+				idempotency = true
+				break
+			}
+			return nil, nil, err
 		}
+		// new skeleton to reset prev path
+		dictRoot = cell.CreateProofSkeleton()
 
 		if err = channel.Our.State.Data.Conditionals.DeleteIntKey(idx); err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+
+		key := big.NewInt(int64(binary.LittleEndian.Uint32(vch.Key)))
+		keyCell := cell.BeginCell().MustStoreBigInt(key, 32).EndCell()
+
+		_, _, err = channel.Our.State.Data.Conditionals.LoadValueWithProof(keyCell, dictRoot)
+		if err == nil || !errors.Is(err, cell.ErrNoSuchKeyInDict) {
+			return nil, nil, fmt.Errorf("deleted value is still exists for some reason: %w", err)
 		}
 
 		onSuccess = func() {
@@ -87,25 +112,39 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 	case transport.ConfirmCloseAction:
 		var vState payments.VirtualChannelState
 		if err := tlb.LoadFromCell(&vState, ch.State.BeginParse()); err != nil {
-			return nil, fmt.Errorf("failed to load virtual channel state cell: %w", err)
+			return nil, nil, fmt.Errorf("failed to load virtual channel state cell: %w", err)
 		}
 
 		if !vState.Verify(ch.Key) {
-			return nil, fmt.Errorf("incorrect channel state signature")
+			return nil, nil, fmt.Errorf("incorrect channel state signature")
 		}
 
-		idx, vch, err := channel.Our.State.FindVirtualChannel(ch.Key)
+		idx, vch, err := channel.Our.State.FindVirtualChannelWithProof(ch.Key, dictRoot)
 		if err != nil {
-			// idempotency, if not found we consider it already closed
-			return onSuccess, nil
+			if errors.Is(err, payments.ErrNotFound) {
+				// idempotency, if not found we consider it already closed
+				idempotency = true
+				break
+			}
+			return nil, nil, err
 		}
+		// new skeleton to reset prev path
+		dictRoot = cell.CreateProofSkeleton()
 
 		if vch.Deadline < time.Now().Unix() {
-			return nil, fmt.Errorf("virtual channel has expired")
+			return nil, nil, fmt.Errorf("virtual channel has expired")
 		}
 
 		if err = channel.Our.State.Data.Conditionals.DeleteIntKey(idx); err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+
+		key := big.NewInt(int64(binary.LittleEndian.Uint32(vch.Key)))
+		keyCell := cell.BeginCell().MustStoreBigInt(key, 32).EndCell()
+
+		_, _, err = channel.Our.State.Data.Conditionals.LoadValueWithProof(keyCell, dictRoot)
+		if err == nil || !errors.Is(err, cell.ErrNoSuchKeyInDict) {
+			return nil, nil, fmt.Errorf("deleted value is still exists for some reason: %w", err)
 		}
 
 		sent := new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), vState.Amount.Nano())
@@ -121,15 +160,31 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 				Msg("virtual channel close confirmed")
 		}
 	default:
-		return nil, fmt.Errorf("unexpected action type: %s", reflect.TypeOf(ch).String())
+		return nil, nil, fmt.Errorf("unexpected action type: %s", reflect.TypeOf(ch).String())
 	}
 
-	channel.Our.State.Data.Seqno++
-	cl, err := tlb.ToCell(channel.Our.State)
+	if !idempotency {
+		channel.Our.State.Data.Seqno++
+		cl, err := tlb.ToCell(channel.Our.State)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to serialize state for signing: %w", err)
+		}
+		channel.Our.Signature = payments.Signature{Value: cl.Sign(s.key)}
+	}
+
+	res, err := tlb.ToCell(channel.Our.SignedSemiChannel)
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize state for signing: %w", err)
+		return nil, nil, fmt.Errorf("failed to serialize signed state: %w", err)
 	}
-	channel.Our.Signature = payments.Signature{Value: cl.Sign(s.key)}
 
-	return onSuccess, nil
+	proofRoot := cell.CreateProofSkeleton()
+	proofRoot.AttachAt(0, dictRoot)
+
+	res, err = res.CreateProof(proofRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create proof from signed state: %w", err)
+	}
+	res = res.MustPeekRef(0)
+	
+	return onSuccess, res, nil
 }

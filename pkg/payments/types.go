@@ -3,7 +3,9 @@ package payments
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/tonutils-go/address"
@@ -182,7 +184,7 @@ type FinishUncooperativeClose struct {
 func (s *SignedSemiChannel) Verify(key ed25519.PublicKey) error {
 	if bytes.Equal(s.Signature.Value, make([]byte, 64)) &&
 		s.State.Data.Sent.Nano().Sign() == 0 &&
-		s.State.Data.Conditionals.Size() == 0 {
+		s.State.Data.Conditionals.IsEmpty() {
 		// TODO: use more reliable approach
 		// empty
 		return nil
@@ -192,7 +194,7 @@ func (s *SignedSemiChannel) Verify(key ed25519.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	if !ed25519.Verify(key, c.Hash(), s.Signature.Value) {
+	if !ed25519.Verify(key, c.Hash(2), s.Signature.Value) {
 		log.Warn().Hex("sig", s.Signature.Value).Msg("invalid signature")
 		return fmt.Errorf("invalid signature")
 	}
@@ -202,20 +204,42 @@ func (s *SignedSemiChannel) Verify(key ed25519.PublicKey) error {
 var ErrNotFound = fmt.Errorf("not found")
 
 func (s *SemiChannel) FindVirtualChannel(key ed25519.PublicKey) (*big.Int, *VirtualChannel, error) {
-	// TODO: optimize to kinda hashmap
-	for _, kv := range s.Data.Conditionals.All() {
-		vch, err := ParseVirtualChannelCond(kv.Value)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
-		}
+	return s.FindVirtualChannelWithProof(key, nil)
+}
 
-		if !bytes.Equal(vch.Key, key) {
-			continue
-		}
-
-		return kv.Key.BeginParse().MustLoadBigUInt(32), vch, nil
+func (s *SemiChannel) FindVirtualChannelWithProof(key ed25519.PublicKey, proofRoot *cell.ProofSkeleton) (*big.Int, *VirtualChannel, error) {
+	var tempProofRoot *cell.ProofSkeleton
+	if proofRoot != nil {
+		tempProofRoot = cell.CreateProofSkeleton()
 	}
-	return nil, nil, ErrNotFound
+
+	idx := big.NewInt(int64(binary.LittleEndian.Uint32(key)))
+	sl, proofBranch, err := s.Data.Conditionals.LoadValueWithProof(cell.BeginCell().MustStoreBigUInt(idx, 32).EndCell(), tempProofRoot)
+	if err != nil {
+		if errors.Is(err, cell.ErrNoSuchKeyInDict) {
+			if proofRoot != nil {
+				proofBranch.SetRecursive()
+				proofRoot.Merge(tempProofRoot)
+			}
+			return nil, nil, ErrNotFound
+		}
+		return nil, nil, err
+	}
+
+	vch, err := ParseVirtualChannelCond(sl)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse state of one of virtual channels")
+	}
+
+	if !bytes.Equal(vch.Key, key) {
+		return nil, nil, ErrNotFound
+	}
+
+	if proofRoot != nil {
+		proofBranch.SetRecursive()
+		proofRoot.Merge(tempProofRoot)
+	}
+	return idx, vch, nil
 }
 
 func (s *SemiChannel) CheckSynchronized(with *SemiChannel) error {
@@ -236,7 +260,7 @@ func (s *SemiChannel) CheckSynchronized(with *SemiChannel) error {
 		return fmt.Errorf("failed to serialize our state: %w", err)
 	}
 
-	if !bytes.Equal(ourStateOnTheirSide.Hash(), ourState.Hash()) {
+	if !bytes.Equal(ourStateOnTheirSide.Hash(2), ourState.Hash()) {
 		return fmt.Errorf("our state on their side is diff")
 	}
 
@@ -253,7 +277,7 @@ func (s *SemiChannel) CheckSynchronized(with *SemiChannel) error {
 		return fmt.Errorf("failed to serialize their state: %w", err)
 	}
 
-	if !bytes.Equal(theirStateOnOurSide.Hash(), theirState.Hash()) {
+	if !bytes.Equal(theirStateOnOurSide.Hash(2), theirState.Hash(2)) {
 		return fmt.Errorf("their state on our side is diff")
 	}
 
@@ -283,23 +307,9 @@ func (s *SemiChannel) Dump() string {
 }
 
 func (s *SemiChannelBody) Copy() (SemiChannelBody, error) {
-	conditions := cell.NewDict(32)
-	if s.Conditionals.Size() > 0 {
-		cl, err := s.Conditionals.ToCell()
-		if err != nil {
-			return SemiChannelBody{}, err
-		}
-
-		// TODO: more efficient copy
-		conditions, err = cl.BeginParse().ToDict(32)
-		if err != nil {
-			return SemiChannelBody{}, err
-		}
-	}
-
 	return SemiChannelBody{
 		Seqno:        s.Seqno,
 		Sent:         tlb.FromNanoTON(s.Sent.Nano()),
-		Conditionals: conditions,
+		Conditionals: s.Conditionals.AsCell().AsDict(32),
 	}, nil
 }

@@ -37,12 +37,15 @@ func init() {
 
 	tl.Register(GetChannelConfig{}, "payments.getChannelConfig = payments.Request")
 	tl.Register(RequestAction{}, "payments.requestAction channelAddr:int256 action:payments.Action = payments.Request")
-	tl.Register(ProposeAction{}, "payments.proposeAction channelAddr:int256 action:payments.Action state:bytes = payments.Request")
+	tl.Register(ProposeAction{}, "payments.proposeAction lockId:long channelAddr:int256 action:payments.Action state:bytes = payments.Request")
 	tl.Register(Authenticate{}, "payments.authenticate key:int256 timestamp:long signature:bytes = payments.Authenticate")
 
 	tl.Register(InstructionContainer{}, "payments.instructionContainer hash:int256 data:bytes = payments.InstructionContainer")
 	tl.Register(InstructionsToSign{}, "payments.instructionsToSign list:(vector payments.instructionContainer) = payments.InstructionsToSign")
 	tl.Register(OpenVirtualInstruction{}, "payments.openVirtualInstruction target:int256 expectedFee:bytes expectedCapacity:bytes expectedDeadline:long nextTarget:int256 nextFee:bytes nextCapacity:bytes nextDeadline:long finalState:bytes = payments.OpenVirtualInstruction")
+
+	tl.Register(RequestChannelLock{}, "payments.requestChannelLock lockId:long channel:int256 lock:Bool = payments.RequestChannelLock")
+	tl.Register(IsChannelUnlocked{}, "payments.isChannelUnlocked lockId:long channel:int256 = payments.IsChannelUnlocked")
 }
 
 type Action any
@@ -55,6 +58,19 @@ type NodeAddress struct {
 // Ping - check connection is alive and delay
 type Ping struct {
 	Value int64 `tl:"long"`
+}
+
+// RequestChannelLock - lock/unlock channel to propose actions
+type RequestChannelLock struct {
+	LockID      int64  `tl:"long"`
+	ChannelAddr []byte `tl:"int256"`
+	Lock        bool   `tl:"bool"`
+}
+
+// IsChannelUnlocked - check is channel still locked with specific id
+type IsChannelUnlocked struct {
+	LockID      int64  `tl:"long"`
+	ChannelAddr []byte `tl:"int256"`
 }
 
 // Pong - response on check connection is alive
@@ -80,6 +96,7 @@ type AuthenticateToSign struct {
 // ProposeAction - request party to update state with action,
 // for example open virtual channel and add conditional payment
 type ProposeAction struct {
+	LockID      int64      `tl:"long"`
 	ChannelAddr []byte     `tl:"int256"`
 	Action      any        `tl:"struct boxed [payments.openVirtualAction,payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.incrementStatesAction]"`
 	SignedState *cell.Cell `tl:"cell"`

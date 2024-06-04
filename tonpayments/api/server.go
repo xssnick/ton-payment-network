@@ -95,7 +95,9 @@ func NewServer(addr, webhook, webhookKey string, svc Service, queue Queue, crede
 }
 
 func (s *Server) Start() error {
-	go s.startWebhooksSender()
+	if s.webhook != "" {
+		go s.startWebhooksSender()
+	}
 	return s.srv.ListenAndServe()
 }
 
