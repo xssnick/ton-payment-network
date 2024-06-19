@@ -100,7 +100,7 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 
 	var our, their = make([]*VirtualChannel, 0), make([]*VirtualChannel, 0)
 
-	allTheir, err := ch.Their.State.Data.Conditionals.LoadAll()
+	allTheir, err := ch.Their.Conditionals.LoadAll()
 	if err != nil {
 		writeErr(w, 500, "failed to load their conditionals: "+err.Error())
 		return
@@ -126,7 +126,7 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 		their = append(their, res)
 	}
 
-	allOur, err := ch.Our.State.Data.Conditionals.LoadAll()
+	allOur, err := ch.Our.Conditionals.LoadAll()
 	if err != nil {
 		writeErr(w, 500, "failed to load our conditionals: "+err.Error())
 		return

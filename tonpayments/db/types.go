@@ -101,6 +101,7 @@ type OnchainState struct {
 
 type Side struct {
 	payments.SignedSemiChannel
+	Conditionals *cell.Dictionary
 }
 
 var ErrNewerStateIsKnown = errors.New("newer state is already known")
@@ -114,14 +115,14 @@ func NewSide(channelId []byte, seqno, counterpartySeqno uint64) Side {
 			State: payments.SemiChannel{
 				ChannelID: channelId,
 				Data: payments.SemiChannelBody{
-					Seqno:        seqno,
-					Sent:         tlb.ZeroCoins,
-					Conditionals: cell.NewDict(32),
+					Seqno:            seqno,
+					Sent:             tlb.ZeroCoins,
+					ConditionalsHash: make([]byte, 32),
 				},
 				CounterpartyData: &payments.SemiChannelBody{
-					Seqno:        counterpartySeqno,
-					Sent:         tlb.ZeroCoins,
-					Conditionals: cell.NewDict(32),
+					Seqno:            counterpartySeqno,
+					Sent:             tlb.ZeroCoins,
+					ConditionalsHash: make([]byte, 32),
 				},
 			},
 		},
@@ -141,27 +142,20 @@ func (s *Side) Copy() *Side {
 			State: payments.SemiChannel{
 				ChannelID: append([]byte{}, s.State.ChannelID...),
 				Data: payments.SemiChannelBody{
-					Seqno:        s.State.Data.Seqno,
-					Sent:         s.State.Data.Sent,
-					Conditionals: cell.NewDict(32),
+					Seqno:            s.State.Data.Seqno,
+					Sent:             s.State.Data.Sent,
+					ConditionalsHash: s.State.Data.ConditionalsHash,
 				},
 			},
 		},
-	}
-
-	for _, kv := range s.State.Data.Conditionals.All() {
-		_ = sd.State.Data.Conditionals.Set(kv.Key, kv.Value)
+		Conditionals: s.Conditionals.Copy(),
 	}
 
 	if s.State.CounterpartyData != nil {
 		sd.State.CounterpartyData = &payments.SemiChannelBody{
-			Seqno:        s.State.CounterpartyData.Seqno,
-			Sent:         s.State.CounterpartyData.Sent,
-			Conditionals: cell.NewDict(32),
-		}
-
-		for _, kv := range s.State.CounterpartyData.Conditionals.All() {
-			_ = sd.State.CounterpartyData.Conditionals.Set(kv.Key, kv.Value)
+			Seqno:            s.State.CounterpartyData.Seqno,
+			Sent:             s.State.CounterpartyData.Sent,
+			ConditionalsHash: s.State.CounterpartyData.ConditionalsHash,
 		}
 	}
 
@@ -184,7 +178,18 @@ func (s *Side) UnmarshalJSON(bytes []byte) error {
 		return err
 	}
 
-	return tlb.LoadFromCell(&s.SignedSemiChannel, cl.BeginParse())
+	sl := cl.BeginParse()
+	ssc, err := sl.LoadRef()
+	if err != nil {
+		return err
+	}
+
+	s.Conditionals, err = sl.LoadDict(32)
+	if err != nil {
+		return err
+	}
+
+	return tlb.LoadFromCell(&s.SignedSemiChannel, ssc)
 }
 
 func (s *Side) MarshalJSON() ([]byte, error) {
@@ -192,7 +197,9 @@ func (s *Side) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []byte(strconv.Quote(base64.StdEncoding.EncodeToString(bts.ToBOC()))), nil
+
+	c := cell.BeginCell().MustStoreRef(bts).MustStoreDict(s.Conditionals).EndCell()
+	return []byte(strconv.Quote(base64.StdEncoding.EncodeToString(c.ToBOC()))), nil
 }
 
 func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
@@ -210,7 +217,7 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), s1chain.Deposited)
 	balance = balance.Sub(balance, s1.State.Data.Sent.Nano())
 
-	all, err := s1.State.Data.Conditionals.LoadAll()
+	all, err := s1.Conditionals.LoadAll()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load conditions: %w", err)
 	}

@@ -181,7 +181,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 			return fmt.Errorf("failed to load channel: %w", err)
 		}
 
-		_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
+		_, vch, err := payments.FindVirtualChannel(ch.Their.Conditionals, virtualKey)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
 				// idempotency
@@ -209,7 +209,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 			return fmt.Errorf("failed to load channel: %w", err)
 		}
 
-		_, vch, err := ch.Our.State.FindVirtualChannel(virtualKey)
+		_, vch, err := payments.FindVirtualChannel(ch.Our.Conditionals, virtualKey)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
 				// idempotency
@@ -264,6 +264,9 @@ func (s *Service) RequestUncooperativeClose(ctx context.Context, addr string) er
 }
 
 func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey) error {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
 	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -276,16 +279,15 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		return fmt.Errorf("cannot close outgoing channel")
 	}
 
-	ch, _, unlock, err := s.AcquireChannel(ctx, meta.Incoming.ChannelAddress)
+	ch, err := s.GetActiveChannel(ctx, meta.Incoming.ChannelAddress)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			return fmt.Errorf("onchain channel with source not exists")
+			return fmt.Errorf("onchain channel with source is not active")
 		}
-		return fmt.Errorf("failed to acquire channel: %w", err)
+		return fmt.Errorf("failed to get channel: %w", err)
 	}
-	defer unlock()
 
-	_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
+	_, vch, err := payments.FindVirtualChannel(ch.Their.Conditionals, virtualKey)
 	if err != nil {
 		if errors.Is(err, payments.ErrNotFound) {
 			// idempotency
@@ -299,11 +301,6 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 	state := meta.GetKnownResolve(vch.Key)
 	if state == nil {
 		return ErrNoResolveExists
-	}
-
-	stateCell, err := state.ToCell()
-	if err != nil {
-		return fmt.Errorf("failed to serialize state to cell: %w", err)
 	}
 
 	meta.Status = db.VirtualChannelStateWantClose
@@ -330,15 +327,21 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 			CheckVirtualStillExists: vch.Key,
 		}, &uncooperativeAfter, nil,
 	); err != nil {
-		log.Warn().Err(err).Str("channel", ch.Address).Msg("failed to create uncooperative close task")
+		log.Warn().Err(err).Str("channel", ch.Address).Hex("key", vch.Key).Msg("failed to create uncooperative close task")
 	}
 
-	if err = s.requestAction(ctx, ch.Address, transport.CloseVirtualAction{
-		Key:   vch.Key,
-		State: stateCell,
-	}); err != nil {
-		return fmt.Errorf("failed to request action from the node: %w", err)
+	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-close-virtual", ch.Address+"-coop",
+		"virtual-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
+		db.AskCloseVirtualTask{
+			Key:            vch.Key,
+			ChannelAddress: ch.Address,
+		}, nil, &uncooperativeAfter,
+	); err != nil {
+		log.Warn().Err(err).Str("channel", ch.Address).Hex("key", vch.Key).Msg("failed to create cooperative close task")
 	}
+
+	log.Info().Err(err).Str("channel", ch.Address).Hex("key", vch.Key).Msg("virtual channel close task created and will be executed soon")
+
 	return nil
 }
 
@@ -415,7 +418,7 @@ func (s *Service) getCooperativeCloseRequest(ctx context.Context, channelAddr st
 		return nil, nil, fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	allOur, err := channel.Our.State.Data.Conditionals.LoadAll()
+	allOur, err := channel.Our.Conditionals.LoadAll()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load our cond dict: %w", err)
 	}
@@ -432,7 +435,7 @@ func (s *Service) getCooperativeCloseRequest(ctx context.Context, channelAddr st
 		}
 	}
 
-	allTheir, err := channel.Their.State.Data.Conditionals.LoadAll()
+	allTheir, err := channel.Their.Conditionals.LoadAll()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load their cond dict: %w", err)
 	}
@@ -651,12 +654,19 @@ func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAd
 }
 
 func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr string) error {
+	const messagesPerTransaction = 20
+	const conditionsPerMessage = 30
+
+	log.Info().Str("address", channelAddr).Msg("settling conditionals")
+
 	channel, err := s.db.GetChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	if channel.Their.State.Data.Conditionals.IsEmpty() {
+	if channel.Their.Conditionals.IsEmpty() {
+		log.Info().Str("address", channel.Address).
+			Msg("nothing to settle, empty their conditionals")
 		return nil
 	}
 
@@ -680,15 +690,52 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 		IsFromA: channel.WeLeft,
 	}
 	msg.Signed.ChannelID = channel.ID
-	msg.Signed.B = channel.Their.SignedSemiChannel
 	msg.Signed.ConditionalsToSettle = cell.NewDict(32)
 
 	// TODO: get all conditions and make inputs for known
-	all, err := channel.Their.State.Data.Conditionals.LoadAll()
+	all, err := channel.Their.Conditionals.LoadAll()
 	if err != nil {
 		return fmt.Errorf("failed to load their conditions dict: %w", err)
 	}
 
+	var messages []*cell.Cell
+	var resolved int
+
+	addMessage := func(data payments.SettleConditionals, updatedCond *cell.Dictionary, proofPath *cell.ProofSkeleton, num int) error {
+		dictProof, err := channel.Their.Conditionals.AsCell().CreateProof(proofPath)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to find proof path for virtual channel")
+			return err
+		}
+
+		dictUpdatedProof, err := updatedCond.AsCell().CreateProof(proofPath)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to find proof path for virtual channel")
+			return err
+		}
+
+		data.Signed.ConditionalsProof = dictProof
+		data.Signed.ConditionalsProofUpdated = dictUpdatedProof
+
+		dataCell, err := tlb.ToCell(data.Signed)
+		if err != nil {
+			return fmt.Errorf("failed to serialize body to cell: %w", err)
+		}
+		data.Signature.Value = dataCell.Sign(s.key)
+
+		msgCell, err := tlb.ToCell(data)
+		if err != nil {
+			return fmt.Errorf("failed to serialize message to cell: %w", err)
+		}
+
+		messages = append(messages, msgCell)
+		return nil
+	}
+
+	updatedState := channel.Their.Conditionals.Copy()
+
+	condNum := 0
+	proofPath := cell.CreateProofSkeleton()
 	for _, kv := range all {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
@@ -714,43 +761,105 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 				continue
 			}
 
-			// TODO: max 30 per message, for each some coins
+			_, sk, err := channel.Their.Conditionals.LoadValueWithProof(kv.Key.MustToCell(), proofPath)
+			if err != nil {
+				log.Warn().Err(err).Msg("failed to find proof path for virtual channel")
+				continue
+			}
+			sk.SetRecursive() // we need full value in proof
+			condNum++
+
+			// replace value to empty cell, we need 2 dictionaries: before and after, to show to contract proof of update (level N hashes)
+			// because TVM cannot calc hash for specific levels, we are using this hack
+			if err = updatedState.Set(kv.Key.MustToCell(), cell.BeginCell().EndCell()); err != nil {
+				log.Warn().Err(err).Msg("failed to replace virtual channel in conditionals")
+				continue
+			}
+
+			if condNum == conditionsPerMessage {
+				if err := addMessage(msg, updatedState, proofPath, condNum); err != nil {
+					log.Warn().Err(err).Msg("failed to add settle message")
+					return err
+				}
+
+				condNum = 0
+				proofPath = cell.CreateProofSkeleton()
+				msg.Signed.ConditionalsToSettle = cell.NewDict(32)
+				channel.Their.Conditionals = updatedState.Copy()
+			}
+			resolved++
+		}
+	}
+
+	if condNum%conditionsPerMessage != 0 {
+		if err := addMessage(msg, updatedState, proofPath, condNum); err != nil {
+			log.Warn().Err(err).Msg("failed to add settle last message")
+			return err
 		}
 	}
 
 	// TODO: maybe wait for some deadline if not all states resolved, before settle
-	if msg.Signed.ConditionalsToSettle.IsEmpty() {
+	if len(messages) == 0 {
 		log.Warn().Msg("no known resolves for existing conditions")
 		return nil
 	}
 
-	if msg.Signed.ConditionalsToSettle.Size() != channel.Their.State.Data.Conditionals.Size() {
+	if resolved != len(all) {
 		log.Warn().
-			Int("with_resolves", msg.Signed.ConditionalsToSettle.Size()).
-			Int("all", channel.Their.State.Data.Conditionals.Size()).
+			Int("with_resolves", resolved).
+			Int("all", len(all)).
 			Msg("not all conditions has resolves yet, settling as is")
 	}
 
-	dataCell, err := tlb.ToCell(msg.Signed)
-	if err != nil {
-		return fmt.Errorf("failed to serialize body to cell: %w", err)
-	}
-	msg.Signature.Value = dataCell.Sign(s.key)
-
-	msgCell, err := tlb.ToCell(msg)
-	if err != nil {
-		return fmt.Errorf("failed to serialize message to cell: %w", err)
+	steps := len(messages) / messagesPerTransaction
+	if len(messages)%messagesPerTransaction > 0 {
+		steps++
 	}
 
-	// TODO: build many, max 50 per tx
-	var messages []*wallet.Message
-	messages = append(messages, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
+	log.Info().Str("address", channel.Address).Int("steps", steps).Msg("calculated settle steps")
 
-	tx, _, err := s.wallet.SendManyWaitTransaction(ctx, messages)
+	for i := 0; i < steps; i++ {
+		to := (i + 1) * messagesPerTransaction
+		if to > len(messages) {
+			to = len(messages)
+		}
+
+		var list [][]byte
+		for _, c := range messages[i*messagesPerTransaction : to] {
+			list = append(list, c.ToBOC())
+		}
+
+		if err = s.db.CreateTask(ctx, PaymentsTaskPool, "settle-step", channel.Address+"-settle",
+			"settle-"+channel.Address+"-"+fmt.Sprint(i),
+			db.SettleStepTask{
+				Step:               i,
+				Address:            channel.Address,
+				Messages:           list,
+				ChannelInitiatedAt: &channel.InitAt,
+			}, nil, nil,
+		); err != nil {
+			log.Error().Err(err).Str("channel", channel.Address).Msg("failed to create settle step task")
+		}
+
+		log.Info().Str("address", channel.Address).Int("step", i).Msg("settle step created")
+	}
+
+	return nil
+}
+
+func (s *Service) executeSettleStep(ctx context.Context, channelAddr string, messages []*cell.Cell, step int) error {
+	log.Info().Str("address", channelAddr).Int("step", step).Msg("executing settle step...")
+
+	var list []*wallet.Message
+	for _, message := range messages {
+		list = append(list, wallet.SimpleMessage(address.MustParseAddr(channelAddr), tlb.MustFromTON("0.5"), message))
+	}
+
+	tx, _, err := s.wallet.SendManyWaitTransaction(ctx, list)
 	if err != nil {
 		return fmt.Errorf("failed to send internal messages to channel: %w", err)
 	}
-	log.Info().Hex("hash", tx.Hash).Msg("settle conditions transaction completed")
+	log.Info().Hex("hash", tx.Hash).Int("step", step).Int("messages", len(list)).Msg("settle conditions step transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil

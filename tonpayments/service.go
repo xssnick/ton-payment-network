@@ -33,7 +33,7 @@ type Transport interface {
 	RemoveUrgentPeer(channelKey ed25519.PublicKey)
 	GetChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey) (*transport.ChannelConfig, error)
 	RequestAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, action transport.Action) (*transport.Decision, error)
-	ProposeAction(ctx context.Context, lockId int64, channelAddr *address.Address, theirChannelKey []byte, state *cell.Cell, action transport.Action) (*transport.ProposalDecision, error)
+	ProposeAction(ctx context.Context, lockId int64, channelAddr *address.Address, theirChannelKey []byte, state, updateProof *cell.Cell, action transport.Action) (*transport.ProposalDecision, error)
 	RequestChannelLock(ctx context.Context, theirChannelKey ed25519.PublicKey, channel *address.Address, id int64, lock bool) (*transport.Decision, error)
 	IsChannelUnlocked(ctx context.Context, theirChannelKey ed25519.PublicKey, channel *address.Address, id int64) (*transport.Decision, error)
 }
@@ -125,7 +125,7 @@ func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wa
 			MisbehaviorFine:          tlb.MustFromTON(cfg.MisbehaviorFine),
 			ConditionalCloseDuration: cfg.ConditionalCloseDurationSec,
 		},
-		virtualChannelsLimitPerChannel: 3000,
+		virtualChannelsLimitPerChannel: 30000,
 		workerSignal:                   make(chan bool, 1),
 		channelLocks:                   map[string]*channelLock{},
 	}
@@ -283,12 +283,13 @@ func (s *Service) Start() {
 			case payments.ChannelStatusSettlingConditionals:
 				channel.Status = db.ChannelStateClosing
 
-				log.Info().Str("address", channel.Address).
-					Hex("with", channel.TheirOnchain.Key).
-					Msg("onchain channel uncooperative closing event, settling conditions")
-
 				settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+3), 0)
 				finishAt := settleAt.Add(time.Duration(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration) * time.Second)
+
+				log.Info().Str("address", channel.Address).
+					Hex("with", channel.TheirOnchain.Key).
+					Time("execute_at", settleAt).
+					Msg("onchain channel uncooperative closing event, settling conditions")
 
 				err = s.db.CreateTask(context.Background(), PaymentsTaskPool, "settle", channel.Address+"-settle",
 					"settle-"+hex.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
@@ -396,7 +397,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 			Bool("accepting_actions", ch.AcceptingActions).
 			Bool("we_master", ch.WeLeft).
 			Msg("active onchain channel")
-		for _, kv := range ch.Our.State.Data.Conditionals.All() {
+		for _, kv := range ch.Our.Conditionals.All() {
 			vch, _ := payments.ParseVirtualChannelCond(kv.Value.BeginParse())
 			log.Info().
 				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
@@ -405,7 +406,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 				Hex("key", vch.Key).
 				Msg("virtual from us")
 		}
-		for _, kv := range ch.Their.State.Data.Conditionals.All() {
+		for _, kv := range ch.Their.Conditionals.All() {
 			vch, _ := payments.ParseVirtualChannelCond(kv.Value.BeginParse())
 
 			log.Info().
@@ -473,12 +474,12 @@ func (s *Service) proposeAction(ctx context.Context, lockId int64, channelAddres
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	onSuccess, stateUpdProof, err := s.updateOurStateWithAction(channel, action, details)
+	onSuccess, state, updProof, err := s.updateOurStateWithAction(channel, action, details)
 	if err != nil {
 		return fmt.Errorf("failed to prepare actions for the next node - %w: %v", ErrNotPossible, err)
 	}
 
-	res, err := s.transport.ProposeAction(ctx, lockId, address.MustParseAddr(channel.Address), channel.TheirOnchain.Key, stateUpdProof, action)
+	res, err := s.transport.ProposeAction(ctx, lockId, address.MustParseAddr(channel.Address), channel.TheirOnchain.Key, state, updProof, action)
 	if err != nil {
 		return fmt.Errorf("failed to propose actions: %w", err)
 	}
@@ -498,7 +499,7 @@ func (s *Service) proposeAction(ctx context.Context, lockId int64, channelAddres
 	}
 
 	// should be unchanged
-	theirState.State.Data.Conditionals = channel.Their.SignedSemiChannel.State.Data.Conditionals.AsCell().AsDict(32)
+	theirState.State.Data.ConditionalsHash = channel.Their.SignedSemiChannel.State.Data.ConditionalsHash
 
 	if err = theirState.Verify(channel.TheirOnchain.Key); err != nil {
 		return fmt.Errorf("failed to verify their state signature: %w", err)

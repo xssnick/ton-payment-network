@@ -13,6 +13,7 @@ import (
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
+	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
 	"reflect"
 	"time"
@@ -29,7 +30,7 @@ import (
 // 4. Node in chain repeats this steps in background, if it is not initial sender.
 
 func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lockId int64, channelAddr *address.Address,
-	signedState payments.SignedSemiChannel, action transport.Action) (*payments.SignedSemiChannel, error) {
+	signedState payments.SignedSemiChannel, action transport.Action, updateProof *cell.Cell) (*payments.SignedSemiChannel, error) {
 	lockId = -lockId // force negate, to not collide with our locks
 
 	channel, _, unlock, err := s.AcquireChannel(ctx, channelAddr.String(), lockId)
@@ -59,6 +60,22 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 	if signedState.State.Data.Sent.Nano().Cmp(channel.Their.State.Data.Sent.Nano()) == -1 {
 		return nil, fmt.Errorf("amount decrease is not allowed")
+	}
+
+	if updateProof == nil && !bytes.Equal(signedState.State.Data.ConditionalsHash, make([]byte, 32)) {
+		return nil, fmt.Errorf("update proof can be empty only when hash is zero")
+	}
+
+	condProposal := cell.NewDict(32)
+	if updateProof != nil {
+		proofBody, err := cell.UnwrapProof(updateProof, signedState.State.Data.ConditionalsHash)
+		if err != nil {
+			return nil, fmt.Errorf("incorrect update proof: %w", err)
+		}
+		condProposal, err = proofBody.BeginParse().ToDict(32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load update proof dict: %w", err)
+		}
 	}
 
 	var toExecute func(ctx context.Context) error
@@ -103,7 +120,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil
 		}
 	case transport.RemoveVirtualAction:
-		_, _, err = signedState.State.FindVirtualChannel(data.Key)
+		_, _, err = payments.FindVirtualChannel(condProposal, data.Key)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
 			return nil, fmt.Errorf("failed to find virtual channel in their new state: %w", err)
 		}
@@ -111,7 +128,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("condition should be removed to unlock")
 		}
 
-		index, vch, err := channel.Their.State.FindVirtualChannel(data.Key)
+		index, vch, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.Key)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
 				// idempotency
@@ -129,7 +146,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("virtual channel is not expired")
 		}
 
-		if err = channel.Their.State.Data.Conditionals.DeleteIntKey(index); err != nil {
+		if err = channel.Their.Conditionals.DeleteIntKey(index); err != nil {
 			return nil, fmt.Errorf("failed to remove condition with index %s: %w", index.String(), err)
 		}
 
@@ -150,7 +167,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil
 		}
 	case transport.ConfirmCloseAction:
-		_, _, err = signedState.State.FindVirtualChannel(data.Key)
+		_, _, err = payments.FindVirtualChannel(condProposal, data.Key)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
 			return nil, fmt.Errorf("failed to find virtual channel in their new state: %w", err)
 		}
@@ -158,7 +175,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("condition should be removed to close")
 		}
 
-		index, vch, err := channel.Their.State.FindVirtualChannel(data.Key)
+		index, vch, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.Key)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
 				// idempotency
@@ -204,7 +221,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("resolve is unknown on node side")
 		}
 
-		if err = channel.Their.State.Data.Conditionals.DeleteIntKey(index); err != nil {
+		if err = channel.Their.Conditionals.DeleteIntKey(index); err != nil {
 			return nil, fmt.Errorf("failed to remove condition with index %s: %w", index.String(), err)
 		}
 
@@ -229,7 +246,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil
 		}
 	case transport.OpenVirtualAction:
-		index, vch, err := signedState.State.FindVirtualChannel(data.ChannelKey)
+		index, vch, err := payments.FindVirtualChannel(condProposal, data.ChannelKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find virtual channel in their new state: %w", err)
 		}
@@ -246,7 +263,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("too short virtual channel deadline")
 		}
 
-		_, oldVC, err := channel.Their.State.FindVirtualChannel(data.ChannelKey)
+		_, oldVC, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.ChannelKey)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
 			return nil, fmt.Errorf("failed to find virtual channel in their prev state: %w", err)
 		}
@@ -267,7 +284,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 		// we put our serialized condition to make sure that party is not cheated,
 		// if something diff will be in state, final signature will not match
-		if err = channel.Their.State.Data.Conditionals.SetIntKey(index, vch.Serialize()); err != nil {
+		if err = channel.Their.Conditionals.SetIntKey(index, vch.Serialize()); err != nil {
 			return nil, fmt.Errorf("failed to settle condition with index %s: %w", index.String(), err)
 		}
 
@@ -458,8 +475,18 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		channel.Their.State.CounterpartyData = &cp
 	}
 
+	condHash := make([]byte, 32)
+	if !channel.Their.Conditionals.IsEmpty() {
+		condHash = channel.Their.Conditionals.AsCell().Hash()
+	}
+
+	if !bytes.Equal(condHash, signedState.State.Data.ConditionalsHash) {
+		return nil, fmt.Errorf("incorrect resulting hash")
+	}
+
 	channel.Their.State.Data.Seqno = signedState.State.Data.Seqno
 	channel.Their.State.Data.Sent = signedState.State.Data.Sent
+	channel.Their.State.Data.ConditionalsHash = signedState.State.Data.ConditionalsHash
 	channel.Their.Signature = signedState.Signature
 
 	if err = channel.Their.Verify(channel.TheirOnchain.Key); err != nil {
@@ -519,7 +546,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return fmt.Errorf("channel is currently not accepting new actions")
 		}
 
-		_, vch, err := channel.Our.State.FindVirtualChannel(data.Key)
+		_, vch, err := payments.FindVirtualChannel(channel.Our.Conditionals, data.Key)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
 				return fmt.Errorf("virtual channel is not found")
@@ -547,7 +574,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return fmt.Errorf("failed to load virtual channel state cell: %w", err)
 		}
 
-		_, vch, err := channel.Our.State.FindVirtualChannel(data.Key)
+		_, vch, err := payments.FindVirtualChannel(channel.Our.Conditionals, data.Key)
 		if err != nil {
 			return fmt.Errorf("failed to find virtual channel: %w", err)
 		}

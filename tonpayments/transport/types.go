@@ -37,7 +37,7 @@ func init() {
 
 	tl.Register(GetChannelConfig{}, "payments.getChannelConfig = payments.Request")
 	tl.Register(RequestAction{}, "payments.requestAction channelAddr:int256 action:payments.Action = payments.Request")
-	tl.Register(ProposeAction{}, "payments.proposeAction lockId:long channelAddr:int256 action:payments.Action state:bytes = payments.Request")
+	tl.Register(ProposeAction{}, "payments.proposeAction lockId:long channelAddr:int256 action:payments.Action state:bytes conditionals:bytes = payments.Request")
 	tl.Register(Authenticate{}, "payments.authenticate key:int256 timestamp:long signature:bytes = payments.Authenticate")
 
 	tl.Register(InstructionContainer{}, "payments.instructionContainer hash:int256 data:bytes = payments.InstructionContainer")
@@ -100,6 +100,7 @@ type ProposeAction struct {
 	ChannelAddr []byte     `tl:"int256"`
 	Action      any        `tl:"struct boxed [payments.openVirtualAction,payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.incrementStatesAction]"`
 	SignedState *cell.Cell `tl:"cell"`
+	UpdateProof *cell.Cell `tl:"cell optional"`
 }
 
 // RequestAction - request party to propose some action

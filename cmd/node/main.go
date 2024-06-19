@@ -178,7 +178,7 @@ func main() {
 		MessageTTL: 3*60 + 30,
 		MessageBuilder: func(ctx context.Context, subWalletId uint32) (id uint32, createdAt int64, err error) {
 			createdAt = time.Now().Unix() - 30 // something older than last master block, to pass through LS external's time validation
-			id = uint32(createdAt)             // TODO: store seqno in db
+			id = uint32(createdAt) % (1 << 23) // TODO: store seqno in db
 			return
 		},
 	})

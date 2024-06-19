@@ -35,7 +35,7 @@ var ErrNotConnected = fmt.Errorf("not connected with peer")
 
 type Service interface {
 	GetChannelConfig() ChannelConfig
-	ProcessAction(ctx context.Context, key ed25519.PublicKey, lockId int64, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action) (*payments.SignedSemiChannel, error)
+	ProcessAction(ctx context.Context, key ed25519.PublicKey, lockId int64, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action, updateProof *cell.Cell) (*payments.SignedSemiChannel, error)
 	ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action Action) error
 	ProcessExternalChannelLock(ctx context.Context, key ed25519.PublicKey, addr *address.Address, id int64, lock bool) error
 	ProcessIsChannelLocked(ctx context.Context, key ed25519.PublicKey, addr *address.Address, id int64) error
@@ -292,7 +292,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			ok := true
 			reason := ""
 			updateProof, err := s.svc.ProcessAction(ctx, peer.authKey, q.LockID,
-				address.NewAddress(0, 0, q.ChannelAddr), state, q.Action)
+				address.NewAddress(0, 0, q.ChannelAddr), state, q.Action, q.UpdateProof)
 			if err != nil {
 				reason = err.Error()
 				ok = false
@@ -543,13 +543,14 @@ func (s *Server) IsChannelUnlocked(ctx context.Context, theirChannelKey ed25519.
 	return &res, nil
 }
 
-func (s *Server) ProposeAction(ctx context.Context, lockId int64, channelAddr *address.Address, theirChannelKey []byte, state *cell.Cell, action Action) (*ProposalDecision, error) {
+func (s *Server) ProposeAction(ctx context.Context, lockId int64, channelAddr *address.Address, theirChannelKey []byte, state, updateProof *cell.Cell, action Action) (*ProposalDecision, error) {
 	var res ProposalDecision
 	err := s.doRLDPQuery(ctx, theirChannelKey, ProposeAction{
 		LockID:      lockId,
 		ChannelAddr: channelAddr.Data(),
 		Action:      action,
 		SignedState: state,
+		UpdateProof: updateProof,
 	}, &res, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)

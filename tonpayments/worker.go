@@ -108,7 +108,7 @@ func (s *Service) taskExecutor() {
 							return fmt.Errorf("failed to load 'from' channel: %w", err)
 						}
 
-						_, vch, err := channel.Their.State.FindVirtualChannel(data.VirtualKey)
+						_, vch, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.VirtualKey)
 						if err != nil {
 							return fmt.Errorf("failed to find virtual channel with 'from': %w", err)
 						}
@@ -212,7 +212,7 @@ func (s *Service) taskExecutor() {
 							return fmt.Errorf("failed to get prev channel: %w", err)
 						}
 
-						_, prevVch, err := prev.Their.State.FindVirtualChannel(meta.Key)
+						_, prevVch, err := payments.FindVirtualChannel(prev.Their.Conditionals, meta.Key)
 						if err != nil {
 							return fmt.Errorf("failed to find prev virtual channel: %w", err)
 						}
@@ -318,6 +318,60 @@ func (s *Service) taskExecutor() {
 					if err != nil && !errors.Is(err, ErrDenied) {
 						return fmt.Errorf("request to remove virtual action failed: %w", err)
 					}
+				case "ask-close-virtual":
+					var data db.AskCloseVirtualTask
+					if err = json.Unmarshal(task.Data, &data); err != nil {
+						return fmt.Errorf("invalid json: %w", err)
+					}
+
+					channel, err := s.db.GetChannel(ctx, data.ChannelAddress)
+					if err != nil {
+						return fmt.Errorf("failed to load channel: %w", err)
+					}
+
+					if channel.Status != db.ChannelStateActive {
+						log.Warn().Str("channel", channel.Address).Hex("key", data.Key).Msg("onchain channel is not active, cannot close virtual")
+
+						// not needed anymore
+						return nil
+					}
+
+					_, vch, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.Key)
+					if err != nil {
+						if errors.Is(err, payments.ErrNotFound) {
+							log.Warn().Str("channel", channel.Address).Hex("key", data.Key).Msg("nothing virtual to close, not exists anymore")
+
+							// nothing to close anymore
+							return nil
+						}
+						return fmt.Errorf("failed to find virtual channel: %w", err)
+					}
+
+					meta, err := s.db.GetVirtualChannelMeta(ctx, vch.Key)
+					if err != nil {
+						if errors.Is(err, db.ErrNotFound) {
+							return fmt.Errorf("virtual channel is not exists")
+						}
+						return fmt.Errorf("failed to load virtual channel meta: %w", err)
+					}
+
+					state := meta.GetKnownResolve(vch.Key)
+					if state == nil {
+						return ErrNoResolveExists
+					}
+
+					stateCell, err := state.ToCell()
+					if err != nil {
+						return fmt.Errorf("failed to serialize state to cell: %w", err)
+					}
+
+					err = s.requestAction(ctx, channel.Address, transport.CloseVirtualAction{
+						Key:   vch.Key,
+						State: stateCell,
+					})
+					if err != nil {
+						return fmt.Errorf("request to close virtual channel failed: %w", err)
+					}
 				case "remove-virtual":
 					var data db.RemoveVirtualTask
 					if err = json.Unmarshal(task.Data, &data); err != nil {
@@ -384,7 +438,7 @@ func (s *Service) taskExecutor() {
 							return fmt.Errorf("failed to load 'from' channel: %w", err)
 						}
 
-						_, vch, err := channel.Their.State.FindVirtualChannel(data.Key)
+						_, vch, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.Key)
 						if err != nil {
 							return fmt.Errorf("failed to find virtual channel with 'from': %w", err)
 						}
@@ -462,7 +516,7 @@ func (s *Service) taskExecutor() {
 					}
 
 					if data.CheckVirtualStillExists != nil {
-						_, _, err = channel.Their.State.FindVirtualChannel(data.CheckVirtualStillExists)
+						_, _, err = payments.FindVirtualChannel(channel.Their.Conditionals, data.CheckVirtualStillExists)
 						if err != nil {
 							if errors.Is(err, payments.ErrNotFound) {
 								return nil
@@ -497,11 +551,30 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					ctxTx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+					if err = s.settleChannelConditionals(context.Background(), data.Address); err != nil {
+						log.Error().Err(err).Str("channel", data.Address).Msg("failed to settle conditionals")
+						return err
+					}
+				case "settle-step":
+					var data db.SettleStepTask
+					if err = json.Unmarshal(task.Data, &data); err != nil {
+						return fmt.Errorf("invalid json: %w", err)
+					}
+
+					var messages []*cell.Cell
+					for i, message := range data.Messages {
+						m, err := cell.FromBOC(message)
+						if err != nil {
+							return fmt.Errorf("invalid message %d boc: %w", i, err)
+						}
+						messages = append(messages, m)
+					}
+
+					ctxTx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 					defer cancel()
 
-					if err = s.settleChannelConditionals(ctxTx, data.Address); err != nil {
-						log.Error().Err(err).Str("channel", data.Address).Msg("failed to settle conditionals")
+					if err = s.executeSettleStep(ctxTx, data.Address, messages, data.Step); err != nil {
+						log.Error().Err(err).Str("channel", data.Address).Int("step", data.Step).Msg("failed to settle conditionals step")
 						return err
 					}
 				case "finalize":
