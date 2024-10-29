@@ -344,6 +344,11 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 					continue
 				}
 
+				// token should be the same
+				if targetChannel.JettonAddress != channel.JettonAddress {
+					continue
+				}
+
 				balance, err := targetChannel.CalcBalance(false)
 				if err != nil {
 					return nil, fmt.Errorf("failed to calc our channel %s balance: %w", targetChannel.Address, err)

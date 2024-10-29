@@ -218,6 +218,10 @@ func (s *Service) Start() {
 					AcceptingActions:       upd.Channel.Status == payments.ChannelStatusOpen,
 					SafeOnchainClosePeriod: 300 + int64(upd.Channel.Storage.ClosingConfig.QuarantineDuration) + int64(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration),
 				}
+
+				if upd.Channel.Storage.JettonConfig != nil && upd.Channel.Storage.JettonConfig.Root != nil {
+					channel.JettonAddress = upd.Channel.Storage.JettonConfig.Root.String()
+				}
 			}
 
 			updatedAt := time.Unix(int64(upd.Transaction.Now), 0)

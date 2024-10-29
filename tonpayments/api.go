@@ -37,17 +37,17 @@ func (s *Service) ListChannels(ctx context.Context, key ed25519.PublicKey, statu
 	return channels, nil
 }
 
-func (s *Service) DeployChannelWithNode(ctx context.Context, capacity tlb.Coins, nodeKey ed25519.PublicKey) (*address.Address, error) {
+func (s *Service) DeployChannelWithNode(ctx context.Context, capacity tlb.Coins, nodeKey ed25519.PublicKey, jettonMaster *address.Address) (*address.Address, error) {
 	cfg, err := s.transport.GetChannelConfig(ctx, nodeKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get channel config: %w", err)
 	}
 
 	log.Info().Msg("starting channel deploy")
-	return s.deployChannelWithNode(ctx, nodeKey, address.NewAddress(0, 0, cfg.WalletAddr), capacity)
+	return s.deployChannelWithNode(ctx, nodeKey, address.NewAddress(0, 0, cfg.WalletAddr), capacity, jettonMaster)
 }
 
-func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, nodeAddr *address.Address, capacity tlb.Coins) (*address.Address, error) {
+func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, nodeAddr *address.Address, capacity tlb.Coins, jettonMaster *address.Address) (*address.Address, error) {
 	channelId := make([]byte, 16)
 	copy(channelId, nodeKey[:15])
 
@@ -85,11 +85,18 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		return nil, fmt.Errorf("too many channels are already open")
 	}
 
+	var jetton *payments.JettonConfig
+	if jettonMaster != nil {
+		jetton = &payments.JettonConfig{
+			Root: jettonMaster,
+		}
+	}
+
 	body, code, data, err := s.contractMaker.GetDeployAsyncChannelParams(channelId, true, capacity, s.key, nodeKey, s.closingConfig, payments.PaymentConfig{
 		ExcessFee: s.excessFee,
 		DestA:     s.wallet.WalletAddress(),
 		DestB:     nodeAddr,
-	})
+	}, jetton)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get deploy params: %w", err)
 	}

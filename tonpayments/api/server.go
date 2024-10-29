@@ -34,7 +34,7 @@ type Service interface {
 	CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey) error
 	AddVirtualChannelResolve(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error
 	OpenVirtualChannel(ctx context.Context, with, instructionKey ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error
-	DeployChannelWithNode(ctx context.Context, capacity tlb.Coins, nodeKey ed25519.PublicKey) (*address.Address, error)
+	DeployChannelWithNode(ctx context.Context, capacity tlb.Coins, nodeKey ed25519.PublicKey, jettonMaster *address.Address) (*address.Address, error)
 }
 
 type Success struct {

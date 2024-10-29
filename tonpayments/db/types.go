@@ -73,6 +73,7 @@ type VirtualChannelMeta struct {
 type Channel struct {
 	ID                     []byte
 	Address                string
+	JettonAddress          string
 	Status                 ChannelStatus
 	WeLeft                 bool
 	OurOnchain             OnchainState

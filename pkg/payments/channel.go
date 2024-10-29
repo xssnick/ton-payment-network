@@ -37,7 +37,7 @@ const (
 
 type AsyncChannel struct {
 	Status  ChannelStatus
-	Storage AsyncChannelStorageData
+	Storage AsyncJettonChannelStorageData
 	addr    *address.Address
 	client  *Client
 }
@@ -84,12 +84,13 @@ func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell,
 	}
 
 	if verify {
-		storageData := AsyncChannelStorageData{
+		storageData := AsyncJettonChannelStorageData{
 			KeyA:          ch.Storage.KeyA,
 			KeyB:          ch.Storage.KeyB,
 			ChannelID:     ch.Storage.ChannelID,
 			ClosingConfig: ch.Storage.ClosingConfig,
 			Payments:      ch.Storage.Payments,
+			JettonConfig:  ch.Storage.JettonConfig,
 		}
 
 		data, err = tlb.ToCell(storageData)
@@ -110,22 +111,23 @@ func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell,
 		}
 	}
 
-	ch.Status = ch.Storage.calcState()
+	ch.Status = ch.calcState()
 
 	return ch, nil
 }
 
-func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, initialBalance tlb.Coins, ourKey ed25519.PrivateKey, theirKey ed25519.PublicKey, closingConfig ClosingConfig, paymentConfig PaymentConfig) (body, code, data *cell.Cell, err error) {
+func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, initialBalance tlb.Coins, ourKey ed25519.PrivateKey, theirKey ed25519.PublicKey, closingConfig ClosingConfig, paymentConfig PaymentConfig, jettonConfig *JettonConfig) (body, code, data *cell.Cell, err error) {
 	if len(channelId) != 16 {
 		return nil, nil, nil, fmt.Errorf("channelId len should be 16 bytes")
 	}
 
-	storageData := AsyncChannelStorageData{
+	storageData := AsyncJettonChannelStorageData{
 		KeyA:          ourKey.Public().(ed25519.PublicKey),
 		KeyB:          theirKey,
 		ChannelID:     channelId,
 		ClosingConfig: closingConfig,
 		Payments:      paymentConfig,
+		JettonConfig:  jettonConfig,
 	}
 
 	if !isA {
@@ -165,19 +167,19 @@ func (c *AsyncChannel) Address() *address.Address {
 // calcState - it repeats get_channel_state method of contract,
 // we do this because we cannot prove method execution for now,
 // but can proof contract data and code, so this approach is safe
-func (s *AsyncChannelStorageData) calcState() ChannelStatus {
-	if !s.Initialized {
+func (c *AsyncChannel) calcState() ChannelStatus {
+	if !c.Storage.Initialized {
 		return ChannelStatusUninitialized
 	}
-	if s.Quarantine == nil {
+	if c.Storage.Quarantine == nil {
 		return ChannelStatusOpen
 	}
 	now := time.Now().Unix()
-	quarantineEnds := int64(s.Quarantine.QuarantineStarts) + int64(s.ClosingConfig.QuarantineDuration)
+	quarantineEnds := int64(c.Storage.Quarantine.QuarantineStarts) + int64(c.Storage.ClosingConfig.QuarantineDuration)
 	if quarantineEnds > now {
 		return ChannelStatusClosureStarted
 	}
-	if quarantineEnds+int64(s.ClosingConfig.ConditionalCloseDuration) > now {
+	if quarantineEnds+int64(c.Storage.ClosingConfig.ConditionalCloseDuration) > now {
 		return ChannelStatusSettlingConditionals
 	}
 	return ChannelStatusAwaitingFinalization

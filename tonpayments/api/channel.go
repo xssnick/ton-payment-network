@@ -28,6 +28,7 @@ type Side struct {
 type OnchainChannel struct {
 	ID               string `json:"id"`
 	Address          string `json:"address"`
+	JettonAddress    string `json:"jetton_address"`
 	AcceptingActions bool   `json:"accepting_actions"`
 	Status           string `json:"status"`
 	WeLeft           bool   `json:"we_left"`
@@ -41,8 +42,9 @@ type OnchainChannel struct {
 
 func (s *Server) handleChannelOpen(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		WithNode string `json:"with_node"`
-		Capacity string `json:"capacity"`
+		WithNode     string `json:"with_node"`
+		Capacity     string `json:"capacity"`
+		JettonMaster string `json:"jetton_master"`
 	}
 	type response struct {
 		Address string `json:"address"`
@@ -71,7 +73,16 @@ func (s *Server) handleChannelOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	addr, err := s.svc.DeployChannelWithNode(r.Context(), amt, key)
+	var jetton *address.Address
+	if req.JettonMaster != "" {
+		jetton, err = address.ParseAddr(req.JettonMaster)
+		if err != nil {
+			writeErr(w, 400, "incorrect jetton address format: "+err.Error())
+			return
+		}
+	}
+
+	addr, err := s.svc.DeployChannelWithNode(r.Context(), amt, key, jetton)
 	if err != nil {
 		writeErr(w, 500, "failed to deploy channel: "+err.Error())
 		return
@@ -227,6 +238,7 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 	return OnchainChannel{
 		ID:               hex.EncodeToString(c.ID),
 		Address:          c.Address,
+		JettonAddress:    c.JettonAddress,
 		AcceptingActions: c.AcceptingActions,
 		Status:           status,
 		WeLeft:           c.WeLeft,

@@ -16,6 +16,7 @@ import (
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/db/leveldb"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
+	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/liteclient"
@@ -363,6 +364,15 @@ func commandReader(svc *tonpayments.Service) error {
 			return fmt.Errorf("incorrect len of key: %d, should be 32", len(btsKey))
 		}
 
+		log.Info().Msg("input jetton master (or skip for ton):")
+		var jetton string
+		_, _ = fmt.Scanln(&jetton)
+
+		var jettonMaster *address.Address
+		if jetton != "" {
+			jettonMaster = address.MustParseAddr(jetton)
+		}
+
 		log.Info().Msg("input amount:")
 		var strAmt string
 		_, _ = fmt.Scanln(&strAmt)
@@ -373,7 +383,7 @@ func commandReader(svc *tonpayments.Service) error {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
-		addr, err := svc.DeployChannelWithNode(ctx, amt, btsKey)
+		addr, err := svc.DeployChannelWithNode(ctx, amt, btsKey, jettonMaster)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to deploy channel with node: %w", err)
