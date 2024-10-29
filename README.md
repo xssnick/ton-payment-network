@@ -2,50 +2,50 @@
 
 This is an implementation of a peer-to-peer payment network with multi-node routing based on the power of the TON Blockchain. More powerful than lightning!
 
-## Техническое описание
+## Technical Description
 
-Сеть состоит из одноранговых самостоятельных платежных узлов, которые устанавливают связи между собой с помощью деплоя смарт контракта в блокчейн и по сети, используя RLDP.
+The network consists of peer-to-peer stand-alone payment nodes that establish connections between each other via smart contract deployment to the blockchain and over the network using RLDP.
 
-Платежная нода может быть как самостоятельным сервисом, если основная цель - заработок на обслуживании цепочек виртуальных каналов, так и частью других приложений (в виде библиотеки), если цель - предоставление или оплата услуг, например TON Storage и TON Proxy.
+A payment node can be either a standalone service if the main goal is to make money from serving virtual channel chains, or part of other applications (as a library) if the goal is to provide or pay for services, such as TON Storage and TON Proxy.
 
-Пример взаимодействия: 
+Example interactions: 
 ![Untitled Diagram drawio(3)](https://github.com/xssnick/ton-payment-network/assets/9332353/c127d64f-2f04-4e70-87e6-252d08d1ce47)
 
 
-### Onchain каналы
+### Onchain channels
 
-Каждая нода обязательно отслеживает новые блоки в сети и вылавливает обновления, связанные с ее контрактами. Например, появление новых контрактов с ее ключом, когда кто-то хочет установить канал, и события, связанные с несогласованным закрытием.
+Each node is sure to monitor new blocks in the network and catch updates related to its contracts. For example, the appearance of new contracts with her key, when someone wants to establish a channel, and events related to uncoordinated closures.
 
-Если нода хочет установить связь с другой нодой, она деплоит контракт платежного канала в блокчейн. Контракт содержит 2 публичных ключа: свой и соседский. Другая нода обнаруживает контракт в сети, проверяет параметры, и, если все в порядке, позволяет установить с собой сетевое соединение.
+If a node wants to establish a link with another node, it deploys a payment channel contract to the blockchain. The contract contains 2 public keys: its own and its neighbor's. The other node detects the contract in the network, checks the parameters, and if all is well, allows to establish a network connection with itself.
 
-Для аутентификации по сети используются ключи каналов, специальное аутентификационное сообщение формируется из adnl адресов сторон и временной метки и подписывается ключем канала, ответное сообщение должно содержать adnl адреса помененые местами, временную метку и подпись другой стороны.
+For authentication over the network, channel keys are used, a special authentication message is formed from the adnl addresses of the parties and a timestamp and signed with the channel key, the response message must contain the adnl addresses reversed, the timestamp and the signature of the other party.
 
-### Виртуальные каналы
+### Virtual channels
 
-Виртуальный канал может быть открыт из любой точки сети в любую другую, если существует цепочка связей между нодами, включая ончеин контракт и активное сетевое соединение. При этом для создания и закрытия виртуального канала не требуется никаких действий ончеин.
+A virtual channel can be opened from any point of the network to any other if there is a chain of links between nodes, including onchain contract and active network connection. No onchain action is required to create and close a virtual channel.
 
-Виртуальный канал имеет такие характеристики, как: 
-* Ключ
-* Время жизни 
-* Емкость
-* Комиссия
-  
-Например, `A`, `B` и `C` имеют открытые каналы в блокчейне (`A->B`, `B->C`), при этом не существует ончеин канала `A->C`, но `A` может создать виртуальный канал до `C`, попросив `B` проксировать через его канал за небольшое вознаграждение. Таким образом цепочка будет `A->B->C`.
+A virtual channel has characteristics such as: 
+* Key
+* Lifetime 
+* Capacity
+* Commission
 
-Глядя на пример выше, возникает вопрос - а что, если `B` возьмет монеты у `A` и не передаст их `C`? 
-Ответ: `B` не сможет это сделать благодаря эллиптической криптографии и гибкому блокчейну TON.
+For example, `A`, `B` and `C` have open channels on the blockchain (`A->B`, `B->C`), and there is no onchain channel `A->C`, but `A` can create a virtual channel to `C` by asking `B` to proxy through his channel for a small fee. Thus the chain would be `A->B->C`.
 
-Когда `A` просит `B` открыть виртуальный канал, он не передает деньги сразу, а лишь передает `B` подписанную гарантию того, что если `C` предоставит подтверждение получения перевода от `A`, то `B` переведет `C` запрошенную сумму. Затем `B` может запросить у `A` ту же сумму + комиссию, по тому же подтверждению, которое получил от `C`. И так далее по цепочке, если ее длина больше 3.
+Looking at the example above, the question arises - what if `B` takes coins from `A` and does not pass them to `C`? 
+The answer is that `B` will not be able to do this thanks to elliptic cryptography and the flexible TON blockchain.
 
-Каждое звено цепи открывает виртуальные каналы друг с другом, начиная от инициатора и заканчивая точкой назначения. Условия могут изменяться в зависимости от договоренностей между нодами, но ключ всегда остается единым, что позволяет закрыть канал всем участникам, передав подтверждение по цепочке. Условия каскадны от отправителя к получателю и включают друг друга. Например, если в цепочке из 4 звеньев 2 берут комиссию в размере 0.01 TON, то отправитель отправит 0.02 TON комиссии, половину из которой следующее звено передаст дальше. Время жизни канала всегда уменьшается от отправителя к получателю, чтобы предотвратить обман ноды, который заключается в том, чтобы закрыть канал в последний момент, чтобы нода не успела закрыть свою часть с следующим соседом.
+When `A` asks `B` to open a virtual channel, he does not transfer the money immediately, but only gives `B` a signed guarantee that if `C` provides confirmation of receipt of the transfer from `A`, `B` will transfer the requested amount to `C`. Then `B` can request the same amount + commission from `A`, on the same confirmation it received from `C`. And so on down the chain if its length is greater than 3.
 
-В случае, если одна из нод по пути не согласится открыть канал со следующей, канал будет откачен по цепочке назад, и емкость канала будет разблокирована для отправителя. В худшем случае может произойти так, что одна из нод будет действовать не по правилам и не согласится откатывать или не будет отвечать на открытие канала. В таком случае емкость будет разблокирована после указанного в канале времени жизни.
+Each link in the chain opens virtual channels with each other, starting from the initiator and ending at the destination point. The conditions may vary depending on the agreements between nodes, but the key always remains the same, which allows closing the channel to all participants by passing an acknowledgement down the chain. The conditions cascade from sender to receiver and include each other. For example, if in a chain of 4 links 2 take a 0.01 TON commission, the sender will send 0.02 TON commission, half of which the next link will pass on. The lifetime of a link is always decreased from sender to receiver to prevent node cheating, which is to close the link at the last moment so that the node does not have time to close its part with the next neighbor.
 
-#### Гарантии безопасности
+In case one of the nodes along the path does not agree to open the channel with the next node, the channel will be rolled back down the chain and the channel capacity will be unlocked for the sender. In the worst case, it may happen that one of the nodes will act out of order and will not agree to rollback or will not respond to the channel opening. In this case, the capacity will be unlocked after the lifetime specified in the channel.
 
-Весь процесс происходит без взаимодействия с блокчейном, следовательно, комиссия сети не платится. К взаимодействию с блокчейном приходится прибегнуть только в случае разногласий, например, если сосед по цепочке ведет себя не по правилам, отказывается передать монеты в обмен на доказательство. Тогда можно просто отправить это доказательство в контракт, закрыв его, и получить свои деньги - все застраховано.
+#### Security guarantees
 
-Виртуальные каналы реализованы с помощью условных платежей, условия которых описаны следующей логикой:
+The whole process takes place without interacting with the blockchain, hence no network commission is paid. You only have to interact with the blockchain in case of disagreements, for example, if a neighbor in the chain does not behave according to the rules and refuses to hand over coins in exchange for proof. Then you can simply send this proof to the contract, closing it, and get your money - everything is insured.
+
+Virtual channels are realized using conditional payments, the conditions of which are described by the following logic:
 ```c
 int cond(slice input, int fee, int capacity, int deadline, int key) {
     slice sign = input~load_bits(512);
@@ -59,51 +59,51 @@ int cond(slice input, int fee, int capacity, int deadline, int key) {
 }
 ```
 
-Логика условных платежей выполняется оффчеин в случае согласованности сторон, а в случае разногласий - ончеин.
+The logic of conditional payments is performed offchein if the parties agree, and onchain if they disagree.
 
-#### Анонимность виртуального канала
+#### Anonymity of the virtual channel
 
-Все звенья цепи известны только создателю виртуального канала, так как он формирует цепочку. Остальные звенья цепи знают только тех, кто открыл канал с ними, и тех, с кем нужно открыть виртуальный канал им. При этом не получится напрямую идентифицировать, является ли отправитель или получатель конечным звеном или промежуточным.
+All links of the chain are known only to the creator of the virtual channel, as he forms the chain. The other links in the chain know only those who have opened a channel with them and those with whom they need to open a virtual channel. It is not possible to directly identify whether the sender or receiver is the end link or an intermediate link.
 
-Это достигается за счет того, что отправитель формирует цепочку в 'Garlic' виде, где задания упакованы и зашифрованы shared ключом и могут быть расшифрованы только тем, кому это задание предназначено. В добавок к реальным заданиям передаются несуществующие для массовки.
+This is achieved by the sender forming the chain in 'Garlic' form, where the jobs are packaged and encrypted with a shared key and can only be decrypted by the person to whom the job is intended. In addition to real jobs, non-existent jobs are passed in for bulk.
 
-Задание состоит из описания того, что должна получить нода от предыдущего соседа, и что передать следующему. Соседи не смогут обмануть друг друга, так как ожидаемые значения описаны в задании, и канал просто отклонится при нарушении.
+A task consists of a description of what the node should receive from the previous neighbor and what to pass to the next neighbor. Neighbors cannot cheat each other, since the expected values are described in the assignment, and the channel will simply diverge if violated.
 
-### Взаимодействия по сети в цепочке
+#### Networking interactions in a chain
 
-Сетевое взаимодействие строится на двух базовых действиях - `ProposeAction` и `RequestAction`.
+Networking is built on two basic actions, `ProposeAction` and `RequestAction`.
 
-* `Propose` - предполагает передачу подписанного модифицированного стейта канала с описанием желаемого изменения, например, открыть виртуальный канал. Сосед может либо принять, либо отказаться. В случае отказа он обязан подтвердить свой отказ подписью. Каждое действие `Propose` транзакционно и должно выполниться полностью или откатиться на обоих сторонах. В случае сетевых ошибок действие повторяется, пока не будет либо принято, либо отказано с подписью. Все действия выполняются строго последовательнов рамках канала. 
+* `Propose` - involves transmitting a signed modified channel state describing the desired change, e.g., open a virtual channel. The neighbor can either accept or refuse. In case of refusal, it must acknowledge its refusal with a signature. Each `Propose` action is transactional and must be executed in full or rolled back on both sides. In case of network errors, the action is repeated until it is either accepted or rejected with a signature. All actions are executed strictly sequentially within the channel. 
 
-* `Request` - запрашивает соседнюю ноду сделать `Propose`, например, закрыть виртуальный канал.
+* `Request` - requests a neighboring node to do `Propose`, e.g. close a virtual channel.
 
-### Скорость, надежность и кроссплатформенность
+### Speed, reliability and cross-platform.
 
-Открытие виртуального канала, при всей сложности - очень быстрое. Обработка на действия на стороне ноды занимает примерно 3 миллисекунды на обычном рабочем компьютере. А это значит что сервер вполне может открывать и закрывать > 300 виртуальных каналов в секунду, без особого труда. Этот показатель может быть сильно увеличен в дальнейшем, при улучшенном разделении блокировок.
+Opening a virtual channel, while complicated, is very fast. It takes about 3 milliseconds to process an action on the node side on a normal working computer. This means that the server can open and close > 300 virtual channels per second without much effort. This figure can be greatly increased in the future, with improved lock separation.
 
-Все важные действия выполняются с помощью специальной очереди, запись в которую происходит транзакционно с другими действиями, и подтверждением коммита на диск (ACID). Текущая реализация базы данных построена поверх встроенной LevelDB. 
+All important actions are performed using a special queue, which is written to transactionally with other actions, and acknowledge commits to disk (ACID). The current database implementation is built on top of the built-in LevelDB. 
 
-Реализация выполнена на чистом Golang, и код может быть скомпилирован под все платформы, включая мобильные.
+The implementation is in pure Golang, and the code can be compiled for all platforms, including mobile.
 
-### Управление нодой
+#### Node management
 
-При запуске указывается флаг `-name {seed}`, где `{seed}` это любое слово из которого сгенерируется приватный ключ и кошелек, адрес кошелька выведется в консоль, и его нужно пополнить тестовыми монетами перед дальнейшими действиями.
+At startup the `-name {seed}` flag is specified, where `{seed}` is any word from which a private key and wallet will be generated, the wallet address will be displayed in the console, and it needs to be replenished with test coins before further actions.
 
-На данный момент нода в виде самостоятельного сервиса поддерживает несколько консольных команд:
+At the moment node as a standalone service supports several console commands:
 
-* `list` - Отобразить список активных ончеин и виртуальных каналов.
-* `deploy` - Задеплоить канал с нодой имеющей введенный далее ключ (след командой) и балансом.
-* `open` - Открыть виртуальный канал с введенным далее ключем, используя введенный далее ончеин канал как тунель. Генерирует и возвращает приватный ключ для вирт канала.
-* `send` - Отправить монеты используя самозакрывающийся, после инициализации цепочки, виртуальный канал. Параметры аналогичны `open`.
-* `sign` - Принимает на вход приватный ключ виртуального канала и сумму, возвращает стейт в hex формате, который другая сторона может использовать для закрытия виртуального канала.
-* `close` - Закрыть виртуальный канал, на вход просит стейт от sign. Закрывать должен получатель.
-* `destroy` - Закрыть ончеин канал с указаным далее адресом, сначала пытаемся кооперативно, если не получается, самостоятельно.
+* `list` - Display a list of active onchains and virtual channels.
+* `deploy` - Deploy a channel with a node that has a key (trace command) and balance.
+* `open` - Open a virtual channel with the further entered key, using the further entered onchain channel as a tunnel. Generates and returns a private key for the virtual channel.
+* `send` - Send coins using self-closing virtual channel after chain initialization. Parameters are similar to `open`.
+* `sign` - Accepts the virtual channel private key and amount as input, returns a steit in hex format that the other side can use to close the virtual channel.
+* `close` - Closes the virtual channel, asks for a sign steit as input. Closing should be done by the recipient.
+* `destroy` - Close the onchain channel with the address specified below, at first we try cooperatively, if it fails, on our own.
 
-Также имеется развернутая нода с которой можно взаимодействовать, ее ключ публичный ключ - `fdf66ea12228f2dab720d3f4deffc82d8a10eef7400ff604aa5d4e7e80758370`
+There is also a deployed node to cooperate with, its public key is `fdf66ea12228f2dab720d3f4deffc82d8a10eef7400ff604aa5d4e7e80758370`.
 
 ### HTTP API
 
-Нодой можно управлять программно, через API, ниже приведено описание поддерживаемых методов
+Node can be controlled programmatically through the API, below is a description of the supported methods
 
 #### GET /api/v1/channel/onchain
 
@@ -426,8 +426,8 @@ Response example:
 
 ### Roadmap
 
-* Открытие виртуального канала с кем-то без кошелька в сети (для перевода ему коинов до деплоя контракта)
-* Виртуальные каналы в виде MerkleProof для поддержки практически безлимитного количества активных виртуальных каналов на ончеин канал.
-* Обновление состояний через MerkleUpdate.
-* Поддержка Postgres в качестве альтернативного хранилища данных.
-* API и Webhook события
+* Opening a virtual channel with someone without a wallet on the network (to transfer coins to them before the contract is deposited).
+* Virtual channels in the form of MerkleProof to support virtually unlimited number of active virtual channels per onchain channel.
+* Status updates via MerkleUpdate.
+* Support for Postgres as an alternative data store.
+   Webhook events
