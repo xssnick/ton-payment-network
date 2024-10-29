@@ -14,7 +14,7 @@ Example interactions:
 
 ### Onchain channels
 
-Each node is sure to monitor new blocks in the network and catch updates related to its contracts. For example, the appearance of new contracts with her key, when someone wants to establish a channel, and events related to uncoordinated closures.
+Nodes are scanning new blocks in the network and catch updates related to their contracts. For example, the deployment of new contracts with its key, when someone wants to establish a channel, and events related to uncoordinated closures.
 
 If a node wants to establish a link with another node, it deploys a payment channel contract to the blockchain. The contract contains 2 public keys: its own and its neighbor's. The other node detects the contract in the network, checks the parameters, and if all is well, allows to establish a network connection with itself.
 
@@ -41,7 +41,7 @@ Each link in the chain opens virtual channels with each other, starting from the
 
 In case one of the nodes along the path does not agree to open the channel with the next node, the channel will be rolled back down the chain and the channel capacity will be unlocked for the sender. In the worst case, it may happen that one of the nodes will act out of order and will not agree to rollback or will not respond to the channel opening. In this case, the capacity will be unlocked after the lifetime specified in the channel.
 
-#### Security guarantees
+#### Safety guarantees
 
 The whole process takes place without interacting with the blockchain, hence no network commission is paid. You only have to interact with the blockchain in case of disagreements, for example, if a neighbor in the chain does not behave according to the rules and refuses to hand over coins in exchange for proof. Then you can simply send this proof to the contract, closing it, and get your money - everything is insured.
 
@@ -59,7 +59,7 @@ int cond(slice input, int fee, int capacity, int deadline, int key) {
 }
 ```
 
-The logic of conditional payments is performed offchein if the parties agree, and onchain if they disagree.
+The logic of conditional payments is performed offchain if the parties agree, and onchain if they disagree.
 
 #### Anonymity of the virtual channel
 
