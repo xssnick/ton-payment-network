@@ -1,3 +1,5 @@
 .DS_Store
 .idea
-/db
+payment-node-db*
+payment-network-config*.json
+payment-node

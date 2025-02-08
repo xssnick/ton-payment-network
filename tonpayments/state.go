@@ -192,14 +192,9 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		return onSuccess, res, nil, nil
 	}
 
-	proofRoot := cell.CreateProofSkeleton()
-	if !channel.Our.Conditionals.IsEmpty() {
-		proofRoot.AttachAt(0, dictRoot)
-	}
-
-	updateProof, err := cond.CreateProof(proofRoot)
+	updateProof, err := cond.CreateProof(dictRoot)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create proof from conditionals: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to create proof from conditionals: %w, DUMP: %s", err, cond.Dump())
 	}
 
 	return onSuccess, res, updateProof, nil
