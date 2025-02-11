@@ -251,7 +251,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			peer.authKey = append([]byte{}, q.Key...)
 			s.peersByKey[string(peer.authKey)] = peer
 			s.mx.Unlock()
-			log.Info().Hex("key", peer.authKey).Msg("connected with peer")
+			log.Info().Hex("key", peer.authKey).Msg("connected with payment node peer")
 
 			// reverse A and B, and sign, so party can verify us too
 			authData, err = tl.Hash(AuthenticateToSign{
@@ -473,7 +473,7 @@ func (s *Server) auth(ctx context.Context, peer *PeerConnection) error {
 	peer.authKey = append([]byte{}, res.Key...)
 	s.peersByKey[string(peer.authKey)] = peer
 	s.mx.Unlock()
-	log.Info().Hex("key", peer.authKey).Msg("connected with peer")
+	log.Info().Hex("key", peer.authKey).Msg("connected with payment node peer")
 
 	return nil
 }

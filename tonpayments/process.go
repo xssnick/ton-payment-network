@@ -13,6 +13,7 @@ import (
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
+	"github.com/xssnick/tonutils-go/ton"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
 	"reflect"
@@ -656,47 +657,51 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 	return nil
 }
 
-func (s *Service) discoverChannel(channelAddr *address.Address) {
+func (s *Service) discoverChannel(channelAddr *address.Address) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 
 	block, err := s.ton.CurrentMasterchainInfo(ctx)
 	if err != nil {
 		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get current block")
-		return
+		return false
 	}
 
 	acc, err := s.ton.GetAccount(ctx, block, channelAddr)
 	if err != nil {
 		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get account")
-		return
+		return false
 	}
 
 	txList, err := s.ton.ListTransactions(ctx, channelAddr, 1, acc.LastTxLT, acc.LastTxHash)
 	if err != nil {
-		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get tx list")
-		return
+		if !errors.Is(err, ton.ErrNoTransactionsWereFound) {
+			log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get tx list")
+		}
+		return false
 	}
 
 	if len(txList) == 0 {
 		log.Warn().Str("address", channelAddr.String()).Msg("no transactions at requested unknown account")
-		return
+		return false
 	}
 
 	if txList[0].LT != acc.LastTxLT {
 		log.Warn().Str("address", channelAddr.String()).Msg("incorrect last tx lt at requested unknown account")
-		return
+		return false
 	}
 
 	ch, err := s.contractMaker.ParseAsyncChannel(channelAddr, acc.Code, acc.Data, true)
 	if err != nil {
 		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to parse channel")
-		return
+		return false
 	}
 
-	log.Info().Str("address", channelAddr.String()).Msg("proposed previously unknown channel, scheduling force check")
+	log.Info().Str("address", channelAddr.String()).Msg("discovered previously unknown channel, scheduling force check")
 	s.updates <- ChannelUpdatedEvent{
 		Transaction: txList[0],
 		Channel:     ch,
 	}
+
+	return true
 }
