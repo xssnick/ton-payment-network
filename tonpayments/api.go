@@ -101,6 +101,16 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		return nil, fmt.Errorf("failed to get deploy params: %w", err)
 	}
 
+	state := &tlb.StateInit{
+		Data: code,
+		Code: data,
+	}
+	accAddr := state.CalcAddress(0)
+
+	if s.discoverChannel(state.CalcAddress(0)) {
+		return accAddr, nil
+	}
+
 	amt := new(big.Int).Add(capacity.Nano(), tlb.MustFromTON("0.05").Nano())
 
 	addr, tx, _, err := s.wallet.DeployContractWaitTransaction(ctx, tlb.FromNanoTON(amt), body, code, data)

@@ -220,7 +220,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, threads int) {
 						}
 					}
 
-					if acc == nil || !acc.IsActive || acc.State.Status != tlb.AccountStatusActive {
+					if acc == nil || !acc.IsActive || acc.State.Status != tlb.AccountStatusActive || acc.Code == nil || acc.Data == nil {
 						// not active or failed
 						return
 					}
