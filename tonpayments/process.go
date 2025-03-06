@@ -390,7 +390,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				log.Info().Hex("key", data.ChannelKey).
 					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 					Str("fee", tlb.FromNanoTON(vch.Fee).String()).
-					Str("target", targetChannels[0].Address).
+					Str("target", target.Address).
 					Msg("channel tunnelling through us requested")
 
 				return nil

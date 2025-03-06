@@ -390,6 +390,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 		}
 
 		log.Info().Str("address", ch.Address).
+			Hex("with", ch.TheirOnchain.Key).
 			Str("out_deposit", tlb.FromNanoTON(ch.OurOnchain.Deposited).String()).
 			Str("sent_out", ch.Our.State.Data.Sent.String()).
 			Str("balance_out", outBalance).
