@@ -21,7 +21,7 @@ func init() {
 	tl.Register(Ping{}, "payments.ping value:long = payments.Ping")
 	tl.Register(Pong{}, "payments.pong value:long = payments.Pong")
 
-	tl.Register(Decision{}, "payments.decision agreed:Bool reason:string = payments.Decision")
+	tl.Register(Decision{}, "payments.decision agreed:Bool reason:string signature:bytes = payments.Decision")
 	tl.Register(ProposalDecision{}, "payments.proposalDecision agreed:Bool reason:string signedState:bytes = payments.ProposalDecision")
 	tl.Register(ChannelConfig{}, "payments.channelConfig excessFee:bytes virtualTunnelFee:bytes walletAddr:int256 quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.ChannelConfig")
 	tl.Register(AuthenticateToSign{}, "payments.authenticateToSign a:int256 b:int256 timestamp:long = payments.AuthenticateToSign")
@@ -33,6 +33,7 @@ func init() {
 	tl.Register(OpenVirtualAction{}, "payments.openVirtualAction channel_key:int256 instruction_key:int256 instructions:payments.instructionsToSign signature:bytes = payments.Action")
 	tl.Register(CloseVirtualAction{}, "payments.closeVirtualAction key:int256 state:bytes = payments.Action")
 	tl.Register(CooperativeCloseAction{}, "payments.cooperativeCloseAction signedCloseRequest:bytes = payments.Action")
+	tl.Register(CooperativeCommitAction{}, "payments.cooperativeCommitAction signedCommitRequest:bytes = payments.Action")
 	tl.Register(IncrementStatesAction{}, "payments.incrementStatesAction wantResponse:Bool = payments.Action")
 
 	tl.Register(GetChannelConfig{}, "payments.getChannelConfig = payments.Request")
@@ -106,13 +107,14 @@ type ProposeAction struct {
 // RequestAction - request party to propose some action
 type RequestAction struct {
 	ChannelAddr []byte `tl:"int256"`
-	Action      any    `tl:"struct boxed [payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.cooperativeCloseAction,payments.requestRemoveVirtualAction]"`
+	Action      any    `tl:"struct boxed [payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.cooperativeCloseAction,payments.cooperativeCommitAction,payments.requestRemoveVirtualAction]"`
 }
 
 // Decision - response for actions request, Reason is filled when not agreed
 type Decision struct {
-	Agreed bool   `tl:"bool"`
-	Reason string `tl:"string"`
+	Agreed    bool   `tl:"bool"`
+	Reason    string `tl:"string"`
+	Signature []byte `tl:"bytes"`
 }
 
 // ProposalDecision - response for actions proposals, Reason is filled when not agreed
@@ -175,6 +177,11 @@ type CloseVirtualAction struct {
 // CooperativeCloseAction - request party to close onchain channel
 type CooperativeCloseAction struct {
 	SignedCloseRequest *cell.Cell `tl:"cell"`
+}
+
+// CooperativeCommitAction - request party to commit onchain channel state
+type CooperativeCommitAction struct {
+	SignedCommitRequest *cell.Cell `tl:"cell"`
 }
 
 // RemoveVirtualAction - request party to remove expired condition

@@ -38,12 +38,29 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 	if err != nil {
 		if errors.Is(err, db.ErrChannelBusy) {
 			return nil, ErrChannelIsBusy
+		} else if errors.Is(err, db.ErrNotFound) {
+			if s.discoveryMx.TryLock() {
+				go func() {
+					// our party proposed action with channel we don't know,
+					// we will try to find it onchain and register (asynchronously)
+					s.discoverChannel(channelAddr)
+					s.discoveryMx.Unlock()
+				}()
+			}
 		}
 		return nil, fmt.Errorf("failed to acquire channel lock: %w", err)
 	}
 	defer unlock()
 
 	if channel.Status != db.ChannelStateActive {
+		if s.discoveryMx.TryLock() {
+			go func() {
+				// our party proposed action with channel we don't know,
+				// we will try to find it onchain and register (asynchronously)
+				s.discoverChannel(channelAddr)
+				s.discoveryMx.Unlock()
+			}()
+		}
 		return nil, fmt.Errorf("channel is not active")
 	}
 
@@ -531,17 +548,17 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 	return &channel.Our.SignedSemiChannel, nil
 }
 
-func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action transport.Action) error {
+func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action transport.Action) ([]byte, error) {
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
 	channel, err := s.GetActiveChannel(ctx, channelAddr.String())
 	if err != nil {
-		return fmt.Errorf("failed to get channel: %w", err)
+		return nil, fmt.Errorf("failed to get channel: %w", err)
 	}
 
 	if !bytes.Equal(channel.TheirOnchain.Key, key) {
-		return fmt.Errorf("unauthorized channel")
+		return nil, fmt.Errorf("unauthorized channel")
 	}
 
 	log.Debug().Type("action", action).Msg("action request process")
@@ -549,15 +566,15 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 	switch data := action.(type) {
 	case transport.RequestRemoveVirtualAction:
 		if !channel.AcceptingActions {
-			return fmt.Errorf("channel is currently not accepting new actions")
+			return nil, fmt.Errorf("channel is currently not accepting new actions")
 		}
 
 		_, vch, err := payments.FindVirtualChannel(channel.Our.Conditionals, data.Key)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
-				return fmt.Errorf("virtual channel is not found")
+				return nil, fmt.Errorf("virtual channel is not found")
 			}
-			return fmt.Errorf("failed to find virtual channel: %w", err)
+			return nil, fmt.Errorf("failed to find virtual channel: %w", err)
 		}
 
 		tryTill := time.Unix(vch.Deadline, 0)
@@ -567,34 +584,34 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 				Key: data.Key,
 			}, nil, &tryTill,
 		); err != nil {
-			return fmt.Errorf("failed to create remove-virtual task: %w", err)
+			return nil, fmt.Errorf("failed to create remove-virtual task: %w", err)
 		}
 		s.touchWorker()
 	case transport.CloseVirtualAction:
 		if !channel.AcceptingActions {
-			return fmt.Errorf("channel is currently not accepting new actions")
+			return nil, fmt.Errorf("channel is currently not accepting new actions")
 		}
 
 		var vState payments.VirtualChannelState
 		if err = tlb.LoadFromCell(&vState, data.State.BeginParse()); err != nil {
-			return fmt.Errorf("failed to load virtual channel state cell: %w", err)
+			return nil, fmt.Errorf("failed to load virtual channel state cell: %w", err)
 		}
 
 		_, vch, err := payments.FindVirtualChannel(channel.Our.Conditionals, data.Key)
 		if err != nil {
-			return fmt.Errorf("failed to find virtual channel: %w", err)
+			return nil, fmt.Errorf("failed to find virtual channel: %w", err)
 		}
 
 		if !vState.Verify(vch.Key) {
-			return fmt.Errorf("incorrect channel state signature")
+			return nil, fmt.Errorf("incorrect channel state signature")
 		}
 
 		if vState.Amount.Nano().Cmp(vch.Capacity) == 1 {
-			return fmt.Errorf("amount cannot be > capacity")
+			return nil, fmt.Errorf("amount cannot be > capacity")
 		}
 
 		if vch.Deadline < time.Now().Unix() {
-			return fmt.Errorf("virtual channel is expired")
+			return nil, fmt.Errorf("virtual channel is expired")
 		}
 
 		if err = s.db.Transaction(context.Background(), func(ctx context.Context) error {
@@ -635,26 +652,90 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 
 			return nil
 		}); err != nil {
-			return err
+			return nil, err
 		}
 		s.touchWorker()
 	case transport.CooperativeCloseAction:
 		var req payments.CooperativeClose
 		err = tlb.LoadFromCell(&req, data.SignedCloseRequest.BeginParse())
 		if err != nil {
-			return fmt.Errorf("failed to serialize their close channel request: %w", err)
+			return nil, fmt.Errorf("failed to serialize their close channel request: %w", err)
 		}
 
 		log.Info().Str("address", channel.Address).Msg("received cooperative close request")
 
-		if err = s.executeCooperativeClose(ctx, &req, channel.Address); err != nil {
-			return fmt.Errorf("failed to execute cooperative close action: %w", err)
+		_, dataCell, ourSignature, err := s.getCooperativeCloseRequest(channel)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare close channel request: %w", err)
 		}
+
+		var theirSignature = req.SignatureA.Value
+		if channel.WeLeft {
+			theirSignature = req.SignatureB.Value
+		}
+
+		if !dataCell.Verify(channel.TheirOnchain.Key, theirSignature) {
+			return nil, fmt.Errorf("incorrect party signature")
+		}
+
+		channel.AcceptingActions = false
+		if err = s.db.UpdateChannel(ctx, channel); err != nil {
+			return nil, fmt.Errorf("failed to update channel: %w", err)
+		}
+
+		return ourSignature, nil
+	case transport.CooperativeCommitAction:
+		if !channel.AcceptingActions {
+			return nil, fmt.Errorf("channel is currently not accepting new actions")
+		}
+
+		var req payments.CooperativeCommit
+		err = tlb.LoadFromCell(&req, data.SignedCommitRequest.BeginParse())
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize their commit channel request: %w", err)
+		}
+
+		// TODO: idempotency
+		if channel.Our.PendingWithdraw.Sign() != 0 || channel.Their.PendingWithdraw.Sign() != 0 {
+			return nil, fmt.Errorf("have pending withdraw")
+		}
+
+		log.Info().Str("address", channel.Address).Msg("received cooperative commit request")
+
+		wOur, wTheir := req.Signed.WithdrawA, req.Signed.WithdrawB
+		if !channel.WeLeft {
+			wOur, wTheir = wTheir, wOur
+		}
+
+		_, dataCell, ourSignature, err := s.getCommitRequest(wOur, wTheir, channel)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare commit channel request: %w", err)
+		}
+
+		var theirSignature = req.SignatureA.Value
+		if channel.WeLeft {
+			theirSignature = req.SignatureB.Value
+		}
+
+		if !dataCell.Verify(channel.TheirOnchain.Key, theirSignature) {
+			return nil, fmt.Errorf("incorrect party signature")
+		}
+
+		channel.Our.PendingWithdraw = req.Signed.WithdrawA.Nano()
+		channel.Their.PendingWithdraw = req.Signed.WithdrawB.Nano()
+		if !channel.WeLeft {
+			channel.Our.PendingWithdraw, channel.Their.PendingWithdraw = channel.Their.PendingWithdraw, channel.Our.PendingWithdraw
+		}
+
+		if err = s.db.UpdateChannel(ctx, channel); err != nil {
+			return nil, fmt.Errorf("failed to update channel: %w", err)
+		}
+		return ourSignature, nil
 	default:
-		return fmt.Errorf("unexpected action type: %s", reflect.TypeOf(data).String())
+		return nil, fmt.Errorf("unexpected action type: %s", reflect.TypeOf(data).String())
 	}
 
-	return nil
+	return nil, nil
 }
 
 func (s *Service) discoverChannel(channelAddr *address.Address) bool {
@@ -697,7 +778,11 @@ func (s *Service) discoverChannel(channelAddr *address.Address) bool {
 		return false
 	}
 
-	log.Info().Str("address", channelAddr.String()).Msg("discovered previously unknown channel, scheduling force check")
+	if ch.Status == payments.ChannelStatusUninitialized {
+		return false
+	}
+
+	log.Info().Str("address", channelAddr.String()).Msg("discovered channel, scheduling check")
 	s.updates <- ChannelUpdatedEvent{
 		Transaction: txList[0],
 		Channel:     ch,

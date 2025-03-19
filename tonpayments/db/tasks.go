@@ -35,6 +35,18 @@ type ChannelUncooperativeCloseTask struct {
 	ChannelInitiatedAt      *time.Time
 }
 
+type TopupTask struct {
+	Address            string
+	AmountNano         string
+	ChannelInitiatedAt time.Time
+}
+
+type WithdrawTask struct {
+	Address            string
+	AmountNano         string
+	ChannelInitiatedAt time.Time
+}
+
 type SettleStepTask struct {
 	Step               int
 	Address            string

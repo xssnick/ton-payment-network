@@ -312,7 +312,7 @@ func (s *Service) taskExecutor() {
 						return nil
 					}
 
-					err = s.requestAction(ctx, data.ChannelAddress, transport.RequestRemoveVirtualAction{
+					_, err = s.requestAction(ctx, data.ChannelAddress, transport.RequestRemoveVirtualAction{
 						Key: data.Key,
 					})
 					if err != nil && !errors.Is(err, ErrDenied) {
@@ -365,7 +365,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to serialize state to cell: %w", err)
 					}
 
-					err = s.requestAction(ctx, channel.Address, transport.CloseVirtualAction{
+					_, err = s.requestAction(ctx, channel.Address, transport.CloseVirtualAction{
 						Key:   vch.Key,
 						State: stateCell,
 					})
@@ -463,24 +463,24 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
-					_, _, unlock, err := s.AcquireChannel(ctx, data.Address)
+					ch, _, unlock, err := s.AcquireChannel(ctx, data.Address)
 					if err != nil {
 						return fmt.Errorf("failed to acquire channel: %w", err)
 					}
 					defer unlock()
 
-					req, ch, err := s.getCooperativeCloseRequest(ctx, data.Address, nil)
+					if ch.InitAt.Before(data.ChannelInitiatedAt) {
+						// expected channel already closed
+						return nil
+					}
+
+					req, dataCell, _, err := s.getCooperativeCloseRequest(ch)
 					if err != nil {
 						if errors.Is(err, ErrNotActive) {
 							// expected channel already closed
 							return nil
 						}
 						return fmt.Errorf("failed to prepare close channel request: %w", err)
-					}
-
-					if ch.InitAt.Before(data.ChannelInitiatedAt) {
-						// expected channel already closed
-						return nil
 					}
 
 					cl, err := tlb.ToCell(req)
@@ -490,10 +490,33 @@ func (s *Service) taskExecutor() {
 
 					log.Info().Str("address", ch.Address).Msg("trying cooperative close")
 
-					if err = s.requestAction(ctx, ch.Address, transport.CooperativeCloseAction{
+					ch.AcceptingActions = false
+					if err = s.db.UpdateChannel(ctx, ch); err != nil {
+						return fmt.Errorf("failed to update channel: %w", err)
+					}
+
+					partySignature, err := s.requestAction(ctx, ch.Address, transport.CooperativeCloseAction{
 						SignedCloseRequest: cl,
-					}); err != nil {
+					})
+					if err != nil {
 						return fmt.Errorf("failed to request action from the node: %w", err)
+					}
+
+					if !dataCell.Verify(ch.TheirOnchain.Key, partySignature) {
+						return fmt.Errorf("incorrect party signature")
+					}
+
+					if ch.WeLeft {
+						req.SignatureB.Value = partySignature
+					} else {
+						req.SignatureA.Value = partySignature
+					}
+
+					ctxTx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+					defer cancel()
+
+					if err = s.executeCooperativeClose(ctxTx, req, ch); err != nil {
+						return fmt.Errorf("failed to execute cooperative close: %w", err)
 					}
 				case "uncooperative-close":
 					var data db.ChannelUncooperativeCloseTask
@@ -587,6 +610,103 @@ func (s *Service) taskExecutor() {
 						log.Error().Err(err).Str("channel", data.Address).Msg("failed to finish close")
 						return err
 					}
+				case "topup":
+					var data db.TopupTask
+					if err = json.Unmarshal(task.Data, &data); err != nil {
+						return fmt.Errorf("invalid json: %w", err)
+					}
+
+					ch, err := s.GetChannel(ctx, data.Address)
+					if err != nil {
+						return fmt.Errorf("failed to get channel: %w", err)
+					}
+
+					if ch.InitAt.Before(data.ChannelInitiatedAt) {
+						// expected channel already closed
+						return nil
+					}
+
+					if err = s.executeTopup(ctx, data.Address, tlb.MustFromDecimal(data.AmountNano, 0)); err != nil {
+						return fmt.Errorf("failed to execute topup: %w", err)
+					}
+				case "withdraw":
+					var data db.WithdrawTask
+					if err = json.Unmarshal(task.Data, &data); err != nil {
+						return fmt.Errorf("invalid json: %w", err)
+					}
+
+					ch, _, unlock, err := s.AcquireChannel(ctx, data.Address)
+					if err != nil {
+						return fmt.Errorf("failed to acquire channel: %w", err)
+					}
+					defer unlock()
+
+					// TODO: check if not withdrawed already
+					if ch.InitAt.Before(data.ChannelInitiatedAt) {
+						// expected channel already closed
+						return nil
+					}
+
+					amount := tlb.MustFromDecimal(data.AmountNano, 0)
+					req, dataCell, _, err := s.getCommitRequest(amount, tlb.MustFromTON("0"), ch)
+					if err != nil {
+						if errors.Is(err, ErrNotActive) {
+							// expected channel already closed
+							return nil
+						}
+						return fmt.Errorf("failed to prepare withdraw channel request: %w", err)
+					}
+
+					cl, err := tlb.ToCell(req)
+					if err != nil {
+						return fmt.Errorf("failed to serialize request to cell: %w", err)
+					}
+
+					log.Info().Str("address", ch.Address).Msg("trying cooperative commit to withdraw")
+
+					partySignature, err := s.requestAction(ctx, ch.Address, transport.CooperativeCommitAction{
+						SignedCommitRequest: cl,
+					})
+					if err != nil {
+						return fmt.Errorf("failed to request action from the node: %w", err)
+					}
+
+					if !dataCell.Verify(ch.TheirOnchain.Key, partySignature) {
+						return fmt.Errorf("incorrect party signature")
+					}
+
+					log.Info().Str("address", ch.Address).Msg("cooperative commit party signature received, executing transaction...")
+
+					if ch.WeLeft {
+						req.SignatureB.Value = partySignature
+					} else {
+						req.SignatureA.Value = partySignature
+					}
+
+					ch.Our.PendingWithdraw = amount.Nano()
+					if err = s.db.UpdateChannel(ctx, ch); err != nil {
+						return fmt.Errorf("failed to update channel: %w", err)
+					}
+
+					ctxTx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+					defer cancel()
+
+					if err = s.executeCooperativeCommit(ctxTx, req, ch); err != nil {
+						return fmt.Errorf("failed to execute cooperative close: %w", err)
+					}
+
+					if err = s.db.CreateTask(ctx, PaymentsTaskPool, "increment-state", ch.Address,
+						"increment-state-"+ch.Address+"-"+fmt.Sprint(ch.Our.State.Data.Seqno),
+						db.IncrementStatesTask{
+							ChannelAddress: ch.Address,
+							WantResponse:   true,
+						}, nil, nil,
+					); err != nil {
+						return fmt.Errorf("failed to create increment-state task: %w", err)
+					}
+				case "withdraw-execute":
+					// TODO: send tx
+					// TODO: not accept any actions on channel till onchain balance change (topup or withdraw invalidates message and we can continue)
 				default:
 					log.Error().Err(err).Str("type", task.Type).Str("id", task.ID).Msg("unknown task type, skipped")
 					return fmt.Errorf("unknown task type")

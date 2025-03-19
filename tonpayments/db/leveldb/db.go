@@ -8,12 +8,15 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/iterator"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
+	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"sync"
 )
 
 type DB struct {
 	_db    *leveldb.DB
 	pubKey ed25519.PublicKey
+
+	onChannelStateChange func(ch *db.Channel)
 
 	mx sync.Mutex
 }

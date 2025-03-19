@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/rs/zerolog v1.30.0
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/xssnick/tonutils-go v1.11.0
+	github.com/xssnick/tonutils-go v1.11.1
 	golang.org/x/crypto v0.32.0
 )
 
@@ -16,6 +16,5 @@ require (
 	github.com/oasisprotocol/curve25519-voi v0.0.0-20220328075252-7dd334e3daae // indirect
 	github.com/sigurn/crc16 v0.0.0-20211026045750-20ab5afb07e3 // indirect
 	github.com/xssnick/raptorq v1.0.0 // indirect
-	golang.org/x/net v0.34.0 // indirect
 	golang.org/x/sys v0.29.0 // indirect
 )

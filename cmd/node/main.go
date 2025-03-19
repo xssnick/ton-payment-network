@@ -28,6 +28,7 @@ import (
 	"math"
 	"math/big"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,6 +41,7 @@ var APICredentialsLogin = flag.String("api-login", "", "HTTP API credentials log
 var APICredentialsPassword = flag.String("api-password", "", "HTTP API credentials password")
 var ConfigPath = flag.String("config", "payment-network-config.json", "config path")
 var ForceBlock = flag.Uint64("force-block", 0, "master block seqno to start scan from, ignored if 0, otherwise - overrides db value")
+var UseBlockScanner = flag.Bool("use-block-scanner", false, "use block scanner instead of watching specific contracts")
 
 func main() {
 	flag.Parse()
@@ -169,10 +171,31 @@ func main() {
 	}
 
 	inv := make(chan any)
-	sc := chain.NewScanner(apiClient, payments.AsyncPaymentChannelCodeHash, seqno, scanLog)
-	if err = sc.Start(context.Background(), inv); err != nil {
-		log.Fatal().Err(err).Msg("failed to start chain scanner")
-		return
+	sc := chain.NewScanner(apiClient, payments.PaymentChannelCodeHash, seqno, scanLog)
+
+	if *UseBlockScanner {
+		if err = sc.Start(context.Background(), inv); err != nil {
+			log.Fatal().Err(err).Msg("failed to start block scanner")
+			return
+		}
+	} else {
+		if err = sc.StartSmall(inv); err != nil {
+			log.Fatal().Err(err).Msg("failed to start account scanner")
+			return
+		}
+		fdb.SetOnChannelUpdated(sc.OnChannelUpdate)
+
+		chList, err := fdb.GetChannels(context.Background(), nil, db.ChannelStateAny)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to load channels")
+			return
+		}
+
+		for _, channel := range chList {
+			if channel.Status != db.ChannelStateInactive {
+				sc.OnChannelUpdate(channel)
+			}
+		}
 	}
 
 	w, err := wallet.FromPrivateKey(apiClient, cfg.PaymentNodePrivateKey, wallet.ConfigHighloadV3{
@@ -350,6 +373,53 @@ func commandReader(svc *tonpayments.Service) error {
 			return fmt.Errorf("failed to close channel: %w", err)
 		}
 		log.Info().Msg("virtual channel closure requested")
+	case "topup":
+		log.Info().Msg("enter channel address to topup:")
+
+		var addrStr string
+		_, _ = fmt.Scanln(&addrStr)
+
+		addr, err := address.ParseAddr(addrStr)
+		if err != nil {
+			return fmt.Errorf("incorrect format of address: %w", err)
+		}
+
+		log.Info().Msg("input amount:")
+		var strAmt string
+		_, _ = fmt.Scanln(&strAmt)
+
+		amt, err := tlb.FromTON(strAmt)
+		if err != nil {
+			return fmt.Errorf("incorrect format of amount: %w", err)
+		}
+
+		if err = svc.TopupChannel(context.Background(), addr, amt); err != nil {
+			return fmt.Errorf("failed to topup channel: %w", err)
+		}
+		log.Info().Str("address", addr.String()).Msg("topup task registered")
+	case "withdraw":
+		log.Info().Msg("enter channel address to withdraw from:")
+
+		var addrStr string
+		_, _ = fmt.Scanln(&addrStr)
+
+		addr, err := address.ParseAddr(addrStr)
+		if err != nil {
+			return fmt.Errorf("incorrect format of address: %w", err)
+		}
+
+		log.Info().Msg("input amount:")
+		var strAmt string
+		_, _ = fmt.Scanln(&strAmt)
+
+		amt, err := tlb.FromTON(strAmt)
+		if err != nil {
+			return fmt.Errorf("incorrect format of amount: %w", err)
+		}
+
+		if err = svc.RequestWithdraw(context.Background(), addr, amt); err != nil {
+			return fmt.Errorf("failed to withdraw from channel: %w", err)
+		}
 	case "deploy":
 		log.Info().Msg("enter the key of node to deploy channel with:")
 
@@ -364,26 +434,24 @@ func commandReader(svc *tonpayments.Service) error {
 			return fmt.Errorf("incorrect len of key: %d, should be 32", len(btsKey))
 		}
 
-		log.Info().Msg("input jetton master (or skip for ton):")
+		log.Info().Msg("input jetton master address or extra currency id, or skip for ton:")
 		var jetton string
 		_, _ = fmt.Scanln(&jetton)
 
+		var ecID uint64
 		var jettonMaster *address.Address
 		if jetton != "" {
-			jettonMaster = address.MustParseAddr(jetton)
+			ecID, err = strconv.ParseUint(jetton, 10, 32)
+			if err != nil {
+				jettonMaster, err = address.ParseAddr(jetton)
+				if err != nil {
+					return fmt.Errorf("incorrect format: %w", err)
+				}
+			}
 		}
 
-		log.Info().Msg("input amount:")
-		var strAmt string
-		_, _ = fmt.Scanln(&strAmt)
-
-		amt, err := tlb.FromTON(strAmt)
-		if err != nil {
-			return fmt.Errorf("incorrect format of amount: %w", err)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
-		addr, err := svc.DeployChannelWithNode(ctx, amt, btsKey, jettonMaster)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		addr, err := svc.DeployChannelWithNode(ctx, btsKey, jettonMaster, uint32(ecID))
 		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to deploy channel with node: %w", err)

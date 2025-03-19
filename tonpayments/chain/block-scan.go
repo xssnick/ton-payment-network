@@ -26,6 +26,8 @@ type Scanner struct {
 	taskPool       chan accFetchTask
 	shardLastSeqno map[string]uint32
 
+	activeChannels map[string]context.CancelFunc
+
 	globalCtx context.Context
 	stopper   func()
 
@@ -49,6 +51,7 @@ func NewScanner(api ton.APIClientWrapped, codeHash []byte, lastBlock uint32, lg 
 		lastBlock:      lastBlock,
 		taskPool:       make(chan accFetchTask, 1000),
 		shardLastSeqno: map[string]uint32{},
+		activeChannels: map[string]context.CancelFunc{},
 		globalCtx:      ctx,
 		stopper:        cancel,
 	}
@@ -182,7 +185,6 @@ func (v *Scanner) Start(ctx context.Context, ch chan<- any) error {
 
 type accFetchTask struct {
 	master   *ton.BlockIDExt
-	shard    *ton.BlockIDExt
 	tx       *tlb.Transaction
 	addr     *address.Address
 	callback func()
@@ -423,7 +425,6 @@ func (v *Scanner) fetchBlock(ctx context.Context, master *ton.BlockIDExt) (trans
 							wg.Add(1)
 							v.taskPool <- accFetchTask{
 								master:   master,
-								shard:    shard,
 								tx:       &tx,
 								addr:     address.NewAddress(0, byte(shard.Workchain), ab.Addr),
 								callback: wg.Done,

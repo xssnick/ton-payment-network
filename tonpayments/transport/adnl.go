@@ -36,7 +36,7 @@ var ErrNotConnected = fmt.Errorf("not connected with peer")
 type Service interface {
 	GetChannelConfig() ChannelConfig
 	ProcessAction(ctx context.Context, key ed25519.PublicKey, lockId int64, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action, updateProof *cell.Cell) (*payments.SignedSemiChannel, error)
-	ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action Action) error
+	ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action Action) ([]byte, error)
 	ProcessExternalChannelLock(ctx context.Context, key ed25519.PublicKey, addr *address.Address, id int64, lock bool) error
 	ProcessIsChannelLocked(ctx context.Context, key ed25519.PublicKey, addr *address.Address, id int64) error
 }
@@ -150,6 +150,8 @@ func (s *Server) bootstrapPeerWrap(client adnl.Peer) error {
 func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 	s.mx.Lock()
 	defer s.mx.Unlock()
+
+	client.Reinit()
 
 	if rl := s.peers[string(client.GetID())]; rl != nil {
 		return rl
@@ -323,13 +325,14 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 
 			ok := true
 			reason := ""
-			if err := s.svc.ProcessActionRequest(ctx, peer.authKey,
-				address.NewAddress(0, 0, q.ChannelAddr), q.Action); err != nil {
+			sign, err := s.svc.ProcessActionRequest(ctx, peer.authKey,
+				address.NewAddress(0, 0, q.ChannelAddr), q.Action)
+			if err != nil {
 				reason = err.Error()
 				ok = false
 			}
 
-			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Decision{Agreed: ok, Reason: reason}); err != nil {
+			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Decision{Agreed: ok, Reason: reason, Signature: sign}); err != nil {
 				return err
 			}
 		}
@@ -351,7 +354,7 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 
 	go func() {
 		var wait time.Duration = 0
-		var timeout = 150 * time.Second
+		var timeout = 15 * time.Second
 		for {
 			select {
 			case <-peerCtx.Done():
@@ -369,7 +372,7 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 			err := s.doRLDPQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong, true)
 			cancel()
 			if err != nil {
-				timeout = 150 * time.Second
+				timeout = 15 * time.Second
 				wait = 3 * time.Second
 				log.Debug().Err(err).Hex("key", channelKey).Msg("failed to ping urgent peer, retrying in 3s")
 				continue
@@ -377,7 +380,7 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 
 			timeout = 10 * time.Second
 			wait = 10 * time.Second
-			log.Debug().Hex("key", channelKey).Dur("ping", time.Since(start).Round(time.Millisecond)).Msg("urgent peer successfully pinged")
+			log.Debug().Hex("key", channelKey).Dur("ping_ms", time.Since(start).Round(time.Millisecond)).Msg("urgent peer successfully pinged")
 		}
 	}()
 }
