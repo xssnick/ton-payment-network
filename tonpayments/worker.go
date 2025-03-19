@@ -704,9 +704,6 @@ func (s *Service) taskExecutor() {
 					); err != nil {
 						return fmt.Errorf("failed to create increment-state task: %w", err)
 					}
-				case "withdraw-execute":
-					// TODO: send tx
-					// TODO: not accept any actions on channel till onchain balance change (topup or withdraw invalidates message and we can continue)
 				default:
 					log.Error().Err(err).Str("type", task.Type).Str("id", task.ID).Msg("unknown task type, skipped")
 					return fmt.Errorf("unknown task type")
