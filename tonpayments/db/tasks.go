@@ -35,6 +35,25 @@ type ChannelUncooperativeCloseTask struct {
 	ChannelInitiatedAt      *time.Time
 }
 
+type TopupTask struct {
+	Address            string
+	AmountNano         string
+	ChannelInitiatedAt time.Time
+}
+
+type WithdrawTask struct {
+	Address            string
+	AmountNano         string
+	ChannelInitiatedAt time.Time
+}
+
+type SettleStepTask struct {
+	Step               int
+	Address            string
+	Messages           [][]byte
+	ChannelInitiatedAt *time.Time
+}
+
 type ChannelCooperativeCloseTask struct {
 	Address            string
 	ChannelInitiatedAt time.Time
@@ -61,6 +80,11 @@ type OpenVirtualTask struct {
 }
 
 type AskRemoveVirtualTask struct {
+	Key            []byte
+	ChannelAddress string
+}
+
+type AskCloseVirtualTask struct {
 	Key            []byte
 	ChannelAddress string
 }

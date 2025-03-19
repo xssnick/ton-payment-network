@@ -3,7 +3,9 @@ package payments
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/tonutils-go/address"
@@ -12,17 +14,21 @@ import (
 	"math/big"
 )
 
-// AsyncPaymentChannelCodeBoC Modified version of https://github.com/ton-blockchain/payment-channels/tree/master#compiled-code
-const AsyncPaymentChannelCodeBoC = "b5ee9c7241023201000800000114ff00f4a413f4bcf2c80b010201200302000af26c21f01402014807040201200605008dbd0caba78037c20c8b870fc253748b8f07c256840206b90fd0018c020eb90fd0018b8eb90e98f987c23b7882908507c11de491839707c23b788507c23b789507c11de48b9f03a40075bc7fe3a78037c25e87d007d207d20184100d0caf6a1ec7c217c21b7817c227c22b7817c237c23fc247c24b7817c2524c3b7818823881b22a0219840202cb1d080201480c0902f5d76d176fde98f90c10833e3e940dd4998f8047010c108070310615d4a98f804ed98f0191041082abbac3f5d4a9878066d98f01041083cd09377dd4a987806ed98f01041080f8a8d67dd4a9878086d98f0104108044755195d4a987808ed98f0104108337b7834dd4a9878096d98f018c10812a19548dd71814207c0b0a0004f2f00008f013db31020120140d0201200f0e00d51d3c01be129bacfcb81afe12b434cffe803d010c74cffe803d010c74c7cc3e11dbc4283e11dbc4a83e08ee7cb81c7e003e10886808e87e18be10d400e816287e18fe10f04026be10be10e83e189c3e18f7be10b04026be10fe10a83e18dc3e18f780693e1a293e1a7c02e004f71cfc01be129bacfcb81af48020c235c6083e4048e4be1124be1178904c3e443cb81974c7c0608410db10dbaebcb81a3e118074dfd66ebcb81cbd010c3e12b434cffe803d0134cffe803d0134c7fe11dbc4148828083e08ee7cb81bbe11dbc4a83e08ef3cb81c348034800c151d9ea4d6d4cd37a2b98ec2f8c3c1b22013121110003acb3f5005fa0213f400cb3f5004fa0214f400cb1fca00ca00c9f86af007000c3636478045400004333300520b8020f4966fa5208e193050038020f4666fa1209901ed1e14da111da00c923430e202926c21e2b31c0201201a1501c31cfc01be129bacfcb81af48020c235c6083e4048e4be1124be1178904c3e443cb81974c7c0608410da19d46ebcb81a3e118074dfd66ebcb81cb5007420c235c6083e407e11104c3e443cb81940750c3420c235c6083e407e11504c3e443cb81940601601fcd31f01821043685374baf2e068f84601d37f59baf2e072d33ffa00f404552003d200019ad401d0d33ffa00f40430937f206de2303205d31f01821043685374baf2e068f84601d37f59baf2e072d33ffa00f404552003d200019ad401d0d33ffa00f40430937f206de230325339be5381beb0f8495250beb0f8485290beb01702fe5237be16b05262beb0f2e06927c20097f84918bef2e0699137e222c20097f84813bef2e0699132e2f84ad0d33ffa00f404d33ffa00f404d31ff8476f105220a0f823bcf2e06fd200d20030b3f2e073209c3537373a5274bc5263bc12b18e11323939395250bc5299bc18b14650134440e25319bab3f2e06d9130e30d7f05c81918003ecb3f5004fa0215f40012cb3f5004fa0213f400cb1f12ca00ca00c9f86af007002496f8476f1114a098f8476f1117a00603e20301c11cfc01be129bbcb81ab48020c235c6083e4048e4be1124be1178904c3e443cb81974c7c06084155b90db2ebcb81a3e118074dfd66ebcb81cb5007420c235c6083e407e11104c3e443cb81940750c3420c235c6083e407e11504c3e443cb81940601b01fed31f01821043685374baf2e068f84601d37f59baf2e072d33ffa00f404552003d200019ad401d0d33ffa00f40430937f206de2303205d31f01821043685374baf2e068f84601d37f59baf2e072d33ffa00f404552003d200019ad401d0d33ffa00f40430937f206de23032f8485280bef8495250beb0524bbe1ab0527abe191c0068b05215be14b05248be17b0f2e06970f82305c8cb3f5004fa0215f40015cb3f5004fa0212f400cb1f12ca00ca00c9f86af800f007020120291e020120221f020148212000e51cfc01b5007400750074087e4040b4c7c0608410d0db5d2ebcb81a3e118074dfd66ebcb81cbe111510d57e443e1150cc3e442c3cb81974cff4cfcc3e1208ae7e1248ae6c3cb81b087e1a083e1a7e129ba456e3867e12b434cffe800c5c75c874cfcc140cef00af2c64db7e1ab7b8be003c01e000b51d3c01b5007400750074087e4040b4c7c0608410db1bdceebcb81a3e118074dfd66ebcb81cbe111510d57e443e1150cc3e442c3cb8197e80007e18be80007e18f4cff4cfcc3e1208ae7e1248ae6c3cb81b007e1a3e1a7e003c02e002012026230201202524006f3e12f43e800c7e903e900c3e09dbc41cbe10d62f24cc20c1b7be10fe11963c02be10be11a04020bc029c3e185c3e189c3e18db7e1abc01e0004120843777222e9c20043232c15401b3c594013e808532da84b2c7f2dff2407ec020020120282700cf1d3c01be106cfcb819348020c235c6083e4040e4be1124be117890cc3e443cb81974c7c060841a5b9a5d2ebcb81a3e118074dfd66ebcb81cbe803e800c3e1094882fbe10d4882fac3cb819807e18be18fe12f43e800c3e10be10e80068006e7cb8199ffe187c01e0004d1c3c01be106cfcb8193e803e800c3e1096283e18be10c0683e18fe10be10e8006efcb819bc01e00201202f2a0201202e2b0201202d2c008d3e13723e11be117e113e10540132803e10be80be10fe8084f2ffc4b2fff2dffc01487080a7fe12be127e121400f2c7c4b2c7fd0037807080e53e12c073253e1333c5b8b27b5520008b083e1b7b51343480007e187e80007e18be80007e18f4ffc07e1934ffc07e1974dfc07e19bc00487080a7f4c7c07e1a34c7c07e1a7d01007e1ab7807080e535007e1af7be1b20002d5f8476f12f8476f10c8cb1ff8476f11fa02cb1fc901cc80201483130001d35007434c7fe8034c7cc1bc0fe19e000091b087c0520cec0d56c"
+// PaymentChannelCodeBoC https://github.com/xssnick/tonutils-contracts/tree/master/contracts/payments
+const PaymentChannelCodeBoC = "b5ee9c7241023a01000b67000114ff00f4a413f4bcf2c80b0102016202370202cb0329020120041e020120051803add76d176fd99f802e8698180b8d8492f81f07d2001e98f90c1082c9f1c49dd47991a10410839b1684e5d4b1801780bed98f01910c10868b9aa005d4b1880f80d6d98f010c10803b5fef8dd47421880ed9e71877186f80cc06091702ead401d001d401d021f90102d31f01821048baa61abaf2e068f84a01d37f59baf2e072f848544355f910f8494330f910b0f2e065fa00fa005321a0f842f843a0baf2e07e02f862f863d33fd33ff84b23b9f84c23b9b0f2e06c22f86b21f86cf84d6e926c21e30efa00fa00305cb1c200915be30df00607080036f84dd0d33ffa003171d721d33f305044bc5023bc12b1936df86dde02a420c2008ea1f84321a1f863f84721a0f867f843c2fff2e076f854f84a128210a32f0b3c70db3c9130e220c2008ea1f84221a1f862f84621a0f866f842c2fff2e076f853f84a128210a32f0b3c70db3c9130e22828036021821079ae99b5ba943101f0088fa0218210d2b1eeebba8e855bdb3cdb31e02182108175e15dba8e843101db3ce30ee20a0b0e00c0d401d001d401d021f90102d31f0182100802ada3baf2e068f84a01d37f59baf2e072f848544355f910f8494330f910b0f2e065fa00fa005321a0f842f843a0baf2e07e02f862f863d33fd33f30f84b22b9f84c22b9b0f2e06c01f86bf86cf00e01c6f84d6ef2e06ad2008308d71820f9012392f84892f849e24130f910f2e065d31f0182108c623692baf2e068f84a01d37f59baf2e072d401d08308d718d74c20f900f8484130f910f2e065d001d430d08308d718d74c20f900f8494130f910f2e065d0010c01fed31f01821043685374baf2e068f84a01d37f59baf2e072d33ffa00d3ff552003d200019ad401d0d33ffa00d3ff30937f5300e2303205d31f01821043685374baf2e068f84a01d37f59baf2e072d33ffa00d3ff552003d200019ad401d0d33ffa00d3ff30937f5300e23032f84b5280bef84c5250beb0524bbe1ab0527abe190d0060b05215be14b05248be17b0f2e06903c8cb3f58fa0213cbff13cb3f01fa02cbfff82301cb1fca007001ca00c9f86df006036c2182109a77c0dbba8e843101db3c8f2521821056c39b4cba8e843101db3c8e9432821025432a91ba8e8530db3cdb31e0840ff2f0e2e20f141601c6f84d6ef2d06bd2008308d71820f9012392f84892f849e24130f910f2e065d31f018210b8a21379baf2e068f84a01d37f59baf2e072d401d08308d718d74c20f900f8484130f910f2e065d001d430d08308d718d74c20f900f8494130f910f2e065d0011001fcd31f01821043685374baf2e068f84a01d37f59baf2e072d33ffa00d3ff552003d200019ad401d0d33ffa00d3ff30937f5300e2303205d31f01821043685374baf2e068f84a01d37f59baf2e072d33ffa00d3ff552003d200019ad401d0d33ffa00d3ff30937f5300e230325339be5381beb0f84c5250beb0f84b5290beb01102fe5237be16b05262beb0f2e06927c20097f84c18bef2e0699137e222c20097f84b13bef2e0699132e2f84dd0d33ffa00d3ffd33ffa00d3ffd31ff84f5220a0f823bcf2e06fd200d20030b3f2e07d209c3537373a5274bc5263bc12b18e11323939395250bc5299bc18b14650134440e25319bdf2e06d9130e30d04c8cb3f50031213001c94f85114a096f85117a00603e2030036fa0214cbff12cb3f5003fa02cbffcb1fca007f01ca00c9f86df00601f6f84d6ef2d06bd2008308d71820f9012392f84892f849e24130f910f2e065d31f01821014588aabbaf2e068f84a01d37f59baf2e072f404d430f84dd0d33ffa00d3ffd33ffa00d3ffd31ff84f5220a020f823b9f2e06ef850a0f823bcf2e070d200d2003054767b935b5334de0bd739f2e073d30701c003f2e073201500c8d70bff58baf2e073d74c8e260b8020f4966fa5208e168b08400f8020f42e6fa1f2e073ed1e12da111ca00b0c926c21e2b31ce63b0b956c2207d76899353507d76803506714e205c8cb3f5004fa0212cbffcb3f5003fa02cbffcb1fca00ca00c9f86df00600c0f84d6ef2d06bf84dd0d33ffa00d3ff31d33ffa00d3ff31d31f30f84fa0f850a0f823b9f2e071f84221a023a1f862f8435003a058a1f863f843c1009af842f843a0f86270f863def842c1009af843f842a0f86370f863de01a4f86ba4f86cf00e007e31f856c0018e200282097d7840bef2e07702f404308020f85759f40e6fa1f2e079fa043001f0078e1533218209c9c380bef2e077018209c9c380a158f007e2020120191b01bb5ed44d0d20001f861d401d0fa0001f864fa0001f865fa0001f866fa0001f867fa0001f862fa0030f863d3ff01f868d3ff01f869d37f01f86ad401f86ef84ed0d31f01f86ffa0001f871d31f30f870d31f01f86bd31f01f86cf40401f86d81a0082d401f872f852d0fa0001f875fa4001f873fa4001f874d200018e1fd200018e10d430d072f876fa4001f878fa4030f8799871f876d31f30f877e2943070f876e2300201201c1d0097323e10407280323e113e80be117e80be11be80be11fe80be10be80be10fe80b240733e120072fffe124072fffe128072dffe1380733e12c072c7fe130072c7fe13407d003e148073327b552000573e107cb81d7e135bbcb81ab4800c273e1108683e193e1080683e18a73e1148683e197e10c0683e18f8bc01a00201201f25020120202201f54f841f2d064d2008308d71820f9010392f84892f849e24330f910f2e065d31f018210481ebc44baf2e068f84a01d37f30baf2e072f842f843b1f844b1f845b1f846b1f847b1c000f2e0668208989680f856c0028e123082100bebc200f859d70b01c00092f01bde9df856c00197308210042c1d80dee2f85501bc8210020f8276f10f855beb0f2e07b7ff861f006020120232400393220040072c1540173c59400fe809c0072da84b2c7f2dff2407ec20c2000651b60083e15f21401fe8180d199bd10f220040072c1540173c5a0827270e03e80853d001c0072da44f2c7c4b2dff2407ec20c200201202627009d4c8801001cb05f859cf16821004c4b400fa027001cb697f01ca00c882100f8a7ea501cb1f7001cb3f5005fa0225cf165005cf166d01f400820a160ec0fa027f01ca00cb1fcb7fc901ccc901fb0830802754f854f843f84a8210dddc88ba72db3cf853f842f84a8210dddc88ba810082db3c70f86170f86270f86370f86470f86570f86670f8676df86df00682828003cf856c00092f00a8e14f856c00292f00c9bf856c00192f00b925f05e2e2e20201202a2c0101fc2b00ec8e72eda2edfbf856c002f2e0788040d721fa00fa40d2000193d430d0de03820a160ec0b9f85925c705b3b1956c1202f018e0543313ed41ed43ed44ed45ed47945b02f018ed67ed65ed64ed63ed61737fed118e1901d21f018210593e3893ba96f007f019db31e05f03840ff2f0ed41edf101f2ffdb030201482d320201202e300101202f006ec8801001cb0501cf1670fa027001cb6a82100f8a7ea501cb1f7001cb3f01fa0221cf1601cf166d01f40071fa027001ca00c98042fb08300101203100b46df855f856c00096f842f843a0a08e21f856c001f842f843a0c200b08e128020f857c8f842f843a0fa06034144f44301dee20170fb03c8801001cb0501cf1670fa027001cb6a8210d53276db01cb1f7001cb3fc9810082fb0830020120333501012034007a8040d721f859d70b01c000f2e07cf85858c705f2e065fa4030f879c8f855fa02f853cf16f854cf167301cb01c8f858cf16f859cf16c901ccc9f872f00601012036005ec8801001cb05f858cf168209c9c380fa027001cb6a82102c76b97301cb1f7001cb3ff828cf167001ca00c970fb08300201203839007fbc517f802fc20c8b870fc26b748b8f07c26e840206b90fd0018c020eb90fd0018b8eb90e98f987c27a908507c11de491839707c27d07c28507c11de48b9f03a40067bfd747802c1008517f6a1ec7c217c21fc227c22fc237c23b7837c247c24b7817c257c277c25fc2637817c26fc2afc29fc2a3781c4ef61183"
 
-var AsyncPaymentChannelCode = func() *cell.Cell {
-	codeBoC, _ := hex.DecodeString(AsyncPaymentChannelCodeBoC)
+var PaymentChannelCode = func() *cell.Cell {
+	codeBoC, _ := hex.DecodeString(PaymentChannelCodeBoC)
 	code, _ := cell.FromBOC(codeBoC)
 	return code
 }()
-var AsyncPaymentChannelCodeHash = AsyncPaymentChannelCode.Hash()
+var PaymentChannelCodeHash = PaymentChannelCode.Hash()
 
-// Data types
+func init() {
+	tlb.Register(CurrencyConfigJetton{})
+	tlb.Register(CurrencyConfigEC{})
+	tlb.Register(CurrencyConfigTon{})
+}
 
 type Signature struct {
 	Value []byte `tlb:"bits 512"`
@@ -40,9 +46,9 @@ type ConditionalPayment struct {
 }
 
 type SemiChannelBody struct {
-	Seqno        uint64           `tlb:"## 64"`
-	Sent         tlb.Coins        `tlb:"."`
-	Conditionals *cell.Dictionary `tlb:"dict 32"`
+	Seqno            uint64    `tlb:"## 64"`
+	Sent             tlb.Coins `tlb:"."`
+	ConditionalsHash []byte    `tlb:"bits 256"`
 }
 
 type SemiChannel struct {
@@ -54,7 +60,7 @@ type SemiChannel struct {
 
 type SignedSemiChannel struct {
 	Signature Signature   `tlb:"."`
-	State     SemiChannel `tlb:"."`
+	State     SemiChannel `tlb:"^"`
 }
 
 type QuarantinedState struct {
@@ -65,16 +71,44 @@ type QuarantinedState struct {
 	StateChallenged   bool            `tlb:"bool"`
 }
 
-type PaymentConfig struct {
-	ExcessFee tlb.Coins        `tlb:"."`
-	DestA     *address.Address `tlb:"addr"`
-	DestB     *address.Address `tlb:"addr"`
+type CurrencyConfigEC struct {
+	_  tlb.Magic `tlb:"$10"`
+	ID uint32    `tlb:"## 32"`
 }
 
-type AsyncChannelStorageData struct {
+type CurrencyConfigTon struct {
+	_ tlb.Magic `tlb:"$0"`
+}
+
+type CurrencyConfigJettonInfo struct {
+	Master *address.Address `tlb:"addr"`
+	Wallet *address.Address `tlb:"addr"`
+}
+
+type CurrencyConfigJetton struct {
+	_    tlb.Magic                `tlb:"$11"`
+	Info CurrencyConfigJettonInfo `tlb:"^"`
+}
+
+type PaymentConfig struct {
+	StorageFee     tlb.Coins        `tlb:"."`
+	DestA          *address.Address `tlb:"addr"`
+	DestB          *address.Address `tlb:"addr"`
+	CurrencyConfig any              `tlb:"[CurrencyConfigTon,CurrencyConfigJetton,CurrencyConfigEC]"`
+}
+
+type Balance struct {
+	DepositA  tlb.Coins `tlb:"."`
+	DepositB  tlb.Coins `tlb:"."`
+	WithdrawA tlb.Coins `tlb:"."`
+	WithdrawB tlb.Coins `tlb:"."`
+	BalanceA  tlb.Coins `tlb:"."`
+	BalanceB  tlb.Coins `tlb:"."`
+}
+
+type AsyncJettonChannelStorageData struct {
 	Initialized     bool              `tlb:"bool"`
-	BalanceA        tlb.Coins         `tlb:"."`
-	BalanceB        tlb.Coins         `tlb:"."`
+	Balance         Balance           `tlb:"^"`
 	KeyA            []byte            `tlb:"bits 256"`
 	KeyB            []byte            `tlb:"bits 256"`
 	ChannelID       ChannelID         `tlb:"bits 128"`
@@ -82,35 +116,32 @@ type AsyncChannelStorageData struct {
 	CommittedSeqnoA uint32            `tlb:"## 32"`
 	CommittedSeqnoB uint32            `tlb:"## 32"`
 	Quarantine      *QuarantinedState `tlb:"maybe ^"`
-	Payments        PaymentConfig     `tlb:"^"`
+	PaymentConfig   PaymentConfig     `tlb:"^"`
 }
 
 /// Messages
 
 type InitChannel struct {
-	_         tlb.Magic `tlb:"#0e0620c2"`
+	_         tlb.Magic `tlb:"#79ae99b5"`
 	IsA       bool      `tlb:"bool"`
 	Signature Signature `tlb:"."`
 	Signed    struct {
-		_         tlb.Magic `tlb:"#696e6974"`
+		_         tlb.Magic `tlb:"#481ebc44"`
 		ChannelID ChannelID `tlb:"bits 128"`
-		BalanceA  tlb.Coins `tlb:"."`
-		BalanceB  tlb.Coins `tlb:"."`
 	} `tlb:"."`
 }
 
 type TopupBalance struct {
-	_    tlb.Magic `tlb:"#67c7d281"`
-	AddA tlb.Coins `tlb:"."`
-	AddB tlb.Coins `tlb:"."`
+	_   tlb.Magic `tlb:"#593e3893"`
+	IsA bool      `tlb:"bool"`
 }
 
 type CooperativeClose struct {
-	_          tlb.Magic `tlb:"#5577587e"`
+	_          tlb.Magic `tlb:"#d2b1eeeb"`
 	SignatureA Signature `tlb:"^"`
 	SignatureB Signature `tlb:"^"`
 	Signed     struct {
-		_         tlb.Magic `tlb:"#436c6f73"`
+		_         tlb.Magic `tlb:"#0802ada3"`
 		ChannelID ChannelID `tlb:"bits 128"`
 		BalanceA  tlb.Coins `tlb:"."`
 		BalanceB  tlb.Coins `tlb:"."`
@@ -120,31 +151,27 @@ type CooperativeClose struct {
 }
 
 type CooperativeCommit struct {
-	_          tlb.Magic `tlb:"#79a126ef"`
-	IsA        bool      `tlb:"bool"`
+	_          tlb.Magic `tlb:"#076bfdf1"`
 	SignatureA Signature `tlb:"^"`
 	SignatureB Signature `tlb:"^"`
 	Signed     struct {
-		_         tlb.Magic `tlb:"#43436d74"`
+		_         tlb.Magic `tlb:"#48baa61a"`
 		ChannelID ChannelID `tlb:"bits 128"`
+		BalanceA  tlb.Coins `tlb:"."`
+		BalanceB  tlb.Coins `tlb:"."`
 		SeqnoA    uint64    `tlb:"## 64"`
 		SeqnoB    uint64    `tlb:"## 64"`
+		WithdrawA tlb.Coins `tlb:"."`
+		WithdrawB tlb.Coins `tlb:"."`
 	} `tlb:"."`
 }
 
-type StartUncooperativeCloseBody struct {
-	_         tlb.Magic         `tlb:"#556e436c"`
-	ChannelID ChannelID         `tlb:"bits 128"`
-	A         SignedSemiChannel `tlb:"^"`
-	B         SignedSemiChannel `tlb:"^"`
-}
-
 type StartUncooperativeClose struct {
-	_           tlb.Magic `tlb:"#1f151acf"`
+	_           tlb.Magic `tlb:"#8175e15d"`
 	IsSignedByA bool      `tlb:"bool"`
 	Signature   Signature `tlb:"."`
 	Signed      struct {
-		_         tlb.Magic         `tlb:"#556e436c"`
+		_         tlb.Magic         `tlb:"#8c623692"`
 		ChannelID ChannelID         `tlb:"bits 128"`
 		A         SignedSemiChannel `tlb:"^"`
 		B         SignedSemiChannel `tlb:"^"`
@@ -152,11 +179,11 @@ type StartUncooperativeClose struct {
 }
 
 type ChallengeQuarantinedState struct {
-	_               tlb.Magic `tlb:"#088eaa32"`
+	_               tlb.Magic `tlb:"#9a77c0db"`
 	IsChallengedByA bool      `tlb:"bool"`
 	Signature       Signature `tlb:"."`
 	Signed          struct {
-		_         tlb.Magic         `tlb:"#43686751"`
+		_         tlb.Magic         `tlb:"#b8a21379"`
 		ChannelID ChannelID         `tlb:"bits 128"`
 		A         SignedSemiChannel `tlb:"^"`
 		B         SignedSemiChannel `tlb:"^"`
@@ -164,14 +191,14 @@ type ChallengeQuarantinedState struct {
 }
 
 type SettleConditionals struct {
-	_         tlb.Magic `tlb:"#66f6f069"`
+	_         tlb.Magic `tlb:"#56c39b4c"`
 	IsFromA   bool      `tlb:"bool"`
 	Signature Signature `tlb:"."`
 	Signed    struct {
-		_                    tlb.Magic         `tlb:"#436c436e"`
-		ChannelID            ChannelID         `tlb:"bits 128"`
-		ConditionalsToSettle *cell.Dictionary  `tlb:"dict 32"`
-		B                    SignedSemiChannel `tlb:"^"`
+		_                    tlb.Magic        `tlb:"#14588aab"`
+		ChannelID            ChannelID        `tlb:"bits 128"`
+		ConditionalsToSettle *cell.Dictionary `tlb:"dict 32"`
+		ConditionalsProof    *cell.Cell       `tlb:"^"`
 	} `tlb:"."`
 }
 
@@ -182,7 +209,7 @@ type FinishUncooperativeClose struct {
 func (s *SignedSemiChannel) Verify(key ed25519.PublicKey) error {
 	if bytes.Equal(s.Signature.Value, make([]byte, 64)) &&
 		s.State.Data.Sent.Nano().Sign() == 0 &&
-		s.State.Data.Conditionals.Size() == 0 {
+		bytes.Equal(s.State.Data.ConditionalsHash, make([]byte, 32)) {
 		// TODO: use more reliable approach
 		// empty
 		return nil
@@ -192,7 +219,7 @@ func (s *SignedSemiChannel) Verify(key ed25519.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	if !ed25519.Verify(key, c.Hash(), s.Signature.Value) {
+	if !ed25519.Verify(key, c.Hash(2), s.Signature.Value) {
 		log.Warn().Hex("sig", s.Signature.Value).Msg("invalid signature")
 		return fmt.Errorf("invalid signature")
 	}
@@ -201,21 +228,43 @@ func (s *SignedSemiChannel) Verify(key ed25519.PublicKey) error {
 
 var ErrNotFound = fmt.Errorf("not found")
 
-func (s *SemiChannel) FindVirtualChannel(key ed25519.PublicKey) (*big.Int, *VirtualChannel, error) {
-	// TODO: optimize to kinda hashmap
-	for _, kv := range s.Data.Conditionals.All() {
-		vch, err := ParseVirtualChannelCond(kv.Value)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
-		}
+func FindVirtualChannel(conditionals *cell.Dictionary, key ed25519.PublicKey) (*big.Int, *VirtualChannel, error) {
+	return FindVirtualChannelWithProof(conditionals, key, nil)
+}
 
-		if !bytes.Equal(vch.Key, key) {
-			continue
-		}
-
-		return kv.Key.BeginParse().MustLoadBigUInt(32), vch, nil
+func FindVirtualChannelWithProof(conditionals *cell.Dictionary, key ed25519.PublicKey, proofRoot *cell.ProofSkeleton) (*big.Int, *VirtualChannel, error) {
+	var tempProofRoot *cell.ProofSkeleton
+	if proofRoot != nil {
+		tempProofRoot = cell.CreateProofSkeleton()
 	}
-	return nil, nil, ErrNotFound
+
+	idx := big.NewInt(int64(binary.LittleEndian.Uint32(key)))
+	sl, proofBranch, err := conditionals.LoadValueWithProof(cell.BeginCell().MustStoreBigUInt(idx, 32).EndCell(), tempProofRoot)
+	if err != nil {
+		if errors.Is(err, cell.ErrNoSuchKeyInDict) {
+			if proofRoot != nil {
+				proofBranch.SetRecursive()
+				proofRoot.Merge(tempProofRoot)
+			}
+			return nil, nil, ErrNotFound
+		}
+		return nil, nil, err
+	}
+
+	vch, err := ParseVirtualChannelCond(sl)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse state of one of virtual channels")
+	}
+
+	if !bytes.Equal(vch.Key, key) {
+		return nil, nil, ErrNotFound
+	}
+
+	if proofRoot != nil {
+		proofBranch.SetRecursive()
+		proofRoot.Merge(tempProofRoot)
+	}
+	return idx, vch, nil
 }
 
 func (s *SemiChannel) CheckSynchronized(with *SemiChannel) error {
@@ -236,7 +285,7 @@ func (s *SemiChannel) CheckSynchronized(with *SemiChannel) error {
 		return fmt.Errorf("failed to serialize our state: %w", err)
 	}
 
-	if !bytes.Equal(ourStateOnTheirSide.Hash(), ourState.Hash()) {
+	if !bytes.Equal(ourStateOnTheirSide.Hash(2), ourState.Hash()) {
 		return fmt.Errorf("our state on their side is diff")
 	}
 
@@ -253,7 +302,7 @@ func (s *SemiChannel) CheckSynchronized(with *SemiChannel) error {
 		return fmt.Errorf("failed to serialize their state: %w", err)
 	}
 
-	if !bytes.Equal(theirStateOnOurSide.Hash(), theirState.Hash()) {
+	if !bytes.Equal(theirStateOnOurSide.Hash(2), theirState.Hash(2)) {
 		return fmt.Errorf("their state on our side is diff")
 	}
 
@@ -272,34 +321,20 @@ func (s *SemiChannel) Dump() string {
 		if err != nil {
 			return "failed cell"
 		}
-		cpData = fmt.Sprintf("(data_hash: %s seqno: %d; sent: %s; conditionals: %d)",
+		cpData = fmt.Sprintf("(data_hash: %s seqno: %d; sent: %s; conditionals_hash: %s)",
 			hex.EncodeToString(cp.Hash()[:8]),
-			s.CounterpartyData.Seqno, s.CounterpartyData.Sent.String(), s.CounterpartyData.Conditionals.Size())
+			s.CounterpartyData.Seqno, s.CounterpartyData.Sent.String(), hex.EncodeToString(s.CounterpartyData.ConditionalsHash))
 	}
 
-	return fmt.Sprintf("data_hash: %s seqno: %d; sent: %s; conditionals: %d; counterparty: %s",
+	return fmt.Sprintf("data_hash: %s seqno: %d; sent: %s; conditionals_hash: %s; counterparty: %s",
 		hex.EncodeToString(c.Hash()[:8]),
-		s.Data.Seqno, s.Data.Sent.String(), s.Data.Conditionals.Size(), cpData)
+		s.Data.Seqno, s.Data.Sent.String(), hex.EncodeToString(s.Data.ConditionalsHash), cpData)
 }
 
 func (s *SemiChannelBody) Copy() (SemiChannelBody, error) {
-	conditions := cell.NewDict(32)
-	if s.Conditionals.Size() > 0 {
-		cl, err := s.Conditionals.ToCell()
-		if err != nil {
-			return SemiChannelBody{}, err
-		}
-
-		// TODO: more efficient copy
-		conditions, err = cl.BeginParse().ToDict(32)
-		if err != nil {
-			return SemiChannelBody{}, err
-		}
-	}
-
 	return SemiChannelBody{
-		Seqno:        s.Seqno,
-		Sent:         tlb.FromNanoTON(s.Sent.Nano()),
-		Conditionals: conditions,
+		Seqno:            s.Seqno,
+		Sent:             tlb.FromNanoTON(s.Sent.Nano()),
+		ConditionalsHash: append([]byte{}, s.ConditionalsHash...),
 	}, nil
 }

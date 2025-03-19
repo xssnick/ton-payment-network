@@ -73,6 +73,8 @@ type VirtualChannelMeta struct {
 type Channel struct {
 	ID                     []byte
 	Address                string
+	ExtraCurrencyID        uint32
+	JettonAddress          string
 	Status                 ChannelStatus
 	WeLeft                 bool
 	OurOnchain             OnchainState
@@ -85,22 +87,28 @@ type Channel struct {
 	Their Side
 
 	// InitAt - initialization or reinitialization time
-	InitAt    time.Time
-	UpdatedAt time.Time
-	CreatedAt time.Time
+	InitAt          time.Time
+	CreatedAt       time.Time
+	LastProcessedLT uint64
+
+	DBVersion int64
 
 	mx sync.RWMutex
 }
 
 type OnchainState struct {
-	Key            ed25519.PublicKey
-	CommittedSeqno uint32
-	WalletAddress  string
-	Deposited      *big.Int
+	Key              ed25519.PublicKey
+	CommittedSeqno   uint32
+	WalletAddress    string
+	Deposited        *big.Int
+	Withdrawn        *big.Int
+	CommittedBalance *big.Int
 }
 
 type Side struct {
 	payments.SignedSemiChannel
+	Conditionals    *cell.Dictionary
+	PendingWithdraw *big.Int
 }
 
 var ErrNewerStateIsKnown = errors.New("newer state is already known")
@@ -114,17 +122,18 @@ func NewSide(channelId []byte, seqno, counterpartySeqno uint64) Side {
 			State: payments.SemiChannel{
 				ChannelID: channelId,
 				Data: payments.SemiChannelBody{
-					Seqno:        seqno,
-					Sent:         tlb.ZeroCoins,
-					Conditionals: cell.NewDict(32),
+					Seqno:            seqno,
+					Sent:             tlb.ZeroCoins,
+					ConditionalsHash: make([]byte, 32),
 				},
 				CounterpartyData: &payments.SemiChannelBody{
-					Seqno:        counterpartySeqno,
-					Sent:         tlb.ZeroCoins,
-					Conditionals: cell.NewDict(32),
+					Seqno:            counterpartySeqno,
+					Sent:             tlb.ZeroCoins,
+					ConditionalsHash: make([]byte, 32),
 				},
 			},
 		},
+		PendingWithdraw: big.NewInt(0),
 	}
 }
 
@@ -141,27 +150,21 @@ func (s *Side) Copy() *Side {
 			State: payments.SemiChannel{
 				ChannelID: append([]byte{}, s.State.ChannelID...),
 				Data: payments.SemiChannelBody{
-					Seqno:        s.State.Data.Seqno,
-					Sent:         s.State.Data.Sent,
-					Conditionals: cell.NewDict(32),
+					Seqno:            s.State.Data.Seqno,
+					Sent:             s.State.Data.Sent,
+					ConditionalsHash: s.State.Data.ConditionalsHash,
 				},
 			},
 		},
-	}
-
-	for _, kv := range s.State.Data.Conditionals.All() {
-		_ = sd.State.Data.Conditionals.Set(kv.Key, kv.Value)
+		Conditionals:    s.Conditionals.Copy(),
+		PendingWithdraw: s.PendingWithdraw,
 	}
 
 	if s.State.CounterpartyData != nil {
 		sd.State.CounterpartyData = &payments.SemiChannelBody{
-			Seqno:        s.State.CounterpartyData.Seqno,
-			Sent:         s.State.CounterpartyData.Sent,
-			Conditionals: cell.NewDict(32),
-		}
-
-		for _, kv := range s.State.CounterpartyData.Conditionals.All() {
-			_ = sd.State.CounterpartyData.Conditionals.Set(kv.Key, kv.Value)
+			Seqno:            s.State.CounterpartyData.Seqno,
+			Sent:             s.State.CounterpartyData.Sent,
+			ConditionalsHash: s.State.CounterpartyData.ConditionalsHash,
 		}
 	}
 
@@ -184,7 +187,23 @@ func (s *Side) UnmarshalJSON(bytes []byte) error {
 		return err
 	}
 
-	return tlb.LoadFromCell(&s.SignedSemiChannel, cl.BeginParse())
+	sl := cl.BeginParse()
+	ssc, err := sl.LoadRef()
+	if err != nil {
+		return err
+	}
+
+	s.Conditionals, err = sl.LoadDict(32)
+	if err != nil {
+		return err
+	}
+
+	s.PendingWithdraw, err = sl.LoadBigCoins()
+	if err != nil {
+		return err
+	}
+
+	return tlb.LoadFromCell(&s.SignedSemiChannel, ssc)
 }
 
 func (s *Side) MarshalJSON() ([]byte, error) {
@@ -192,7 +211,9 @@ func (s *Side) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []byte(strconv.Quote(base64.StdEncoding.EncodeToString(bts.ToBOC()))), nil
+
+	c := cell.BeginCell().MustStoreRef(bts).MustStoreDict(s.Conditionals).MustStoreBigCoins(s.PendingWithdraw).EndCell()
+	return []byte(strconv.Quote(base64.StdEncoding.EncodeToString(c.ToBOC()))), nil
 }
 
 func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
@@ -207,14 +228,20 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 		s1chain, s2chain = s2chain, s1chain
 	}
 
-	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), s1chain.Deposited)
+	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), new(big.Int).Sub(s1chain.Deposited, s1chain.Withdrawn))
 	balance = balance.Sub(balance, s1.State.Data.Sent.Nano())
 
-	for _, kv := range s1.State.Data.Conditionals.All() {
+	all, err := s1.Conditionals.LoadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load conditions: %w", err)
+	}
+	balance = balance.Sub(balance, s1.PendingWithdraw)
+
+	for _, kv := range all {
 		// TODO: support other types of conditions
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse condition %d", kv.Key.BeginParse().MustLoadUInt(32))
+			return nil, fmt.Errorf("failed to parse condition %d", kv.Key.MustLoadUInt(32))
 		}
 		balance = balance.Sub(balance, new(big.Int).Add(vch.Capacity, vch.Fee))
 	}

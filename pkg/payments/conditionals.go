@@ -1,6 +1,7 @@
 package payments
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
@@ -14,6 +15,8 @@ type VirtualChannel struct {
 	Capacity *big.Int
 	Fee      *big.Int
 	Deadline int64
+
+	Comment *cell.Cell
 }
 
 type VirtualChannelState struct {
@@ -78,14 +81,14 @@ func (c *VirtualChannel) Serialize() *cell.Cell {
 		MustStoreBuilder(pushIntOP(c.Capacity)).
 		MustStoreBuilder(pushIntOP(big.NewInt(c.Deadline))).
 		MustStoreBuilder(pushIntOP(new(big.Int).SetBytes(c.Key))).
+		MustStoreSlice([]byte{0xDB, 0x3D}, 16). // JMPREF opcode to jump in ref, and not execute meta
 		// we pack immutable part of code to ref for better BoC compression and cheaper transactions
 		MustStoreRef(virtualChannelStaticCode).
+		MustStoreMaybeRef(c.Comment).
 		EndCell()
 }
 
-func ParseVirtualChannelCond(c *cell.Cell) (*VirtualChannel, error) {
-	s := c.BeginParse()
-
+func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 	fee, err := readIntOP(s)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse fee: %w", err)
@@ -114,8 +117,8 @@ func ParseVirtualChannelCond(c *cell.Cell) (*VirtualChannel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse key: %w", err)
 	}
-	key := keyInt.Bytes()
 
+	key := keyInt.Bytes()
 	if len(key) > 32 {
 		return nil, fmt.Errorf("too big key size")
 	}
@@ -125,11 +128,47 @@ func ParseVirtualChannelCond(c *cell.Cell) (*VirtualChannel, error) {
 		key = append(make([]byte, 32-len(key)), key...)
 	}
 
+	jmp, err := s.LoadSlice(16)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse jmp: %w", err)
+	}
+	if !bytes.Equal(jmp, []byte{0xDB, 0x3D}) {
+		return nil, fmt.Errorf("incorrect jmp opcode")
+	}
+
+	code, err := s.LoadRefCell()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse code: %w", err)
+	}
+
+	if !bytes.Equal(code.Hash(), virtualChannelStaticCode.Hash()) {
+		return nil, fmt.Errorf("incorrect code")
+	}
+
+	var comment *cell.Cell
+	if hasComment, err := s.LoadBoolBit(); err != nil {
+		return nil, fmt.Errorf("failed to parse meta: %w", err)
+	} else if hasComment {
+		comment, err = s.LoadRefCell()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse meta: %w", err)
+		}
+	}
+
+	if s.BitsLeft() != 0 || s.RefsNum() != 0 {
+		return nil, fmt.Errorf("unexpected data in condition")
+	}
+
+	if comment != nil && comment.RefsNum() > 0 {
+		return nil, fmt.Errorf("refs in meta are not allowed")
+	}
+
 	return &VirtualChannel{
 		Key:      key,
 		Capacity: capacity,
 		Fee:      fee,
 		Deadline: int64(deadline.Uint64()),
+		Comment:  comment,
 	}, nil
 }
 

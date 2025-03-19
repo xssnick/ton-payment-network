@@ -28,21 +28,23 @@ type Side struct {
 type OnchainChannel struct {
 	ID               string `json:"id"`
 	Address          string `json:"address"`
+	JettonAddress    string `json:"jetton_address"`
 	AcceptingActions bool   `json:"accepting_actions"`
 	Status           string `json:"status"`
 	WeLeft           bool   `json:"we_left"`
 	Our              Side   `json:"our"`
 	Their            Side   `json:"their"`
 
-	InitAt    time.Time `json:"init_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	CreatedAt time.Time `json:"created_at"`
+	InitAt          time.Time `json:"init_at"`
+	CreatedAt       time.Time `json:"created_at"`
+	LastProcessedLT uint64    `json:"processed_lt"`
 }
 
 func (s *Server) handleChannelOpen(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		WithNode string `json:"with_node"`
-		Capacity string `json:"capacity"`
+		WithNode        string `json:"with_node"`
+		JettonMaster    string `json:"jetton_master"`
+		ExtraCurrencyID uint32 `json:"ec_id"`
 	}
 	type response struct {
 		Address string `json:"address"`
@@ -65,13 +67,16 @@ func (s *Server) handleChannelOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	amt, err := tlb.FromTON(req.Capacity)
-	if err != nil {
-		writeErr(w, 400, "incorrect amount format: "+err.Error())
-		return
+	var jetton *address.Address
+	if req.JettonMaster != "" {
+		jetton, err = address.ParseAddr(req.JettonMaster)
+		if err != nil {
+			writeErr(w, 400, "incorrect jetton address format: "+err.Error())
+			return
+		}
 	}
 
-	addr, err := s.svc.DeployChannelWithNode(r.Context(), amt, key)
+	addr, err := s.svc.DeployChannelWithNode(r.Context(), key, jetton, req.ExtraCurrencyID)
 	if err != nil {
 		writeErr(w, 500, "failed to deploy channel: "+err.Error())
 		return
@@ -227,6 +232,7 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 	return OnchainChannel{
 		ID:               hex.EncodeToString(c.ID),
 		Address:          c.Address,
+		JettonAddress:    c.JettonAddress,
 		AcceptingActions: c.AcceptingActions,
 		Status:           status,
 		WeLeft:           c.WeLeft,
@@ -248,9 +254,9 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 				Deposited:      tlb.FromNanoTON(c.TheirOnchain.Deposited).String(),
 			},
 		},
-		InitAt:    c.InitAt,
-		UpdatedAt: c.UpdatedAt,
-		CreatedAt: c.CreatedAt,
+		InitAt:          c.InitAt,
+		LastProcessedLT: c.LastProcessedLT,
+		CreatedAt:       c.CreatedAt,
 	}, nil
 }
 
@@ -261,7 +267,7 @@ func (s *Server) PushChannelEvent(ctx context.Context, ch *db.Channel) error {
 	}
 
 	if err = s.queue.CreateTask(ctx, WebhooksTaskPool, "onchain-channel-event", "events",
-		ch.Address+"-"+fmt.Sprint(res.UpdatedAt.UnixNano()),
+		ch.Address+"-"+fmt.Sprint(res.LastProcessedLT),
 		res, nil, nil,
 	); err != nil {
 		return fmt.Errorf("failed to create ask-remove-virtual task: %w", err)

@@ -2,6 +2,8 @@ package chain
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog"
@@ -23,6 +25,8 @@ type Scanner struct {
 
 	taskPool       chan accFetchTask
 	shardLastSeqno map[string]uint32
+
+	activeChannels map[string]context.CancelFunc
 
 	globalCtx context.Context
 	stopper   func()
@@ -47,6 +51,7 @@ func NewScanner(api ton.APIClientWrapped, codeHash []byte, lastBlock uint32, lg 
 		lastBlock:      lastBlock,
 		taskPool:       make(chan accFetchTask, 1000),
 		shardLastSeqno: map[string]uint32{},
+		activeChannels: map[string]context.CancelFunc{},
 		globalCtx:      ctx,
 		stopper:        cancel,
 	}
@@ -180,7 +185,6 @@ func (v *Scanner) Start(ctx context.Context, ch chan<- any) error {
 
 type accFetchTask struct {
 	master   *ton.BlockIDExt
-	shard    *ton.BlockIDExt
 	tx       *tlb.Transaction
 	addr     *address.Address
 	callback func()
@@ -206,7 +210,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, threads int) {
 								break
 							}
 
-							qCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+							qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 							acc, err = v.api.WaitForBlock(task.master.SeqNo).GetAccount(qCtx, task.master, task.addr)
 							cancel()
 							if err != nil {
@@ -218,7 +222,7 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, threads int) {
 						}
 					}
 
-					if acc == nil || !acc.IsActive || acc.State.Status != tlb.AccountStatusActive {
+					if acc == nil || !acc.IsActive || acc.State.Status != tlb.AccountStatusActive || acc.Code == nil || acc.Data == nil {
 						// not active or failed
 						return
 					}
@@ -351,7 +355,7 @@ func (v *Scanner) fetchBlock(ctx context.Context, master *ton.BlockIDExt) (trans
 		shardBlocksNum = uint64(len(newShards))
 		// for each shard block getting transactions
 		for _, shard := range newShards {
-			v.log.Debug().Uint32("seqno", shard.SeqNo).Uint64("shard", uint64(shard.Shard)).Int32("wc", shard.Workchain).Msg("scanning shard")
+			v.log.Debug().Uint32("seqno", shard.SeqNo).Str("shard", shardHex(uint64(shard.Shard))).Int32("wc", shard.Workchain).Msg("scanning shard")
 
 			go func(shard *ton.BlockIDExt) {
 				defer shardsWg.Done()
@@ -362,7 +366,7 @@ func (v *Scanner) fetchBlock(ctx context.Context, master *ton.BlockIDExt) (trans
 					for z := 0; z < 20; z++ { // TODO: retry without loosing
 						ctx, err = v.api.Client().StickyContextNextNode(ctx)
 						if err != nil {
-							v.log.Debug().Err(err).Uint32("master", master.SeqNo).Int64("shard", shard.Shard).
+							v.log.Debug().Err(err).Uint32("master", master.SeqNo).Str("shard", shardHex(uint64(shard.Shard))).
 								Uint32("shard_seqno", shard.SeqNo).Msg("failed to pick next node")
 							break
 						}
@@ -371,7 +375,7 @@ func (v *Scanner) fetchBlock(ctx context.Context, master *ton.BlockIDExt) (trans
 						block, err = v.api.WaitForBlock(master.SeqNo).GetBlockData(qCtx, shard)
 						cancel()
 						if err != nil {
-							v.log.Debug().Err(err).Uint32("master", master.SeqNo).Int64("shard", shard.Shard).
+							v.log.Debug().Err(err).Uint32("master", master.SeqNo).Str("shard", shardHex(uint64(shard.Shard))).
 								Uint32("shard_seqno", shard.SeqNo).Msg("failed to get block")
 							time.Sleep(200 * time.Millisecond)
 							continue
@@ -421,7 +425,6 @@ func (v *Scanner) fetchBlock(ctx context.Context, master *ton.BlockIDExt) (trans
 							wg.Add(1)
 							v.taskPool <- accFetchTask{
 								master:   master,
-								shard:    shard,
 								tx:       &tx,
 								addr:     address.NewAddress(0, byte(shard.Workchain), ab.Addr),
 								callback: wg.Done,
@@ -432,7 +435,7 @@ func (v *Scanner) fetchBlock(ctx context.Context, master *ton.BlockIDExt) (trans
 					}
 
 					v.log.Debug().Uint32("seqno", shard.SeqNo).
-						Uint64("shard", uint64(shard.Shard)).
+						Str("shard", shardHex(uint64(shard.Shard))).
 						Int32("wc", shard.Workchain).
 						Int("affected_accounts", len(sab)).
 						Uint64("transactions", transactionsNum).
@@ -442,11 +445,17 @@ func (v *Scanner) fetchBlock(ctx context.Context, master *ton.BlockIDExt) (trans
 					return nil
 				}()
 				if err != nil {
-					v.log.Error().Uint32("seqno", shard.SeqNo).Uint64("shard", uint64(shard.Shard)).Int32("wc", shard.Workchain).Msg("failed to parse block, skipping. Fix issue and rescan later")
+					v.log.Error().Uint32("seqno", shard.SeqNo).Str("shard", shardHex(uint64(shard.Shard))).Int32("wc", shard.Workchain).Msg("failed to parse block, skipping. Fix issue and rescan later")
 				}
 			}(shard)
 		}
 		shardsWg.Wait()
 		return
 	}
+}
+
+func shardHex(shard uint64) string {
+	v := make([]byte, 8)
+	binary.LittleEndian.PutUint64(v, shard)
+	return hex.EncodeToString(v)
 }

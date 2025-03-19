@@ -35,8 +35,10 @@ var ErrNotConnected = fmt.Errorf("not connected with peer")
 
 type Service interface {
 	GetChannelConfig() ChannelConfig
-	ProcessAction(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action) (*payments.SignedSemiChannel, error)
-	ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action Action) error
+	ProcessAction(ctx context.Context, key ed25519.PublicKey, lockId int64, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action, updateProof *cell.Cell) (*payments.SignedSemiChannel, error)
+	ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action Action) ([]byte, error)
+	ProcessExternalChannelLock(ctx context.Context, key ed25519.PublicKey, addr *address.Address, id int64, lock bool) error
+	ProcessIsChannelLocked(ctx context.Context, key ed25519.PublicKey, addr *address.Address, id int64) error
 }
 
 type Server struct {
@@ -149,6 +151,8 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
+	client.Reinit()
+
 	if rl := s.peers[string(client.GetID())]; rl != nil {
 		return rl
 	}
@@ -159,9 +163,10 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 		adnl: client,
 	}
 
+	client.SetQueryHandler(s.handleADNLQuery(p))
 	rl.SetOnQuery(s.handleRLDPQuery(p))
 
-	rl.SetOnDisconnect(func() {
+	client.SetDisconnectHandler(func(_ string, _ ed25519.PublicKey) {
 		s.mx.Lock()
 		if p.authKey != nil {
 			log.Info().Hex("key", p.authKey).Msg("peer disconnected")
@@ -175,6 +180,44 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 	s.peers[string(client.GetID())] = p
 
 	return p
+}
+
+func (s *Server) handleADNLQuery(peer *PeerConnection) func(query *adnl.MessageQuery) error {
+	return func(query *adnl.MessageQuery) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		switch q := query.Data.(type) {
+		case RequestChannelLock:
+			if peer.authKey == nil {
+				return fmt.Errorf("not authorized")
+			}
+
+			var reason string
+			err := s.svc.ProcessExternalChannelLock(ctx, peer.authKey, address.NewAddress(0, 0, q.ChannelAddr), q.LockID, q.Lock)
+			if err != nil {
+				reason = err.Error()
+			}
+
+			if err = peer.adnl.Answer(ctx, query.ID, Decision{Agreed: reason == "", Reason: reason}); err != nil {
+				return err
+			}
+		case IsChannelUnlocked:
+			if peer.authKey == nil {
+				return fmt.Errorf("not authorized")
+			}
+
+			var reason string
+			err := s.svc.ProcessIsChannelLocked(ctx, peer.authKey, address.NewAddress(0, 0, q.ChannelAddr), q.LockID)
+			if err != nil {
+				reason = err.Error()
+			}
+
+			if err = peer.adnl.Answer(ctx, query.ID, Decision{Agreed: reason == "", Reason: reason}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, query *rldp.Query) error {
@@ -210,7 +253,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			peer.authKey = append([]byte{}, q.Key...)
 			s.peersByKey[string(peer.authKey)] = peer
 			s.mx.Unlock()
-			log.Info().Hex("key", peer.authKey).Msg("connected with peer")
+			log.Info().Hex("key", peer.authKey).Msg("connected with payment node peer")
 
 			// reverse A and B, and sign, so party can verify us too
 			authData, err = tl.Hash(AuthenticateToSign{
@@ -250,8 +293,8 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			var updCell *cell.Cell
 			ok := true
 			reason := ""
-			updateProof, err := s.svc.ProcessAction(ctx, peer.authKey,
-				address.NewAddress(0, 0, q.ChannelAddr), state, q.Action)
+			updateProof, err := s.svc.ProcessAction(ctx, peer.authKey, q.LockID,
+				address.NewAddress(0, 0, q.ChannelAddr), state, q.Action, q.UpdateProof)
 			if err != nil {
 				reason = err.Error()
 				ok = false
@@ -259,6 +302,17 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				if updCell, err = tlb.ToCell(updateProof); err != nil {
 					return fmt.Errorf("failed to serialize state cell: %w", err)
 				}
+
+				sk := cell.CreateProofSkeleton()
+				if updateProof.State.CounterpartyData != nil {
+					// include counterparty to proof (last ref)
+					sk.ProofRef(int(updCell.RefsNum() - 1))
+				}
+				// prune conditionals, leave only hashes for optimization
+				if updCell, err = updCell.CreateProof(sk); err != nil {
+					return fmt.Errorf("failed to create proof from state cell: %w", err)
+				}
+				updCell = updCell.MustPeekRef(0)
 			}
 
 			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, ProposalDecision{Agreed: ok, Reason: reason, SignedState: updCell}); err != nil {
@@ -271,13 +325,14 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 
 			ok := true
 			reason := ""
-			if err := s.svc.ProcessActionRequest(ctx, peer.authKey,
-				address.NewAddress(0, 0, q.ChannelAddr), q.Action); err != nil {
+			sign, err := s.svc.ProcessActionRequest(ctx, peer.authKey,
+				address.NewAddress(0, 0, q.ChannelAddr), q.Action)
+			if err != nil {
 				reason = err.Error()
 				ok = false
 			}
 
-			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Decision{Agreed: ok, Reason: reason}); err != nil {
+			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Decision{Agreed: ok, Reason: reason, Signature: sign}); err != nil {
 				return err
 			}
 		}
@@ -299,7 +354,7 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 
 	go func() {
 		var wait time.Duration = 0
-		var timeout = 150 * time.Second
+		var timeout = 15 * time.Second
 		for {
 			select {
 			case <-peerCtx.Done():
@@ -314,10 +369,10 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 
 			var pong Pong
 			ctx, cancel := context.WithTimeout(peerCtx, timeout)
-			err := s.doQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong, true)
+			err := s.doRLDPQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong, true)
 			cancel()
 			if err != nil {
-				timeout = 150 * time.Second
+				timeout = 15 * time.Second
 				wait = 3 * time.Second
 				log.Debug().Err(err).Hex("key", channelKey).Msg("failed to ping urgent peer, retrying in 3s")
 				continue
@@ -325,7 +380,7 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 
 			timeout = 10 * time.Second
 			wait = 10 * time.Second
-			log.Debug().Hex("key", channelKey).Dur("ping", time.Since(start).Round(time.Millisecond)).Msg("urgent peer successfully pinged")
+			log.Debug().Hex("key", channelKey).Dur("ping_ms", time.Since(start).Round(time.Millisecond)).Msg("urgent peer successfully pinged")
 		}
 	}()
 }
@@ -421,7 +476,7 @@ func (s *Server) auth(ctx context.Context, peer *PeerConnection) error {
 	peer.authKey = append([]byte{}, res.Key...)
 	s.peersByKey[string(peer.authKey)] = peer
 	s.mx.Unlock()
-	log.Info().Hex("key", peer.authKey).Msg("connected with peer")
+	log.Info().Hex("key", peer.authKey).Msg("connected with payment node peer")
 
 	return nil
 }
@@ -459,19 +514,46 @@ func (s *Server) preparePeer(ctx context.Context, key []byte, connect bool) (pee
 
 func (s *Server) GetChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey) (*ChannelConfig, error) {
 	var res ChannelConfig
-	err := s.doQuery(ctx, theirChannelKey, GetChannelConfig{}, &res, true)
+	err := s.doRLDPQuery(ctx, theirChannelKey, GetChannelConfig{}, &res, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
 	return &res, nil
 }
 
-func (s *Server) ProposeAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, state *cell.Cell, action Action) (*ProposalDecision, error) {
+func (s *Server) RequestChannelLock(ctx context.Context, theirChannelKey ed25519.PublicKey, channel *address.Address, id int64, lock bool) (*Decision, error) {
+	var res Decision
+	err := s.doADNLQuery(ctx, theirChannelKey, RequestChannelLock{
+		LockID:      id,
+		ChannelAddr: channel.Data(),
+		Lock:        lock,
+	}, &res, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request lock: %w", err)
+	}
+	return &res, nil
+}
+
+func (s *Server) IsChannelUnlocked(ctx context.Context, theirChannelKey ed25519.PublicKey, channel *address.Address, id int64) (*Decision, error) {
+	var res Decision
+	err := s.doADNLQuery(ctx, theirChannelKey, IsChannelUnlocked{
+		LockID:      id,
+		ChannelAddr: channel.Data(),
+	}, &res, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request lock status: %w", err)
+	}
+	return &res, nil
+}
+
+func (s *Server) ProposeAction(ctx context.Context, lockId int64, channelAddr *address.Address, theirChannelKey []byte, state, updateProof *cell.Cell, action Action) (*ProposalDecision, error) {
 	var res ProposalDecision
-	err := s.doQuery(ctx, theirChannelKey, ProposeAction{
+	err := s.doRLDPQuery(ctx, theirChannelKey, ProposeAction{
+		LockID:      lockId,
 		ChannelAddr: channelAddr.Data(),
 		Action:      action,
 		SignedState: state,
+		UpdateProof: updateProof,
 	}, &res, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
@@ -481,7 +563,7 @@ func (s *Server) ProposeAction(ctx context.Context, channelAddr *address.Address
 
 func (s *Server) RequestAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, action Action) (*Decision, error) {
 	var res Decision
-	err := s.doQuery(ctx, theirChannelKey, RequestAction{
+	err := s.doRLDPQuery(ctx, theirChannelKey, RequestAction{
 		ChannelAddr: channelAddr.Data(),
 		Action:      action,
 	}, &res, false)
@@ -491,7 +573,7 @@ func (s *Server) RequestAction(ctx context.Context, channelAddr *address.Address
 	return &res, nil
 }
 
-func (s *Server) doQuery(ctx context.Context, theirKey []byte, req, resp tl.Serializable, connect bool) error {
+func (s *Server) doRLDPQuery(ctx context.Context, theirKey []byte, req, resp tl.Serializable, connect bool) error {
 	peer, err := s.preparePeer(ctx, theirKey, connect)
 	if err != nil {
 		return fmt.Errorf("failed to prepare peer: %w", err)
@@ -512,7 +594,33 @@ func (s *Server) doQuery(ctx context.Context, theirKey []byte, req, resp tl.Seri
 			// drop peer to reconnect
 			peer.adnl.Close()
 		}
-		return fmt.Errorf("failed to make request: %w", err)
+		return fmt.Errorf("failed to make rldp request: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) doADNLQuery(ctx context.Context, theirKey []byte, req, resp tl.Serializable, connect bool) error {
+	peer, err := s.preparePeer(ctx, theirKey, connect)
+	if err != nil {
+		return fmt.Errorf("failed to prepare peer: %w", err)
+	}
+
+	var cancel func()
+	dl, ok := ctx.Deadline()
+	if !ok || dl.After(time.Now().Add(7*time.Second)) {
+		ctx, cancel = context.WithTimeout(ctx, 7*time.Second)
+		defer cancel()
+	}
+
+	tm := time.Now()
+	err = peer.adnl.Query(ctx, req, resp)
+	if err != nil {
+		// TODO: check other network cases too
+		if time.Since(tm) > 3*time.Second {
+			// drop peer to reconnect
+			peer.adnl.Close()
+		}
+		return fmt.Errorf("failed to make adnl request: %w", err)
 	}
 	return nil
 }

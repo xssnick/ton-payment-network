@@ -37,7 +37,7 @@ const (
 
 type AsyncChannel struct {
 	Status  ChannelStatus
-	Storage AsyncChannelStorageData
+	Storage AsyncJettonChannelStorageData
 	addr    *address.Address
 	client  *Client
 }
@@ -53,7 +53,7 @@ func NewPaymentChannelClient(api TonApi) *Client {
 var ErrVerificationNotPassed = fmt.Errorf("verification not passed")
 
 func (c *Client) GetAsyncChannel(ctx context.Context, block *ton.BlockIDExt, addr *address.Address, verify bool) (*AsyncChannel, error) {
-	acc, err := c.api.GetAccount(ctx, block, addr)
+	acc, err := c.api.WaitForBlock(block.SeqNo).GetAccount(ctx, block, addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get account: %w", err)
 	}
@@ -67,7 +67,7 @@ func (c *Client) GetAsyncChannel(ctx context.Context, block *ton.BlockIDExt, add
 
 func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell, verify bool) (*AsyncChannel, error) {
 	if verify {
-		if !bytes.Equal(code.Hash(), AsyncPaymentChannelCodeHash) {
+		if !bytes.Equal(code.Hash(), PaymentChannelCodeHash) {
 			return nil, ErrVerificationNotPassed
 		}
 	}
@@ -84,12 +84,25 @@ func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell,
 	}
 
 	if verify {
-		storageData := AsyncChannelStorageData{
-			KeyA:          ch.Storage.KeyA,
-			KeyB:          ch.Storage.KeyB,
-			ChannelID:     ch.Storage.ChannelID,
-			ClosingConfig: ch.Storage.ClosingConfig,
-			Payments:      ch.Storage.Payments,
+		storageData := AsyncJettonChannelStorageData{
+			Initialized:     false,
+			Balance:         Balance{},
+			KeyA:            ch.Storage.KeyA,
+			KeyB:            ch.Storage.KeyB,
+			ChannelID:       ch.Storage.ChannelID,
+			ClosingConfig:   ch.Storage.ClosingConfig,
+			CommittedSeqnoA: 0,
+			CommittedSeqnoB: 0,
+			Quarantine:      nil,
+			PaymentConfig:   ch.Storage.PaymentConfig,
+		}
+
+		if storageData.PaymentConfig.CurrencyConfig != nil {
+			if v, ok := storageData.PaymentConfig.CurrencyConfig.(CurrencyConfigJetton); ok {
+				// reset jetton wallet cause it in unknown on init
+				v.Info.Wallet = nil
+				storageData.PaymentConfig.CurrencyConfig = v
+			}
 		}
 
 		data, err = tlb.ToCell(storageData)
@@ -98,7 +111,7 @@ func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell,
 		}
 
 		si, err := tlb.ToCell(tlb.StateInit{
-			Code: AsyncPaymentChannelCode,
+			Code: PaymentChannelCode,
 			Data: data,
 		})
 		if err != nil {
@@ -110,22 +123,22 @@ func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell,
 		}
 	}
 
-	ch.Status = ch.Storage.calcState()
+	ch.Status = ch.calcState()
 
 	return ch, nil
 }
 
-func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, initialBalance tlb.Coins, ourKey ed25519.PrivateKey, theirKey ed25519.PublicKey, closingConfig ClosingConfig, paymentConfig PaymentConfig) (body, code, data *cell.Cell, err error) {
+func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, ourKey ed25519.PrivateKey, theirKey ed25519.PublicKey, closingConfig ClosingConfig, paymentConfig PaymentConfig) (body, code, data *cell.Cell, err error) {
 	if len(channelId) != 16 {
 		return nil, nil, nil, fmt.Errorf("channelId len should be 16 bytes")
 	}
 
-	storageData := AsyncChannelStorageData{
+	storageData := AsyncJettonChannelStorageData{
 		KeyA:          ourKey.Public().(ed25519.PublicKey),
 		KeyB:          theirKey,
 		ChannelID:     channelId,
 		ClosingConfig: closingConfig,
-		Payments:      paymentConfig,
+		PaymentConfig: paymentConfig,
 	}
 
 	if !isA {
@@ -139,12 +152,6 @@ func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, init
 
 	initCh := InitChannel{}
 	initCh.IsA = isA
-
-	if isA {
-		initCh.Signed.BalanceA = initialBalance
-	} else {
-		initCh.Signed.BalanceB = initialBalance
-	}
 	initCh.Signed.ChannelID = channelId
 	initCh.Signature, err = toSignature(initCh.Signed, ourKey)
 	if err != nil {
@@ -155,7 +162,7 @@ func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, init
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to serialize message: %w", err)
 	}
-	return body, AsyncPaymentChannelCode, data, nil
+	return body, PaymentChannelCode, data, nil
 }
 
 func (c *AsyncChannel) Address() *address.Address {
@@ -165,19 +172,19 @@ func (c *AsyncChannel) Address() *address.Address {
 // calcState - it repeats get_channel_state method of contract,
 // we do this because we cannot prove method execution for now,
 // but can proof contract data and code, so this approach is safe
-func (s *AsyncChannelStorageData) calcState() ChannelStatus {
-	if !s.Initialized {
+func (c *AsyncChannel) calcState() ChannelStatus {
+	if !c.Storage.Initialized {
 		return ChannelStatusUninitialized
 	}
-	if s.Quarantine == nil {
+	if c.Storage.Quarantine == nil {
 		return ChannelStatusOpen
 	}
 	now := time.Now().Unix()
-	quarantineEnds := int64(s.Quarantine.QuarantineStarts) + int64(s.ClosingConfig.QuarantineDuration)
+	quarantineEnds := int64(c.Storage.Quarantine.QuarantineStarts) + int64(c.Storage.ClosingConfig.QuarantineDuration)
 	if quarantineEnds > now {
 		return ChannelStatusClosureStarted
 	}
-	if quarantineEnds+int64(s.ClosingConfig.ConditionalCloseDuration) > now {
+	if quarantineEnds+int64(c.Storage.ClosingConfig.ConditionalCloseDuration) > now {
 		return ChannelStatusSettlingConditionals
 	}
 	return ChannelStatusAwaitingFinalization

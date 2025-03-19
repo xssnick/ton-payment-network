@@ -213,11 +213,14 @@ Connects to neighbour node by its key and deploys onchain channel contract with 
 
 Requires body parameters: `with_node` - hex neighbour node key, `capacity` - amount of ton to add to initial balance.
 
+Optional body parameters: `jetton_master` - jetton master address, if not specified payment channel will use ton.
+
 Request:
 ```json
 {
   "with_node": "3e4c462d14277d25e89b063e4df4e0476d4f5729c11da0ea716d7003cc6ba26c",
-  "capacity": "5.52"
+  "capacity": "5.52",
+  "jetton_master": "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
 }
 ```
 

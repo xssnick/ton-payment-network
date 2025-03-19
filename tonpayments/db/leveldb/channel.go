@@ -12,8 +12,12 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
-	"sync"
+	"time"
 )
+
+func (d *DB) SetOnChannelUpdated(f func(ch *db.Channel)) {
+	d.onChannelStateChange = f
+}
 
 func (d *DB) CreateChannel(ctx context.Context, channel *db.Channel) error {
 	key := []byte("ch:" + channel.Address)
@@ -29,6 +33,7 @@ func (d *DB) CreateChannel(ctx context.Context, channel *db.Channel) error {
 			return db.ErrAlreadyExists
 		}
 
+		channel.DBVersion = time.Now().UnixNano()
 		data, err := json.Marshal(channel)
 		if err != nil {
 			return fmt.Errorf("failed to encode json: %w", err)
@@ -38,6 +43,10 @@ func (d *DB) CreateChannel(ctx context.Context, channel *db.Channel) error {
 			Sync: true,
 		}); err != nil {
 			return fmt.Errorf("failed to put: %w", err)
+		}
+
+		if d.onChannelStateChange != nil {
+			d.onChannelStateChange(channel)
 		}
 		return nil
 	})
@@ -49,14 +58,16 @@ func (d *DB) UpdateChannel(ctx context.Context, channel *db.Channel) error {
 	return d.Transaction(ctx, func(ctx context.Context) error {
 		tx := d.getExecutor(ctx)
 
-		has, err := tx.Has(key, nil)
+		curChannel, err := d.GetChannel(ctx, channel.Address)
 		if err != nil {
-			return fmt.Errorf("failed to check existance: %w", err)
-		}
-		if !has {
-			return db.ErrNotFound
+			return fmt.Errorf("failed to get channel: %w", err)
 		}
 
+		if curChannel.DBVersion != channel.DBVersion {
+			return fmt.Errorf("version mismatch retry changes (current %d, update %d)", curChannel.DBVersion, channel.DBVersion)
+		}
+
+		channel.DBVersion = time.Now().UnixNano()
 		data, err := json.Marshal(channel)
 		if err != nil {
 			return fmt.Errorf("failed to encode json: %w", err)
@@ -67,6 +78,11 @@ func (d *DB) UpdateChannel(ctx context.Context, channel *db.Channel) error {
 		}); err != nil {
 			return fmt.Errorf("failed to put: %w", err)
 		}
+
+		if d.onChannelStateChange != nil && curChannel.Status != channel.Status {
+			d.onChannelStateChange(channel)
+		}
+
 		return nil
 	})
 }
@@ -134,22 +150,4 @@ func (d *DB) GetChannels(ctx context.Context, key ed25519.PublicKey, status db.C
 	}
 
 	return channels, nil
-}
-
-func (d *DB) AcquireChannelLock(_ context.Context, addr string) (func(), error) {
-	d.mx.Lock()
-	l, ok := d.channelLocks[addr]
-	if !ok {
-		l = &sync.Mutex{}
-		d.channelLocks[addr] = l
-	}
-	d.mx.Unlock()
-
-	if !l.TryLock() {
-		return nil, db.ErrChannelBusy
-	}
-
-	return func() {
-		l.Unlock()
-	}, nil
 }

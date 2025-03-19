@@ -13,6 +13,7 @@ import (
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
+	"github.com/xssnick/tonutils-go/ton/jetton"
 	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
@@ -37,17 +38,17 @@ func (s *Service) ListChannels(ctx context.Context, key ed25519.PublicKey, statu
 	return channels, nil
 }
 
-func (s *Service) DeployChannelWithNode(ctx context.Context, capacity tlb.Coins, nodeKey ed25519.PublicKey) (*address.Address, error) {
+func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error) {
 	cfg, err := s.transport.GetChannelConfig(ctx, nodeKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get channel config: %w", err)
 	}
 
 	log.Info().Msg("starting channel deploy")
-	return s.deployChannelWithNode(ctx, nodeKey, address.NewAddress(0, 0, cfg.WalletAddr), capacity)
+	return s.deployChannelWithNode(ctx, nodeKey, address.NewAddress(0, 0, cfg.WalletAddr), jettonMaster, ecID)
 }
 
-func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, nodeAddr *address.Address, capacity tlb.Coins) (*address.Address, error) {
+func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, nodeAddr *address.Address, jettonMaster *address.Address, ecID uint32) (*address.Address, error) {
 	channelId := make([]byte, 16)
 	copy(channelId, nodeKey[:15])
 
@@ -85,23 +86,59 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		return nil, fmt.Errorf("too many channels are already open")
 	}
 
-	body, code, data, err := s.contractMaker.GetDeployAsyncChannelParams(channelId, true, capacity, s.key, nodeKey, s.closingConfig, payments.PaymentConfig{
-		ExcessFee: s.excessFee,
-		DestA:     s.wallet.WalletAddress(),
-		DestB:     nodeAddr,
-	})
+	pc := payments.PaymentConfig{
+		StorageFee:     s.excessFee,
+		DestA:          s.wallet.WalletAddress(),
+		DestB:          nodeAddr,
+		CurrencyConfig: payments.CurrencyConfigTon{},
+	}
+
+	if jettonMaster != nil {
+		pc.CurrencyConfig = payments.CurrencyConfigJetton{
+			Info: payments.CurrencyConfigJettonInfo{
+				Master: jettonMaster,
+				Wallet: nil,
+			},
+		}
+	} else if ecID > 0 {
+		pc.CurrencyConfig = payments.CurrencyConfigEC{
+			ID: ecID,
+		}
+	}
+
+	body, code, data, err := s.contractMaker.GetDeployAsyncChannelParams(channelId, true, s.key, nodeKey, s.closingConfig, pc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get deploy params: %w", err)
 	}
 
-	amt := new(big.Int).Add(capacity.Nano(), tlb.MustFromTON("0.05").Nano())
+	state := &tlb.StateInit{
+		Data: code,
+		Code: data,
+	}
+	accAddr := state.CalcAddress(0)
 
-	addr, tx, _, err := s.wallet.DeployContractWaitTransaction(ctx, tlb.FromNanoTON(amt), body, code, data)
+	if s.discoverChannel(state.CalcAddress(0)) {
+		return accAddr, nil
+	}
+
+	addr, tx, _, err := s.wallet.DeployContractWaitTransaction(ctx, tlb.MustFromTON("0.4"), body, code, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deploy: %w", err)
 	}
 
 	log.Info().Str("addr", addr.String()).Hex("tx", tx.Hash).Msg("contract deployed")
+
+	for !s.discoverChannel(addr) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+			log.Info().Str("addr", addr.String()).Msg("waiting for channel discovery")
+		}
+	}
+
+	log.Info().Str("addr", addr.String()).Msg("channel discovered")
+
 	return addr, nil
 }
 
@@ -181,7 +218,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 			return fmt.Errorf("failed to load channel: %w", err)
 		}
 
-		_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
+		_, vch, err := payments.FindVirtualChannel(ch.Their.Conditionals, virtualKey)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
 				// idempotency
@@ -209,7 +246,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 			return fmt.Errorf("failed to load channel: %w", err)
 		}
 
-		_, vch, err := ch.Our.State.FindVirtualChannel(virtualKey)
+		_, vch, err := payments.FindVirtualChannel(ch.Our.Conditionals, virtualKey)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
 				// idempotency
@@ -247,7 +284,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 }
 
 func (s *Service) RequestUncooperativeClose(ctx context.Context, addr string) error {
-	channel, err := s.GetActiveChannel(addr)
+	channel, err := s.GetActiveChannel(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -263,7 +300,52 @@ func (s *Service) RequestUncooperativeClose(ctx context.Context, addr string) er
 	return nil
 }
 
+func (s *Service) TopupChannel(ctx context.Context, addr *address.Address, amount tlb.Coins) error {
+	channel, err := s.GetActiveChannel(ctx, addr.Bounce(true).String())
+	if err != nil {
+		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "topup", channel.Address+"-topup",
+		"topup-"+channel.Address+"-"+fmt.Sprint(time.Now().Unix()),
+		db.TopupTask{
+			Address:            channel.Address,
+			AmountNano:         amount.Nano().String(),
+			ChannelInitiatedAt: channel.InitAt,
+		}, nil, nil,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins) error {
+	channel, err := s.GetActiveChannel(ctx, addr.Bounce(true).String())
+	if err != nil {
+		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if _, _, _, err = s.getCommitRequest(amount, tlb.MustFromTON("0"), channel); err != nil {
+		return fmt.Errorf("failed to prepare close channel request: %w", err)
+	}
+
+	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "withdraw", channel.Address+"-withdraw",
+		"withdraw-"+channel.Address+"-"+fmt.Sprint(channel.InitAt.Unix())+fmt.Sprintf("-%d-%d", channel.Their.State.Data.Seqno, channel.Our.State.Data.Seqno),
+		db.WithdrawTask{
+			Address:            channel.Address,
+			AmountNano:         amount.Nano().String(),
+			ChannelInitiatedAt: channel.InitAt,
+		}, nil, nil,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey) error {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
 	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -276,21 +358,15 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		return fmt.Errorf("cannot close outgoing channel")
 	}
 
-	unlock, err := s.db.AcquireChannelLock(ctx, meta.Incoming.ChannelAddress)
-	if err != nil {
-		return fmt.Errorf("failed to acquire channel lock: %w", err)
-	}
-	defer unlock()
-
-	ch, err := s.db.GetChannel(ctx, meta.Incoming.ChannelAddress)
+	ch, err := s.GetActiveChannel(ctx, meta.Incoming.ChannelAddress)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			return fmt.Errorf("onchain channel with source not exists")
+			return fmt.Errorf("onchain channel with source is not active")
 		}
-		return fmt.Errorf("failed to load channel: %w", err)
+		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	_, vch, err := ch.Their.State.FindVirtualChannel(virtualKey)
+	_, vch, err := payments.FindVirtualChannel(ch.Their.Conditionals, virtualKey)
 	if err != nil {
 		if errors.Is(err, payments.ErrNotFound) {
 			// idempotency
@@ -304,11 +380,6 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 	state := meta.GetKnownResolve(vch.Key)
 	if state == nil {
 		return ErrNoResolveExists
-	}
-
-	stateCell, err := state.ToCell()
-	if err != nil {
-		return fmt.Errorf("failed to serialize state to cell: %w", err)
 	}
 
 	meta.Status = db.VirtualChannelStateWantClose
@@ -335,43 +406,50 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 			CheckVirtualStillExists: vch.Key,
 		}, &uncooperativeAfter, nil,
 	); err != nil {
-		log.Warn().Err(err).Str("channel", ch.Address).Msg("failed to create uncooperative close task")
+		log.Warn().Err(err).Str("channel", ch.Address).Hex("key", vch.Key).Msg("failed to create uncooperative close task")
 	}
 
-	if err = s.requestAction(ctx, ch.Address, transport.CloseVirtualAction{
-		Key:   vch.Key,
-		State: stateCell,
-	}); err != nil {
-		return fmt.Errorf("failed to request action from the node: %w", err)
+	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-close-virtual", ch.Address+"-coop",
+		"virtual-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
+		db.AskCloseVirtualTask{
+			Key:            vch.Key,
+			ChannelAddress: ch.Address,
+		}, nil, &uncooperativeAfter,
+	); err != nil {
+		log.Warn().Err(err).Str("channel", ch.Address).Hex("key", vch.Key).Msg("failed to create cooperative close task")
 	}
+
+	log.Info().Err(err).Str("channel", ch.Address).Hex("key", vch.Key).Msg("virtual channel close task created and will be executed soon")
+
 	return nil
 }
 
-func (s *Service) executeCooperativeClose(ctx context.Context, partyReq *payments.CooperativeClose, channelAddr string) error {
-	ourReq, channel, err := s.getCooperativeCloseRequest(channelAddr, partyReq)
-	if err != nil {
-		return fmt.Errorf("failed to prepare close channel request: %w", err)
-	}
-
-	channel.AcceptingActions = false
-	if err = s.db.UpdateChannel(ctx, channel); err != nil {
-		return fmt.Errorf("failed to update channel: %w", err)
-	}
-
-	// TODO: send external in worker and wait result
-
-	msg, err := tlb.ToCell(ourReq)
+func (s *Service) executeCooperativeCommit(ctx context.Context, req *payments.CooperativeCommit, ch *db.Channel) error {
+	msg, err := tlb.ToCell(req)
 	if err != nil {
 		return fmt.Errorf("failed to serialize close channel request: %w", err)
 	}
 
-	err = s.ton.SendExternalMessage(ctx, &tlb.ExternalMessage{
-		DstAddr: address.MustParseAddr(channel.Address),
-		Body:    msg,
-	})
+	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(ch.Address), tlb.MustFromTON("0.16"), msg))
 	if err != nil {
-		return fmt.Errorf("failed to send external message to channel: %w", err)
+		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
+	log.Info().Hex("hash", tx.Hash).Msg("cooperative commit transaction completed")
+	return nil
+}
+
+func (s *Service) executeCooperativeClose(ctx context.Context, req *payments.CooperativeClose, channel *db.Channel) error {
+	msg, err := tlb.ToCell(req)
+	if err != nil {
+		return fmt.Errorf("failed to serialize close channel request: %w", err)
+	}
+
+	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msg))
+	if err != nil {
+		return fmt.Errorf("failed to send internal message to channel: %w", err)
+	}
+	log.Info().Hex("hash", tx.Hash).Msg("cooperative close transaction completed")
+
 	return nil
 }
 
@@ -379,8 +457,12 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
-	_, ch, err := s.getCooperativeCloseRequest(channelAddr, nil)
+	ch, err := s.GetActiveChannel(ctx, channelAddr)
 	if err != nil {
+		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if _, _, _, err = s.getCooperativeCloseRequest(ch); err != nil {
 		return fmt.Errorf("failed to prepare close channel request: %w", err)
 	}
 
@@ -392,9 +474,9 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 
 		if err = s.db.CreateTask(ctx, PaymentsTaskPool, "cooperative-close", ch.Address,
 			"cooperative-close-"+ch.Address+"-"+fmt.Sprint(ch.InitAt.Unix()),
-			db.ChannelUncooperativeCloseTask{
+			db.ChannelCooperativeCloseTask{
 				Address:            ch.Address,
-				ChannelInitiatedAt: &ch.InitAt,
+				ChannelInitiatedAt: ch.InitAt,
 			}, nil, nil,
 		); err != nil {
 			return fmt.Errorf("failed to create cooperative close task: %w", err)
@@ -414,44 +496,104 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 	})
 }
 
-func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payments.CooperativeClose) (*payments.CooperativeClose, *db.Channel, error) {
-	channel, err := s.GetActiveChannel(channelAddr)
+func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel *db.Channel) (*payments.CooperativeCommit, *cell.Cell, []byte, error) {
+	if channel.Our.PendingWithdraw.Sign() != 0 {
+		return nil, nil, nil, fmt.Errorf("our withdraw is not zero")
+	}
+	if channel.Their.PendingWithdraw.Sign() != 0 {
+		return nil, nil, nil, fmt.Errorf("their withdraw is not zero")
+	}
+
+	// this is not locked balance
+	ourBalance, err := channel.CalcBalance(false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get channel: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to calc our balance: %w", err)
 	}
 
-	for _, kv := range channel.Our.State.Data.Conditionals.All() {
+	theirBalance, err := channel.CalcBalance(true)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to calc their balance: %w", err)
+	}
+
+	if ourWithdraw.Nano().Cmp(ourBalance) > 0 {
+		return nil, nil, nil, fmt.Errorf("our withdraw is greater than balance")
+	}
+	if theirWithdraw.Nano().Cmp(theirBalance) > 0 {
+		return nil, nil, nil, fmt.Errorf("their withdraw is greater than balance")
+	}
+
+	var ourReq payments.CooperativeCommit
+	ourReq.Signed.ChannelID = channel.ID
+	ourReq.Signed.BalanceA = tlb.FromNanoTON(ourBalance)
+	ourReq.Signed.BalanceB = tlb.FromNanoTON(theirBalance)
+	ourReq.Signed.SeqnoA = channel.Our.State.Data.Seqno + 1
+	ourReq.Signed.SeqnoB = channel.Their.State.Data.Seqno + 1
+	ourReq.Signed.WithdrawA = ourWithdraw
+	ourReq.Signed.WithdrawB = theirWithdraw
+	if !channel.WeLeft {
+		ourReq.Signed.WithdrawA, ourReq.Signed.WithdrawB = ourReq.Signed.WithdrawB, ourReq.Signed.WithdrawA
+		ourReq.Signed.BalanceA, ourReq.Signed.BalanceB = ourReq.Signed.BalanceB, ourReq.Signed.BalanceA
+		ourReq.Signed.SeqnoA, ourReq.Signed.SeqnoB = ourReq.Signed.SeqnoB, ourReq.Signed.SeqnoA
+	}
+	dataCell, err := tlb.ToCell(ourReq.Signed)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to serialize body to cell: %w", err)
+	}
+
+	signature := dataCell.Sign(s.key)
+	ourReq.SignatureA.Value = signature
+	ourReq.SignatureB.Value = make([]byte, 64)
+
+	if !channel.WeLeft {
+		ourReq.SignatureA.Value, ourReq.SignatureB.Value = ourReq.SignatureB.Value, ourReq.SignatureA.Value
+	}
+
+	return &ourReq, dataCell, signature, nil
+}
+
+func (s *Service) getCooperativeCloseRequest(channel *db.Channel) (*payments.CooperativeClose, *cell.Cell, []byte, error) {
+	allOur, err := channel.Our.Conditionals.LoadAll()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to load our cond dict: %w", err)
+	}
+
+	for _, kv := range allOur {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
+			return nil, nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
 		}
 
 		// if condition is not expired we cannot close onchain channel
 		if vch.Deadline >= time.Now().Unix() {
-			return nil, nil, fmt.Errorf("conditionals should be resolved before cooperative close")
+			return nil, nil, nil, fmt.Errorf("conditionals should be resolved before cooperative close")
 		}
 	}
 
-	for _, kv := range channel.Their.State.Data.Conditionals.All() {
+	allTheir, err := channel.Their.Conditionals.LoadAll()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to load their cond dict: %w", err)
+	}
+
+	for _, kv := range allTheir {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
+			return nil, nil, nil, fmt.Errorf("failed to patse state of one of virtual channels")
 		}
 
 		// if condition is not expired we cannot close onchain channel
 		if vch.Deadline >= time.Now().Unix() {
-			return nil, nil, fmt.Errorf("conditionals should be resolved before cooperative close")
+			return nil, nil, nil, fmt.Errorf("conditionals should be resolved before cooperative close")
 		}
 	}
 
 	ourBalance, err := channel.CalcBalance(false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to calc our balance: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to calc our balance: %w", err)
 	}
 
 	theirBalance, err := channel.CalcBalance(true)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to calc their balance: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to calc their balance: %w", err)
 	}
 
 	var ourReq payments.CooperativeClose
@@ -466,33 +608,22 @@ func (s *Service) getCooperativeCloseRequest(channelAddr string, partyReq *payme
 	}
 	dataCell, err := tlb.ToCell(ourReq.Signed)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to serialize body to cell: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to serialize body to cell: %w", err)
 	}
 
-	ourReq.SignatureA.Value = dataCell.Sign(s.key)
-	if partyReq == nil {
-		ourReq.SignatureB.Value = make([]byte, 64)
-	} else {
-		if !channel.WeLeft {
-			ourReq.SignatureB = partyReq.SignatureA
-		} else {
-			ourReq.SignatureB = partyReq.SignatureB
-		}
-
-		if !dataCell.Verify(channel.TheirOnchain.Key, ourReq.SignatureB.Value) {
-			return nil, nil, fmt.Errorf("incorrect party signature")
-		}
-	}
+	signature := dataCell.Sign(s.key)
+	ourReq.SignatureA.Value = signature
+	ourReq.SignatureB.Value = make([]byte, 64)
 
 	if !channel.WeLeft {
 		ourReq.SignatureA.Value, ourReq.SignatureB.Value = ourReq.SignatureB.Value, ourReq.SignatureA.Value
 	}
 
-	return &ourReq, channel, nil
+	return &ourReq, dataCell, signature, nil
 }
 
 func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr string) error {
-	channel, err := s.GetActiveChannel(channelAddr)
+	channel, err := s.GetActiveChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -552,7 +683,7 @@ func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr strin
 }
 
 func (s *Service) challengeChannelState(ctx context.Context, channelAddr string) error {
-	channel, err := s.getVerifiedChannel(channelAddr)
+	channel, err := s.db.GetChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -595,20 +726,18 @@ func (s *Service) challengeChannelState(ctx context.Context, channelAddr string)
 		return fmt.Errorf("failed to serialize message to cell: %w", err)
 	}
 
-	err = s.ton.SendExternalMessage(ctx, &tlb.ExternalMessage{
-		DstAddr: address.MustParseAddr(channel.Address),
-		Body:    msgCell,
-	})
+	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
 	if err != nil {
-		return fmt.Errorf("failed to send external message to channel: %w", err)
+		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
+	log.Info().Hex("hash", tx.Hash).Msg("challenge channel state transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
 }
 
 func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAddr string) error {
-	channel, err := s.getVerifiedChannel(channelAddr)
+	channel, err := s.db.GetChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -633,25 +762,30 @@ func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAd
 		return fmt.Errorf("failed to serialize message to cell: %w", err)
 	}
 
-	err = s.ton.SendExternalMessage(ctx, &tlb.ExternalMessage{
-		DstAddr: address.MustParseAddr(channel.Address),
-		Body:    msgCell,
-	})
+	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
 	if err != nil {
-		return fmt.Errorf("failed to send external message to channel: %w", err)
+		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
+	log.Info().Hex("hash", tx.Hash).Msg("finish uncooperative close transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
 }
 
 func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr string) error {
-	channel, err := s.getVerifiedChannel(channelAddr)
+	const messagesPerTransaction = 20
+	const conditionsPerMessage = 30
+
+	log.Info().Str("address", channelAddr).Msg("settling conditionals")
+
+	channel, err := s.db.GetChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	if channel.Their.State.Data.Conditionals.Size() == 0 {
+	if channel.Their.Conditionals.IsEmpty() {
+		log.Info().Str("address", channel.Address).
+			Msg("nothing to settle, empty their conditionals")
 		return nil
 	}
 
@@ -675,10 +809,46 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 		IsFromA: channel.WeLeft,
 	}
 	msg.Signed.ChannelID = channel.ID
-	msg.Signed.B = channel.Their.SignedSemiChannel
 	msg.Signed.ConditionalsToSettle = cell.NewDict(32)
+
 	// TODO: get all conditions and make inputs for known
-	for _, kv := range channel.Their.State.Data.Conditionals.All() {
+	all, err := channel.Their.Conditionals.LoadAll()
+	if err != nil {
+		return fmt.Errorf("failed to load their conditions dict: %w", err)
+	}
+
+	var messages []*cell.Cell
+	var resolved int
+
+	addMessage := func(data payments.SettleConditionals, proofPath *cell.ProofSkeleton, num int) error {
+		dictProof, err := channel.Their.Conditionals.AsCell().CreateProof(proofPath)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to find proof path for virtual channel")
+			return err
+		}
+
+		data.Signed.ConditionalsProof = dictProof
+
+		dataCell, err := tlb.ToCell(data.Signed)
+		if err != nil {
+			return fmt.Errorf("failed to serialize body to cell: %w", err)
+		}
+		data.Signature.Value = dataCell.Sign(s.key)
+
+		msgCell, err := tlb.ToCell(data)
+		if err != nil {
+			return fmt.Errorf("failed to serialize message to cell: %w", err)
+		}
+
+		messages = append(messages, msgCell)
+		return nil
+	}
+
+	updatedState := channel.Their.Conditionals.Copy()
+
+	condNum := 0
+	proofPath := cell.CreateProofSkeleton()
+	for _, kv := range all {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to parse virtual channel")
@@ -698,42 +868,172 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 				continue
 			}
 
-			if err = msg.Signed.ConditionalsToSettle.Set(kv.Key, rc); err != nil {
+			if err = msg.Signed.ConditionalsToSettle.Set(kv.Key.MustToCell(), rc); err != nil {
 				log.Warn().Err(err).Msg("failed to store known virtual channel state in request")
 				continue
 			}
+
+			_, sk, err := channel.Their.Conditionals.LoadValueWithProof(kv.Key.MustToCell(), proofPath)
+			if err != nil {
+				log.Warn().Err(err).Msg("failed to find proof path for virtual channel")
+				continue
+			}
+			sk.SetRecursive() // we need full value in proof
+			condNum++
+
+			// replace value to empty cell, we need 2 dictionaries: before and after, to save and continue
+			if err = updatedState.Set(kv.Key.MustToCell(), cell.BeginCell().EndCell()); err != nil {
+				log.Warn().Err(err).Msg("failed to replace virtual channel in conditionals")
+				continue
+			}
+
+			if condNum == conditionsPerMessage {
+				if err := addMessage(msg, proofPath, condNum); err != nil {
+					log.Warn().Err(err).Msg("failed to add settle message")
+					return err
+				}
+
+				condNum = 0
+				proofPath = cell.CreateProofSkeleton()
+				msg.Signed.ConditionalsToSettle = cell.NewDict(32)
+				channel.Their.Conditionals = updatedState.Copy()
+			}
+			resolved++
+		}
+	}
+
+	if condNum%conditionsPerMessage != 0 {
+		if err := addMessage(msg, proofPath, condNum); err != nil {
+			log.Warn().Err(err).Msg("failed to add settle last message")
+			return err
 		}
 	}
 
 	// TODO: maybe wait for some deadline if not all states resolved, before settle
-	if msg.Signed.ConditionalsToSettle.Size() == 0 {
+	if len(messages) == 0 {
 		log.Warn().Msg("no known resolves for existing conditions")
 		return nil
 	}
 
-	if msg.Signed.ConditionalsToSettle.Size() != channel.Their.State.Data.Conditionals.Size() {
+	if resolved != len(all) {
 		log.Warn().
-			Int("with_resolves", msg.Signed.ConditionalsToSettle.Size()).
-			Int("all", channel.Their.State.Data.Conditionals.Size()).
+			Int("with_resolves", resolved).
+			Int("all", len(all)).
 			Msg("not all conditions has resolves yet, settling as is")
 	}
 
-	dataCell, err := tlb.ToCell(msg.Signed)
-	if err != nil {
-		return fmt.Errorf("failed to serialize body to cell: %w", err)
+	steps := len(messages) / messagesPerTransaction
+	if len(messages)%messagesPerTransaction > 0 {
+		steps++
 	}
-	msg.Signature.Value = dataCell.Sign(s.key)
 
-	msgCell, err := tlb.ToCell(msg)
+	log.Info().Str("address", channel.Address).Int("steps", steps).Msg("calculated settle steps")
+
+	for i := 0; i < steps; i++ {
+		to := (i + 1) * messagesPerTransaction
+		if to > len(messages) {
+			to = len(messages)
+		}
+
+		var list [][]byte
+		for _, c := range messages[i*messagesPerTransaction : to] {
+			list = append(list, c.ToBOC())
+		}
+
+		if err = s.db.CreateTask(ctx, PaymentsTaskPool, "settle-step", channel.Address+"-settle",
+			"settle-"+channel.Address+"-"+fmt.Sprint(i),
+			db.SettleStepTask{
+				Step:               i,
+				Address:            channel.Address,
+				Messages:           list,
+				ChannelInitiatedAt: &channel.InitAt,
+			}, nil, nil,
+		); err != nil {
+			log.Error().Err(err).Str("channel", channel.Address).Msg("failed to create settle step task")
+		}
+
+		log.Info().Str("address", channel.Address).Int("step", i).Msg("settle step created")
+	}
+
+	return nil
+}
+
+func (s *Service) executeSettleStep(ctx context.Context, channelAddr string, messages []*cell.Cell, step int) error {
+	log.Info().Str("address", channelAddr).Int("step", step).Msg("executing settle step...")
+
+	var list []*wallet.Message
+	for _, message := range messages {
+		list = append(list, wallet.SimpleMessage(address.MustParseAddr(channelAddr), tlb.MustFromTON("0.5"), message))
+	}
+
+	tx, _, err := s.wallet.SendManyWaitTransaction(ctx, list)
+	if err != nil {
+		return fmt.Errorf("failed to send internal messages to channel: %w", err)
+	}
+	log.Info().Hex("hash", tx.Hash).Int("step", step).Int("messages", len(list)).Msg("settle conditions step transaction completed")
+
+	// TODO: wait event from invalidator here to confirm
+	return nil
+}
+
+func (s *Service) executeTopup(ctx context.Context, channelAddr string, amount tlb.Coins) error {
+	log.Info().Str("address", channelAddr).Msg("executing topup...")
+
+	if amount.Nano().Sign() <= 0 {
+		// zero
+		return nil
+	}
+
+	channel, err := s.db.GetChannel(ctx, channelAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if channel.Status != db.ChannelStateActive {
+		log.Warn().Str("address", channelAddr).Msg("skip topup, channel is not active")
+		return nil
+	}
+
+	c, err := tlb.ToCell(payments.TopupBalance{
+		IsA: channel.WeLeft,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to serialize message to cell: %w", err)
 	}
 
-	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
-	if err != nil {
-		return fmt.Errorf("failed to send internal message to channel: %w", err)
+	var msg *wallet.Message
+	if channel.JettonAddress != "" {
+		master := jetton.NewJettonMasterClient(s.ton, address.MustParseAddr(channel.JettonAddress))
+
+		jw, err := master.GetJettonWallet(ctx, s.wallet.WalletAddress())
+		if err != nil {
+			return fmt.Errorf("failed to get jetton wallet: %w", err)
+		}
+
+		tp, err := jw.BuildTransferPayloadV2(address.MustParseAddr(channelAddr), s.wallet.WalletAddress(), amount, tlb.MustFromTON("0.035"), c, nil)
+		if err != nil {
+			return fmt.Errorf("failed to build transfer payload: %w", err)
+		}
+		msg = wallet.SimpleMessage(jw.Address(), tlb.MustFromTON("0.07"), tp)
+	} else if channel.ExtraCurrencyID > 0 {
+		msg = wallet.SimpleMessage(address.MustParseAddr(channelAddr), tlb.MustFromTON("0.07"), c)
+		msg.InternalMessage.ExtraCurrencies = cell.NewDict(32)
+		_ = msg.InternalMessage.ExtraCurrencies.SetIntKey(big.NewInt(int64(channel.ExtraCurrencyID)), cell.BeginCell().MustStoreBigVarUInt(amount.Nano(), 32).EndCell())
+	} else {
+		// add ton accept fee
+		toSend, err := tlb.FromNano(new(big.Int).Add(amount.Nano(), tlb.MustFromTON("0.03").Nano()), 9)
+		if err != nil {
+			return fmt.Errorf("failed to convert amount to nano: %w", err)
+		}
+
+		msg = wallet.SimpleMessage(address.MustParseAddr(channelAddr), toSend, c)
 	}
-	log.Info().Hex("hash", tx.Hash).Msg("settle conditions transaction completed")
+
+	tx, _, err := s.wallet.SendManyWaitTransaction(ctx, []*wallet.Message{msg})
+	if err != nil {
+		return fmt.Errorf("failed to send internal messages to channel: %w", err)
+	}
+	log.Info().Hex("hash", tx.Hash).Msg("topup transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
