@@ -18,6 +18,7 @@ import (
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl"
+	adnlAddress "github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-go/tlb"
@@ -28,6 +29,7 @@ import (
 	"math"
 	"math/big"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -133,7 +135,18 @@ func main() {
 			return
 		}
 
-		gate.SetExternalIP(ip.To4())
+		addr, err := netip.ParseAddrPort(cfg.NodeListenAddr)
+		if err != nil {
+			log.Fatal().Msg("incorrect listen addr format")
+			return
+		}
+
+		gate.SetAddressList([]*adnlAddress.UDP{
+			{
+				IP:   ip,
+				Port: int32(addr.Port()),
+			},
+		})
 		if err := gate.StartServer(cfg.NodeListenAddr); err != nil {
 			log.Fatal().Err(err).Msg("failed to init adnl gateway")
 			return
