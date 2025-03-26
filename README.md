@@ -751,5 +751,5 @@ Once the contract is funded, the user can immediately start making **offchain pa
 
 The user can **top up their channel at any time**, and **withdraw coins back to their wallet** when needed.
 
-To request actions from your node (e.g., depositing to the user's wallet),  
+To request actions from your node (e.g., depositing to the channel contract),  
 you can use the **HTTP API** and **webhooks** as described above.
