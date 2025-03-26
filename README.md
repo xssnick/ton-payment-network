@@ -1,15 +1,69 @@
-<table>
-  <tr>
-    <td width="130">
-      <img src="https://github.com/user-attachments/assets/210ef0fe-8a50-4635-b068-090bdf03006c" width="125px">
-    </td>
-    <td>
-      <h1>TON Payment Network</h1>
-      <p>This is an implementation of a <strong>peer-to-peer payment network</strong> with <strong>multi-node routing</strong>, powered by the <strong>TON Blockchain</strong>.<br>
-      More powerful than Lightning!</p>
-    </td>
-  </tr>
-</table>
+
+# TON Payment Network
+<img style="margin-top: 50px;" align="right" src="https://github.com/user-attachments/assets/ff51e55e-2cfe-4fcf-9100-3d62c6fc5a1b" width="430px">
+
+This is an implementation of a **peer-to-peer payment network** with **multi-node routing**, powered by the TON Blockchain.
+More powerful than Lightning!
+
+## General Description
+
+TON Payment Network is a fast, scalable, and low-cost peer-to-peer payment system built on top of the TON Blockchain.  
+It allows users to send and receive payments instantly, without paying fees for every transaction on the blockchain.
+
+Instead of writing every transaction into the blockchain, the system uses **payment channels** between nodes. These channels allow users to make thousands of offchain payments that are fast, secure, and cost nothing — until it becomes necessary to settle onchain.
+
+---
+
+### How It Works
+
+The network is made up of **payment nodes**. These are programs that connect to each other, create channels, and exchange payments.  
+Nodes can be run by individual users or businesses. They can also be integrated into apps and services like TON Storage or TON Proxy to allow automated payments.
+
+There are two types of channels:
+
+- **Onchain channels**: These are smart contracts deployed to the TON blockchain. Two nodes each deposit coins into the contract and create a trusted connection. This is the foundation of the network.
+  
+- **Virtual channels**: These are temporary, offchain paths created through existing onchain channels.  
+  For example, if Alice has a channel with Bob, and Bob has one with Charlie, then Alice can send money to Charlie through a **virtual channel**: `Alice → Bob → Charlie`.
+
+No new smart contracts are needed for this — it’s fast and completely offchain.
+
+---
+
+### Security and Conditional Payments
+
+Payments through virtual channels are protected by **cryptographic guarantees**. When a user sends money, they don’t transfer coins immediately. Instead, they give the middle node a **signed promise**, which can only be completed if the next node confirms receipt.
+
+This is possible thanks to **conditional payments**, where each node in the chain only forwards the value if the next node confirms everything is correct.  
+
+If one of the nodes misbehaves — for example, they break the agreement or stop responding — the system can **fall back to the blockchain**, submit the cryptographic proof, and recover the funds. No one can steal or lose money.
+
+---
+
+### Privacy by Design
+
+The full path of a payment is only known to the sender who builds the route.  
+Each middle node knows only:
+
+- Who sent the request
+- Who they should forward it to
+
+To protect this structure, the payment path is wrapped in layers of encryption (like **Garlic routing**), so no node can see the full chain.
+
+Dummy data is also added to make it harder to analyze the path.
+
+---
+
+### Performance and Scalability
+
+- Opening and using virtual channels takes only **milliseconds**
+- All important operations are **queued and stored safely** using a fast embedded database
+- The system is written in **pure Go**, which means it’s **cross-platform** and runs anywhere — even on mobile
+
+---
+
+TON Payment Network combines the speed of offchain payments with the security of blockchain.  
+It’s designed for a world where fast, private, and cheap payments are the default.
 
 ## Technical Description
 
