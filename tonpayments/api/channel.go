@@ -9,6 +9,7 @@ import (
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
+	"math/big"
 	"net/http"
 	"time"
 )
@@ -17,6 +18,7 @@ type Onchain struct {
 	CommittedSeqno uint32 `json:"committed_seqno"`
 	WalletAddress  string `json:"wallet_address"`
 	Deposited      string `json:"deposited"`
+	Withdrawn      string `json:"withdrawn"`
 }
 
 type Side struct {
@@ -29,6 +31,7 @@ type OnchainChannel struct {
 	ID               string `json:"id"`
 	Address          string `json:"address"`
 	JettonAddress    string `json:"jetton_address"`
+	ExtraCurrencyID  uint32 `json:"ec_id"`
 	AcceptingActions bool   `json:"accepting_actions"`
 	Status           string `json:"status"`
 	WeLeft           bool   `json:"we_left"`
@@ -85,6 +88,80 @@ func (s *Server) handleChannelOpen(w http.ResponseWriter, r *http.Request) {
 	writeResp(w, response{
 		Address: addr.String(),
 	})
+}
+
+func (s *Server) handleTopup(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Address string `json:"address"`
+		Amount  string `json:"amount_nano"`
+	}
+
+	if r.Method != "POST" {
+		writeErr(w, 400, "incorrect request method")
+		return
+	}
+
+	var req request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "incorrect request body: "+err.Error())
+		return
+	}
+
+	amt, _ := new(big.Int).SetString(req.Amount, 10)
+	if amt == nil || amt.Sign() <= 0 || amt.BitLen() > 256 {
+		writeErr(w, 400, "incorrect amount format")
+		return
+	}
+
+	addr, err := address.ParseAddr(req.Address)
+	if err != nil {
+		writeErr(w, 400, "incorrect channel address format: "+err.Error())
+		return
+	}
+
+	if err = s.svc.TopupChannel(r.Context(), addr, tlb.FromNanoTON(amt)); err != nil {
+		writeErr(w, 500, "failed to topup channel: "+err.Error())
+		return
+	}
+
+	writeSuccess(w)
+}
+
+func (s *Server) handleWithdraw(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Address string `json:"address"`
+		Amount  string `json:"amount_nano"`
+	}
+
+	if r.Method != "POST" {
+		writeErr(w, 400, "incorrect request method")
+		return
+	}
+
+	var req request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "incorrect request body: "+err.Error())
+		return
+	}
+
+	amt, _ := new(big.Int).SetString(req.Amount, 10)
+	if amt == nil || amt.Sign() <= 0 || amt.BitLen() > 256 {
+		writeErr(w, 400, "incorrect amount format")
+		return
+	}
+
+	addr, err := address.ParseAddr(req.Address)
+	if err != nil {
+		writeErr(w, 400, "incorrect channel address format: "+err.Error())
+		return
+	}
+
+	if err = s.svc.RequestWithdraw(r.Context(), addr, tlb.FromNanoTON(amt)); err != nil {
+		writeErr(w, 500, "failed to request withdraw channel: "+err.Error())
+		return
+	}
+
+	writeSuccess(w)
 }
 
 func (s *Server) handleChannelClose(w http.ResponseWriter, r *http.Request) {
@@ -212,12 +289,14 @@ func (s *Server) handleChannelGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func convertChannel(c *db.Channel) (OnchainChannel, error) {
-	status := "inactive"
+	var status string
 	switch c.Status {
 	case db.ChannelStateActive:
 		status = "active"
 	case db.ChannelStateClosing:
 		status = "closing"
+	default:
+		status = "inactive"
 	}
 
 	theirBalance, err := c.CalcBalance(true)
@@ -233,6 +312,7 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 		ID:               hex.EncodeToString(c.ID),
 		Address:          c.Address,
 		JettonAddress:    c.JettonAddress,
+		ExtraCurrencyID:  c.ExtraCurrencyID,
 		AcceptingActions: c.AcceptingActions,
 		Status:           status,
 		WeLeft:           c.WeLeft,

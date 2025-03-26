@@ -315,20 +315,32 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to settle conditions, exit code: %d", comp.Details.ExitCode))
 	}
 
-	block, err = api.WaitForBlock(block.SeqNo + 5).GetMasterchainInfo(context.Background())
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
-	}
+	for i := 0; i < 10; i++ {
+		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+		}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		}
+		json.NewEncoder(os.Stdout).Encode(ch.Storage)
+
+		if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(tlb.MustFromTON("0.05").Nano()) != 0 ||
+			ch.Storage.Quarantine.StateA.Seqno != 3 || ch.Storage.Quarantine.StateB.Seqno != 2 {
+			continue
+		}
+
+		if ch.Status != ChannelStatusAwaitingFinalization {
+			continue
+		}
+		break
 	}
-	json.NewEncoder(os.Stdout).Encode(ch.Storage)
 
 	if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(tlb.MustFromTON("0.05").Nano()) != 0 ||
 		ch.Storage.Quarantine.StateA.Seqno != 3 || ch.Storage.Quarantine.StateB.Seqno != 2 {
-		t.Fatal(fmt.Errorf("incorrect state in quarantine"), ch.Storage.Quarantine.StateA.Sent.String(), ch.Storage.Quarantine.StateA.Seqno, ch.Storage.Quarantine.StateB.Seqno)
+		t.Fatal("channel seqno incorrect")
 	}
 
 	if ch.Status != ChannelStatusAwaitingFinalization {
@@ -526,7 +538,6 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		Capacity: tlb.MustFromTON("0.03").Nano(),
 		Fee:      tlb.MustFromTON("0.01").Nano(),
 		Deadline: time.Now().Add(5 * time.Minute).Unix(),
-		Comment:  cell.BeginCell().MustStoreUInt(0xD9, 8).MustStoreUInt(734962347842312921, 61).EndCell(),
 	}
 
 	_ = condA.SetIntKey(big.NewInt(0), vch.Serialize())
@@ -654,20 +665,32 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to settle conditions, exit code: %d", comp.Details.ExitCode))
 	}
 
-	block, err = api.WaitForBlock(block.SeqNo + 6).GetMasterchainInfo(context.Background())
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
-	}
+	for i := 0; i < 10; i++ {
+		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+		}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		}
+		json.NewEncoder(os.Stdout).Encode(ch.Storage)
+
+		if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(tlb.MustFromTON("0.05").Nano()) != 0 ||
+			ch.Storage.Quarantine.StateA.Seqno != 3 || ch.Storage.Quarantine.StateB.Seqno != 2 {
+			continue
+		}
+
+		if ch.Status != ChannelStatusAwaitingFinalization {
+			continue
+		}
+		break
 	}
-	json.NewEncoder(os.Stdout).Encode(ch.Storage)
 
 	if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(tlb.MustFromTON("0.05").Nano()) != 0 ||
 		ch.Storage.Quarantine.StateA.Seqno != 3 || ch.Storage.Quarantine.StateB.Seqno != 2 {
-		t.Fatal(fmt.Errorf("incorrect state in quarantine"))
+		t.Fatal("channel seqno incorrect")
 	}
 
 	if ch.Status != ChannelStatusAwaitingFinalization {
@@ -983,20 +1006,32 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to settle conditions, exit code: %d", comp.Details.ExitCode))
 	}
 
-	block, err = api.WaitForBlock(block.SeqNo + 6).GetMasterchainInfo(context.Background())
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
-	}
+	for i := 0; i < 10; i++ {
+		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+		}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		}
+		json.NewEncoder(os.Stdout).Encode(ch.Storage)
+
+		if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(big.NewInt(401)) != 0 ||
+			ch.Storage.Quarantine.StateA.Seqno != 3 || ch.Storage.Quarantine.StateB.Seqno != 2 {
+			continue
+		}
+
+		if ch.Status != ChannelStatusAwaitingFinalization {
+			continue
+		}
+		break
 	}
-	json.NewEncoder(os.Stdout).Encode(ch.Storage)
 
 	if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(big.NewInt(401)) != 0 ||
 		ch.Storage.Quarantine.StateA.Seqno != 3 || ch.Storage.Quarantine.StateB.Seqno != 2 {
-		t.Fatal(fmt.Errorf("incorrect state in quarantine"), ch.Storage.Quarantine.StateA.Sent.Nano().String(), ch.Storage.Quarantine.StateA.Seqno, ch.Storage.Quarantine.StateB.Seqno)
+		t.Fatal("channel seqno incorrect")
 	}
 
 	if ch.Status != ChannelStatusAwaitingFinalization {

@@ -106,11 +106,15 @@ type Service struct {
 	lockerMx         sync.Mutex
 	externalLockerMx sync.Mutex
 
+	whitelistedJettons map[string]bool
+	whitelistedEC      map[uint32]bool
+	isTonWhitelisted   bool
+
 	discoveryMx sync.Mutex
 }
 
-func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, cfg config.ChannelConfig) *Service {
-	return &Service{
+func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, cfg config.ChannelConfig, whitelist config.Whitelist) (*Service, error) {
+	s := &Service{
 		ton:                    api,
 		transport:              transport,
 		updates:                updates,
@@ -128,7 +132,25 @@ func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wa
 		virtualChannelsLimitPerChannel: 30000,
 		workerSignal:                   make(chan bool, 1),
 		channelLocks:                   map[string]*channelLock{},
+		whitelistedJettons:             map[string]bool{},
+		whitelistedEC:                  map[uint32]bool{},
+		isTonWhitelisted:               whitelist.AllowTonChannels,
 	}
+
+	for _, jetton := range whitelist.AllowedJettons {
+		a, err := address.ParseAddr(jetton)
+		if err != nil {
+			return nil, err
+		}
+
+		s.whitelistedJettons[a.Bounce(true).Testnet(false).String()] = true
+	}
+
+	for _, currency := range whitelist.AllowedExtraCurrencies {
+		s.whitelistedEC[currency] = true
+	}
+
+	return s, nil
 }
 
 func (s *Service) SetWebhook(webhook Webhook) {
@@ -166,6 +188,26 @@ func (s *Service) Start() {
 				log.Debug().Any("channel", upd.Channel).Msg("not verified")
 				continue
 			}
+
+			if upd.Channel.Storage.PaymentConfig.CurrencyConfig == nil && !s.isTonWhitelisted {
+				log.Debug().Any("channel", upd.Channel).Msg("not whitelisted ton")
+				continue
+			}
+
+			switch cc := upd.Channel.Storage.PaymentConfig.CurrencyConfig.(type) {
+			case payments.CurrencyConfigJetton:
+				a := cc.Info.Master.String()
+				if !s.whitelistedJettons[a] {
+					log.Debug().Any("channel", upd.Channel).Str("jetton", a).Msg("not whitelisted jetton")
+					continue
+				}
+			case payments.CurrencyConfigEC:
+				if !s.whitelistedEC[cc.ID] {
+					log.Debug().Any("channel", upd.Channel).Uint32("id", cc.ID).Msg("not whitelisted extra currency")
+					continue
+				}
+			}
+
 			log.Debug().Any("channel", upd.Channel).Msg("verified")
 
 		retry:

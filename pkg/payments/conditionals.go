@@ -15,8 +15,6 @@ type VirtualChannel struct {
 	Capacity *big.Int
 	Fee      *big.Int
 	Deadline int64
-
-	Comment *cell.Cell
 }
 
 type VirtualChannelState struct {
@@ -81,10 +79,8 @@ func (c *VirtualChannel) Serialize() *cell.Cell {
 		MustStoreBuilder(pushIntOP(c.Capacity)).
 		MustStoreBuilder(pushIntOP(big.NewInt(c.Deadline))).
 		MustStoreBuilder(pushIntOP(new(big.Int).SetBytes(c.Key))).
-		MustStoreSlice([]byte{0xDB, 0x3D}, 16). // JMPREF opcode to jump in ref, and not execute meta
 		// we pack immutable part of code to ref for better BoC compression and cheaper transactions
-		MustStoreRef(virtualChannelStaticCode).
-		MustStoreMaybeRef(c.Comment).
+		MustStoreRef(virtualChannelStaticCode). // implicit jump
 		EndCell()
 }
 
@@ -145,22 +141,8 @@ func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 		return nil, fmt.Errorf("incorrect code")
 	}
 
-	var comment *cell.Cell
-	if hasComment, err := s.LoadBoolBit(); err != nil {
-		return nil, fmt.Errorf("failed to parse meta: %w", err)
-	} else if hasComment {
-		comment, err = s.LoadRefCell()
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse meta: %w", err)
-		}
-	}
-
 	if s.BitsLeft() != 0 || s.RefsNum() != 0 {
 		return nil, fmt.Errorf("unexpected data in condition")
-	}
-
-	if comment != nil && comment.RefsNum() > 0 {
-		return nil, fmt.Errorf("refs in meta are not allowed")
 	}
 
 	return &VirtualChannel{
@@ -168,7 +150,6 @@ func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 		Capacity: capacity,
 		Fee:      fee,
 		Deadline: int64(deadline.Uint64()),
-		Comment:  comment,
 	}, nil
 }
 

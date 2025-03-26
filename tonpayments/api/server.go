@@ -35,6 +35,8 @@ type Service interface {
 	AddVirtualChannelResolve(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error
 	OpenVirtualChannel(ctx context.Context, with, instructionKey ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error
 	DeployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error)
+	TopupChannel(ctx context.Context, addr *address.Address, amount tlb.Coins) error
+	RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins) error
 }
 
 type Success struct {
@@ -75,6 +77,8 @@ func NewServer(addr, webhook, webhookKey string, svc Service, queue Queue, crede
 
 	mx := http.NewServeMux()
 	mx.HandleFunc("/api/v1/channel/onchain/open", s.checkCredentials(s.handleChannelOpen))
+	mx.HandleFunc("/api/v1/channel/onchain/topup", s.checkCredentials(s.handleTopup))
+	mx.HandleFunc("/api/v1/channel/onchain/withdraw", s.checkCredentials(s.handleWithdraw))
 	mx.HandleFunc("/api/v1/channel/onchain/close", s.checkCredentials(s.handleChannelClose))
 	mx.HandleFunc("/api/v1/channel/onchain/list", s.checkCredentials(s.handleChannelsList))
 	mx.HandleFunc("/api/v1/channel/onchain", s.checkCredentials(s.handleChannelGet))

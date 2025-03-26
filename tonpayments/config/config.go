@@ -22,6 +22,12 @@ type ChannelConfig struct {
 	ConditionalCloseDurationSec uint32
 }
 
+type Whitelist struct {
+	AllowTonChannels       bool
+	AllowedJettons         []string
+	AllowedExtraCurrencies []uint32
+}
+
 type Config struct {
 	ADNLServerKey                  ed25519.PrivateKey
 	PaymentNodePrivateKey          ed25519.PrivateKey
@@ -33,6 +39,7 @@ type Config struct {
 	DBPath                         string
 	SecureProofPolicy              bool
 	ChannelConfig                  ChannelConfig
+	Whitelist                      Whitelist
 }
 
 func checkIPAddress(ip string) string {
@@ -167,6 +174,11 @@ func LoadConfig(path string) (*Config, error) {
 				QuarantineDurationSec:       600,
 				MisbehaviorFine:             "0.15",
 				ConditionalCloseDurationSec: 180,
+			},
+			Whitelist: Whitelist{
+				AllowTonChannels:       true,
+				AllowedJettons:         []string{},
+				AllowedExtraCurrencies: []uint32{},
 			},
 		}
 

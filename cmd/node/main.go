@@ -32,6 +32,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -211,11 +212,13 @@ func main() {
 		}
 	}
 
+	walletAbstractSeqno := uint32(0)
 	w, err := wallet.FromPrivateKey(apiClient, cfg.PaymentNodePrivateKey, wallet.ConfigHighloadV3{
 		MessageTTL: 3*60 + 30,
 		MessageBuilder: func(ctx context.Context, subWalletId uint32) (id uint32, createdAt int64, err error) {
 			createdAt = time.Now().Unix() - 30 // something older than last master block, to pass through LS external's time validation
-			id = uint32(createdAt) % (1 << 23) // TODO: store seqno in db
+			// TODO: store seqno in db
+			id = uint32((createdAt%(3*60+30))<<15) | atomic.AddUint32(&walletAbstractSeqno, 1)%(1<<15)
 			return
 		},
 	})
@@ -225,7 +228,12 @@ func main() {
 	}
 	log.Info().Str("addr", w.WalletAddress().String()).Msg("wallet initialized")
 
-	svc := tonpayments.NewService(apiClient, fdb, tr, w, inv, cfg.PaymentNodePrivateKey, cfg.ChannelConfig)
+	svc, err := tonpayments.NewService(apiClient, fdb, tr, w, inv, cfg.PaymentNodePrivateKey, cfg.ChannelConfig, cfg.Whitelist)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to init service")
+		return
+	}
+
 	tr.SetService(svc)
 	log.Info().Hex("pubkey", cfg.PaymentNodePrivateKey.Public().(ed25519.PublicKey)).Msg("node initialized")
 

@@ -367,6 +367,10 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 					continue
 				}
 
+				if targetChannel.ExtraCurrencyID != channel.ExtraCurrencyID {
+					continue
+				}
+
 				balance, err := targetChannel.CalcBalance(false)
 				if err != nil {
 					return nil, fmt.Errorf("failed to calc our channel %s balance: %w", targetChannel.Address, err)
