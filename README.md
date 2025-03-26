@@ -1,9 +1,15 @@
-# TON Payment Network
-
-This is an implementation of a **peer-to-peer payment network** with **multi-node routing**, powered by the **TON Blockchain**.  
-More powerful than Lightning!
-
----
+<table>
+  <tr>
+    <td width="130">
+      <img src="https://github.com/user-attachments/assets/210ef0fe-8a50-4635-b068-090bdf03006c" width="125px">
+    </td>
+    <td>
+      <h1>TON Payment Network</h1>
+      <p>This is an implementation of a <strong>peer-to-peer payment network</strong> with <strong>multi-node routing</strong>, powered by the <strong>TON Blockchain</strong>.<br>
+      More powerful than Lightning!</p>
+    </td>
+  </tr>
+</table>
 
 ## Technical Description
 
