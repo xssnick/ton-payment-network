@@ -157,6 +157,10 @@ func (s *Service) SetWebhook(webhook Webhook) {
 	s.webhook = webhook
 }
 
+func (s *Service) GetPrivateKey() ed25519.PrivateKey {
+	return s.key
+}
+
 func (s *Service) GetChannelConfig() transport.ChannelConfig {
 	return transport.ChannelConfig{
 		ExcessFee:                s.excessFee.Nano().Bytes(),

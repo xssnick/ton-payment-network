@@ -142,7 +142,7 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 	return addr, nil
 }
 
-func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error {
+func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, finalDest ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error {
 	if len(chain) == 0 {
 		return fmt.Errorf("chain is empty")
 	}
@@ -184,12 +184,13 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey e
 	err = s.db.CreateTask(ctx, PaymentsTaskPool, "open-virtual", channel.Address,
 		"open-virtual-"+hex.EncodeToString(vch.Key),
 		db.OpenVirtualTask{
-			ChannelAddress: channel.Address,
-			VirtualKey:     vch.Key,
-			Deadline:       vch.Deadline,
-			Fee:            vch.Fee.String(),
-			Capacity:       vch.Capacity.String(),
-			Action:         act,
+			FinalDestinationKey: finalDest,
+			ChannelAddress:      channel.Address,
+			VirtualKey:          vch.Key,
+			Deadline:            vch.Deadline,
+			Fee:                 vch.Fee.String(),
+			Capacity:            vch.Capacity.String(),
+			Action:              act,
 		}, nil, &tryTill,
 	)
 	if err != nil {

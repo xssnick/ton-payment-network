@@ -24,7 +24,6 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
 	"github.com/xssnick/tonutils-go/ton/wallet"
-	"github.com/xssnick/tonutils-go/tvm/cell"
 	"golang.org/x/crypto/ed25519"
 	"math"
 	"math/big"
@@ -208,6 +207,7 @@ func main() {
 		for _, channel := range chList {
 			if channel.Status != db.ChannelStateInactive {
 				sc.OnChannelUpdate(channel)
+				log.Info().Msg("start listening for channel events")
 			}
 		}
 	}
@@ -338,58 +338,54 @@ func commandReader(svc *tonpayments.Service) error {
 			return fmt.Errorf("incorrect len of key: %d, should be 32", len(btsKey))
 		}
 
-		log.Info().Msg("input amount:")
+		log.Info().Msg("input amount nano:")
 		var strAmt string
 		_, _ = fmt.Scanln(&strAmt)
 
-		amt, err := tlb.FromTON(strAmt)
-		if err != nil {
-			return fmt.Errorf("incorrect format of amount: %w", err)
+		iAmt, _ := new(big.Int).SetString(strAmt, 10)
+		if iAmt == nil {
+			return fmt.Errorf("incorrect format of amount")
 		}
 
 		vcKey := ed25519.NewKeyFromSeed(btsKey)
-		st := &payments.VirtualChannelState{
-			Amount: amt,
-		}
-		st.Sign(vcKey)
 
-		cll, err := st.ToCell()
+		meta, err := svc.GetVirtualChannelMeta(context.Background(), vcKey.Public().(ed25519.PublicKey))
 		if err != nil {
-			return fmt.Errorf("failed to serialize cell: %w", err)
+			return fmt.Errorf("failed to get virtual channel meta: %w", err)
 		}
 
-		log.Info().Str("signed_state", hex.EncodeToString(vcKey.Public().(ed25519.PublicKey))+hex.EncodeToString(cll.ToBOC())).Msg("state was signed")
+		if meta.FinalDestination == nil {
+			return fmt.Errorf("you are not initiator of this virtual channel")
+		}
+
+		state, err := payments.SignState(tlb.FromNanoTON(iAmt), vcKey, meta.FinalDestination)
+		if err != nil {
+			return fmt.Errorf("failed to sign state: %w", err)
+		}
+
+		log.Info().Str("signed_state", hex.EncodeToString(state)).Msg("state was signed")
 	case "close":
 		log.Info().Msg("enter the virtual channel final state hex:")
 
-		var state string
-		_, _ = fmt.Scanln(&state)
+		var stateStr string
+		_, _ = fmt.Scanln(&stateStr)
 
-		btsState, err := hex.DecodeString(state)
+		btsState, err := hex.DecodeString(stateStr)
 		if err != nil {
 			return fmt.Errorf("incorrect format of state: %w", err)
 		}
-		if len(btsState) <= 32 {
-			return fmt.Errorf("incorrect len of state")
-		}
 
-		stateCell, err := cell.FromBOC(btsState[32:])
+		key, state, err := payments.ParseState(btsState, svc.GetPrivateKey())
 		if err != nil {
-			return fmt.Errorf("incorrect state BoC: %w", err)
+			return fmt.Errorf("incorrect state: %w", err)
 		}
 
-		var st payments.VirtualChannelState
-		err = tlb.LoadFromCell(&st, stateCell.BeginParse())
-		if err != nil {
-			return fmt.Errorf("incorrect state cell: %w", err)
-		}
-
-		err = svc.AddVirtualChannelResolve(context.Background(), btsState[:32], st)
+		err = svc.AddVirtualChannelResolve(context.Background(), key, state)
 		if err != nil {
 			return fmt.Errorf("failed to add resolve to channel: %w", err)
 		}
 
-		err = svc.CloseVirtualChannel(context.Background(), btsState[:32])
+		err = svc.CloseVirtualChannel(context.Background(), key)
 		if err != nil {
 			return fmt.Errorf("failed to close channel: %w", err)
 		}
@@ -405,16 +401,16 @@ func commandReader(svc *tonpayments.Service) error {
 			return fmt.Errorf("incorrect format of address: %w", err)
 		}
 
-		log.Info().Msg("input amount:")
+		log.Info().Msg("input amount nano:")
 		var strAmt string
 		_, _ = fmt.Scanln(&strAmt)
 
-		amt, err := tlb.FromTON(strAmt)
-		if err != nil {
-			return fmt.Errorf("incorrect format of amount: %w", err)
+		iAmt, _ := new(big.Int).SetString(strAmt, 10)
+		if iAmt == nil {
+			return fmt.Errorf("incorrect format of amount")
 		}
 
-		if err = svc.TopupChannel(context.Background(), addr, amt); err != nil {
+		if err = svc.TopupChannel(context.Background(), addr, tlb.FromNanoTON(iAmt)); err != nil {
 			return fmt.Errorf("failed to topup channel: %w", err)
 		}
 		log.Info().Str("address", addr.String()).Msg("topup task registered")
@@ -503,14 +499,14 @@ func commandReader(svc *tonpayments.Service) error {
 			parsedKeys = append(parsedKeys, btsKey)
 		}
 
-		log.Info().Msg("input amount, excluding tunnelling fee:")
+		log.Info().Msg("input amount nano, excluding tunnelling fee:")
 
 		var strAmt string
 		_, _ = fmt.Scanln(&strAmt)
 
-		amt, err := tlb.FromTON(strAmt)
-		if err != nil {
-			return fmt.Errorf("incorrect format of amount: %w", err)
+		amt, _ := new(big.Int).SetString(strAmt, 10)
+		if amt == nil {
+			return fmt.Errorf("incorrect format of amount")
 		}
 
 		log.Info().Msg("input fee amount per each proxy node:")
@@ -518,23 +514,23 @@ func commandReader(svc *tonpayments.Service) error {
 		var strAmtFee string
 		_, _ = fmt.Scanln(&strAmtFee)
 
-		amtFee, err := tlb.FromTON(strAmtFee)
-		if err != nil {
-			return fmt.Errorf("incorrect format of fee amount: %w", err)
+		feeAmt, _ := new(big.Int).SetString(strAmtFee, 10)
+		if feeAmt == nil {
+			return fmt.Errorf("incorrect format of amount fee")
 		}
 
-		fullAmt := new(big.Int).Set(amt.Nano())
+		fullAmt := new(big.Int).Set(amt)
 		var tunChain []transport.TunnelChainPart
 		for i, parsedKey := range parsedKeys {
 			fee := big.NewInt(0)
 			if len(parsedKeys)-i > 1 {
-				fee = new(big.Int).Mul(amtFee.Nano(), big.NewInt(int64(len(parsedKeys)-i)-1))
+				fee = new(big.Int).Mul(feeAmt, big.NewInt(int64(len(parsedKeys)-i)-1))
 				fullAmt = fullAmt.Add(fullAmt, fee)
 			}
 
 			tunChain = append(tunChain, transport.TunnelChainPart{
 				Target:   parsedKey,
-				Capacity: amt.Nano(),
+				Capacity: amt,
 				Fee:      fee,
 				Deadline: time.Now().Add(1*time.Hour + (30*time.Minute)*time.Duration(len(parsedKeys)-i)),
 			})
@@ -547,7 +543,7 @@ func commandReader(svc *tonpayments.Service) error {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		err = svc.OpenVirtualChannel(ctx, with, firstInstructionKey, vPriv, tun, vc)
+		err = svc.OpenVirtualChannel(ctx, with, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to open virtual channel with node: %w", err)

@@ -65,6 +65,7 @@ type VirtualChannelMeta struct {
 	Incoming         *VirtualChannelMetaSide
 	Outgoing         *VirtualChannelMetaSide
 	LastKnownResolve []byte
+	FinalDestination ed25519.PublicKey // known only to first initiator
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -241,7 +242,7 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 		// TODO: support other types of conditions
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse condition %d", kv.Key.MustLoadUInt(32))
+			return nil, fmt.Errorf("failed to parse condition %d: %w", kv.Key.MustLoadUInt(32), err)
 		}
 		balance = balance.Sub(balance, new(big.Int).Add(vch.Capacity, vch.Fee))
 	}

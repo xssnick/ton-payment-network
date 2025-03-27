@@ -202,8 +202,9 @@ func (s *Service) taskExecutor() {
 							Fee:            tlb.FromNanoTON(nextFee).String(),
 							Deadline:       time.Unix(data.Deadline, 0),
 						},
-						CreatedAt: time.Now(),
-						UpdatedAt: time.Now(),
+						FinalDestination: data.FinalDestinationKey,
+						CreatedAt:        time.Now(),
+						UpdatedAt:        time.Now(),
 					}
 
 					if data.PrevChannelAddress != "" {

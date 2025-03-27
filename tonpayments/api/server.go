@@ -33,7 +33,7 @@ type Service interface {
 	RequestUncooperativeClose(ctx context.Context, addr string) error
 	CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey) error
 	AddVirtualChannelResolve(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error
-	OpenVirtualChannel(ctx context.Context, with, instructionKey ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error
+	OpenVirtualChannel(ctx context.Context, with, instructionKey, finalDest ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error
 	DeployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error)
 	TopupChannel(ctx context.Context, addr *address.Address, amount tlb.Coins) error
 	RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins) error

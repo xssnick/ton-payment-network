@@ -2,10 +2,10 @@ package chain
 
 import (
 	"context"
+	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
-	"log"
 	"time"
 )
 
@@ -24,6 +24,7 @@ func (v *Scanner) OnChannelUpdate(ch *db.Channel) {
 			c() // stop listener
 			delete(v.activeChannels, ch.Address)
 		}
+		log.Info().Str("address", ch.Address).Msg("stop listening for channel events")
 		return
 	}
 
@@ -42,6 +43,8 @@ func (v *Scanner) OnChannelUpdate(ch *db.Channel) {
 }
 
 func (v *Scanner) startForContract(ctx context.Context, addr *address.Address, sinceLT uint64) {
+	log.Info().Str("address", addr.String()).Msg("start listening for channel events")
+
 	ch := make(chan *tlb.Transaction, 1)
 	go v.api.SubscribeOnTransactions(ctx, addr, sinceLT, ch)
 
@@ -50,11 +53,10 @@ func (v *Scanner) startForContract(ctx context.Context, addr *address.Address, s
 			m, err := v.api.CurrentMasterchainInfo(ctx)
 			if err != nil {
 				time.Sleep(1 * time.Second)
-				log.Println("failed to fetch master block, will retry in 1s")
+				log.Warn().Str("address", addr.String()).Msg("failed to fetch master block, will retry in 1s")
 				continue
 			}
 
-			println("REPORT", addr.String())
 			v.taskPool <- accFetchTask{
 				master:   m,
 				tx:       transaction,

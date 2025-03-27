@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
+	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
@@ -22,9 +23,69 @@ type VirtualChannelState struct {
 	Amount    tlb.Coins
 }
 
-type Payment struct {
-	Key   []byte              `tlb:"bits 256"`
-	State VirtualChannelState `tlb:"^"`
+func SignState(amount tlb.Coins, signKey ed25519.PrivateKey, to ed25519.PublicKey) ([]byte, error) {
+	st := &VirtualChannelState{
+		Amount: amount,
+	}
+	st.Sign(signKey)
+
+	cll, err := st.ToCell()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize cell: %w", err)
+	}
+	data := cll.ToBOC()
+
+	sharedKey, err := adnl.SharedKey(signKey, to)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate shared key: %w", err)
+	}
+	pub := signKey.Public().(ed25519.PublicKey)
+
+	stream, err := adnl.BuildSharedCipher(sharedKey, pub)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init cipher: %w", err)
+	}
+	// we encrypt state to be sure no one can hijack it and use in the middle of the chain
+	stream.XORKeyStream(data, data)
+
+	return append(pub, data...), nil
+}
+
+func ParseState(data []byte, to ed25519.PrivateKey) (ed25519.PublicKey, VirtualChannelState, error) {
+	if len(data) <= 32+64 || len(data) > 32+64+64 {
+		return nil, VirtualChannelState{}, fmt.Errorf("incorrect len of state")
+	}
+
+	sharedKey, err := adnl.SharedKey(to, data[:32])
+	if err != nil {
+		return nil, VirtualChannelState{}, fmt.Errorf("failed to generate shared key: %w", err)
+	}
+
+	var payload = data[32:]
+	stream, err := adnl.BuildSharedCipher(sharedKey, data[:32])
+	if err != nil {
+		return nil, VirtualChannelState{}, fmt.Errorf("failed to init cipher: %w", err)
+	}
+	stream.XORKeyStream(payload, payload)
+
+	cll, err := cell.FromBOC(payload)
+	if err != nil {
+		return nil, VirtualChannelState{}, fmt.Errorf("failed to parse cell: %w", err)
+	}
+
+	var res VirtualChannelState
+	if err = tlb.LoadFromCell(&res, cll.BeginParse()); err != nil {
+		return nil, VirtualChannelState{}, fmt.Errorf("failed to parse state: %w", err)
+	}
+
+	if !res.Verify(data[:32]) {
+		return nil, VirtualChannelState{}, fmt.Errorf("incorrect signature")
+	}
+
+	var key [32]byte
+	copy(key[:], data[:32])
+
+	return key[:], res, nil
 }
 
 var virtualChannelStaticCode = func() *cell.Cell {
@@ -122,14 +183,6 @@ func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 	if len(key) < 32 {
 		// prepend it with zeroes
 		key = append(make([]byte, 32-len(key)), key...)
-	}
-
-	jmp, err := s.LoadSlice(16)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse jmp: %w", err)
-	}
-	if !bytes.Equal(jmp, []byte{0xDB, 0x3D}) {
-		return nil, fmt.Errorf("incorrect jmp opcode")
 	}
 
 	code, err := s.LoadRefCell()
@@ -280,13 +333,13 @@ func (c *VirtualChannelState) LoadFromCell(loader *cell.Slice) error {
 }
 
 func (c *VirtualChannelState) Sign(key ed25519.PrivateKey) {
-	cl := c.serializePayload().EndCell()
+	cl := c.serializePayload().ToSlice()
 	// we need hash of data part only, because CHEKSIGNS is used in condition
-	c.Signature = ed25519.Sign(key, cl.BeginParse().MustLoadSlice(cl.BitsSize()))
+	c.Signature = ed25519.Sign(key, cl.MustLoadSlice(cl.BitsLeft()))
 }
 
 func (c *VirtualChannelState) Verify(key ed25519.PublicKey) bool {
-	cl := c.serializePayload().EndCell()
+	cl := c.serializePayload().ToSlice()
 	// we need hash of data part only, because CHEKSIGNS is used in condition
-	return ed25519.Verify(key, cl.BeginParse().MustLoadSlice(cl.BitsSize()), c.Signature)
+	return ed25519.Verify(key, cl.MustLoadSlice(cl.BitsLeft()), c.Signature)
 }

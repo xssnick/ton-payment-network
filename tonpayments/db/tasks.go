@@ -1,6 +1,7 @@
 package db
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"time"
@@ -70,13 +71,14 @@ type CloseNextVirtualTask struct {
 }
 
 type OpenVirtualTask struct {
-	PrevChannelAddress string
-	ChannelAddress     string
-	VirtualKey         []byte
-	Deadline           int64
-	Fee                string
-	Capacity           string
-	Action             transport.OpenVirtualAction
+	FinalDestinationKey ed25519.PublicKey // known only for initiator
+	PrevChannelAddress  string
+	ChannelAddress      string
+	VirtualKey          []byte
+	Deadline            int64
+	Fee                 string
+	Capacity            string
+	Action              transport.OpenVirtualAction
 }
 
 type AskRemoveVirtualTask struct {

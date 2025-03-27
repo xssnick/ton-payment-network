@@ -379,7 +379,7 @@ func (s *Server) handleVirtualOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.svc.OpenVirtualChannel(r.Context(), with, firstInstructionKey, vPriv, tun, vc)
+	err = s.svc.OpenVirtualChannel(r.Context(), with, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc)
 	if err != nil {
 		writeErr(w, 403, "failed to request virtual channel open: "+err.Error())
 		return
@@ -474,7 +474,7 @@ func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.svc.OpenVirtualChannel(r.Context(), with, firstInstructionKey, vPriv, tun, vc)
+	err = s.svc.OpenVirtualChannel(r.Context(), with, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc)
 	if err != nil {
 		writeErr(w, 403, "failed to request virtual channel open: "+err.Error())
 		return
