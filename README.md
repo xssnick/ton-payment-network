@@ -1,6 +1,6 @@
 
 # TON Payment Network
-<img style="margin-top: 50px;" align="right" src="https://github.com/user-attachments/assets/ff51e55e-2cfe-4fcf-9100-3d62c6fc5a1b" width="420px">
+<img align="right" src="https://github.com/user-attachments/assets/ff51e55e-2cfe-4fcf-9100-3d62c6fc5a1b" width="420px">
 
 This is an implementation of a **peer-to-peer payment network** with **multi-node routing**, powered by the TON Blockchain.
 More powerful than Lightning!
@@ -210,6 +210,32 @@ int cond(slice input, int fee, int capacity, int deadline, int key) {
 - The logic of conditional payments is executed **offchain** when both parties agree.
 - If there is a **disagreement**, the same logic is executed **onchain** by the smart contract.
 
+##### Onchain Uncooperative Close
+
+An **uncooperative channel close** happens when one of the parties becomes unresponsive or refuses to close the channel properly.  
+This process is handled fully onchain and consists of **four key stages**:
+
+1. **Initiation**  
+   One of the parties sends an `uncooperative close` transaction to the onchain contract —  
+   for example, if the counterparty hasn’t responded for a long time.
+
+2. **Quarantine Phase**  
+   Once the transaction is committed, the channel enters a `quarantine` period.  
+   During this time, both parties can submit their **latest known state** of the channel.
+  - If one party submits an **older state**, the other party can provide a **newer one**.
+  - In such a case, the first party is considered dishonest and will be **fined**.
+
+3. **Settlement Phase**  
+   After the quarantine period ends, the `settlement` phase begins.  
+   Each party can now submit **resolutions of active virtual channels**, if available.  
+   This ensures that all pending offchain payments are properly accounted for.
+
+4. **Final Closure**  
+   When the settlement is complete, any side could send a final closure signal to the contract.  
+   The onchain channel is closed, both sides receive their remaining balances,  
+   and the contract becomes **empty and finalized**.
+
+This mechanism ensures fair handling of disputes and protects both parties from data manipulation or malicious behavior.
 
 ##### Virtual Channels and Onchain Settlement
 
