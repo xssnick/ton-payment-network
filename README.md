@@ -1,11 +1,8 @@
-# General Description
+# TON Payment Network
 
 <img align="right" src="https://github.com/user-attachments/assets/ff51e55e-2cfe-4fcf-9100-3d62c6fc5a1b" width="420px">
 
-This is an implementation of a **peer-to-peer payment network** with **multi-node routing**, powered by the TON Blockchain.
-More powerful than Lightning!
-
-TON Payment Network is a fast, scalable, and low-cost peer-to-peer payment system built on top of the TON Blockchain.  
+TON Payment Network is a fast, scalable, and low-cost **peer-to-peer payment network** built on top of the TON Blockchain.  
 It allows users to send and receive payments instantly, without paying fees for every transaction on the blockchain.
 
 Instead of writing every transaction into the blockchain, the system uses **payment channels** between nodes. These channels allow users to make thousands of offchain payments that are fast, secure, and cost nothing — until it becomes necessary to settle onchain.
@@ -63,7 +60,7 @@ Dummy data is also added to make it harder to analyze the path.
 TON Payment Network combines the speed of offchain payments with the security of blockchain.  
 It’s designed for a world where fast, private, and cheap payments are the default.
 
-# Technical Description
+# Technical Details
 
 The network consists of **peer-to-peer payment nodes** that establish connections between each other via:
 
@@ -343,34 +340,3 @@ The standalone node currently supports several **console commands**:
 - `destroy` — Close an **onchain channel** by address.  
   First attempts a **cooperative closure**, and if that fails, performs a **forced closure**.
 
----
-
-## Integration Scenario for Wallets
-
-As a wallet, you can operate your own payment node to serve your users.  
-Set it up as a standalone node and inject its ID into the wallet application.
-
-Additionally, build the payment node as a native library and integrate it into your mobile or desktop app.
-
-When a user wants to join the payment network, they deploy a contract using your payment node's key.  
-(This can be done using methods from the payment library.)
-
----
-
-- If the user only wants to **pay for services**, they simply need to top up the contract from their side.
-
-- If the user wants to **send and receive payments**, both you and the user need to deposit some amount into the contract.  
-  (The user can rent your locked coins — for example, by paying a monthly fee to keep an amount reserved.)
-
----
-
-Once the contract is funded, the user can immediately start making **offchain payments** and open **virtual channels** with any linked services or other users.
-
-The user can **top up their channel at any time**, and **withdraw coins back to their wallet** when needed.
-
-To request actions from your node (e.g., depositing to the channel contract),  
-you can use the **HTTP API** and **webhooks**. Documentation can be found [here](https://github.com/xssnick/ton-payment-network/blob/master/API.md).
-
-Let's imagine the flow:
-
-...
