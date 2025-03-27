@@ -1,11 +1,9 @@
+# General Description
 
-# TON Payment Network
 <img align="right" src="https://github.com/user-attachments/assets/ff51e55e-2cfe-4fcf-9100-3d62c6fc5a1b" width="420px">
 
 This is an implementation of a **peer-to-peer payment network** with **multi-node routing**, powered by the TON Blockchain.
 More powerful than Lightning!
-
-## General Description
 
 TON Payment Network is a fast, scalable, and low-cost peer-to-peer payment system built on top of the TON Blockchain.  
 It allows users to send and receive payments instantly, without paying fees for every transaction on the blockchain.
@@ -14,7 +12,7 @@ Instead of writing every transaction into the blockchain, the system uses **paym
 
 ---
 
-### How It Works
+## How It Works
 
 The network is made up of **payment nodes**. These are programs that connect to each other, create channels, and exchange payments.  
 Nodes can be run by individual users or businesses. They can also be integrated into apps and services like TON Storage or TON Proxy to allow automated payments.
@@ -30,7 +28,7 @@ No new smart contracts are needed for this — it’s fast and completely offcha
 
 ---
 
-### Security and Conditional Payments
+## Security and Conditional Payments
 
 Payments through virtual channels are protected by **cryptographic guarantees**. When a user sends money, they don’t transfer coins immediately. Instead, they give the middle node a **signed promise**, which can only be completed if the next node confirms receipt.
 
@@ -40,7 +38,7 @@ If one of the nodes misbehaves — for example, they break the agreement or stop
 
 ---
 
-### Privacy by Design
+## Privacy by Design
 
 The full path of a payment is only known to the sender who builds the route.  
 Each middle node knows only:
@@ -54,7 +52,7 @@ Dummy data is also added to make it harder to analyze the path.
 
 ---
 
-### Performance and Scalability
+## Performance and Scalability
 
 - Opening and using virtual channels takes only **milliseconds**
 - All important operations are **queued and stored safely** using a fast embedded database
@@ -65,7 +63,7 @@ Dummy data is also added to make it harder to analyze the path.
 TON Payment Network combines the speed of offchain payments with the security of blockchain.  
 It’s designed for a world where fast, private, and cheap payments are the default.
 
-## Technical Description
+# Technical Description
 
 The network consists of **peer-to-peer payment nodes** that establish connections between each other via:
 
@@ -79,13 +77,13 @@ A payment node can be:
 
 ---
 
-### Example Interactions
+## Example Interactions
 
 ![Diagram](https://github.com/xssnick/ton-payment-network/assets/9332353/c127d64f-2f04-4e70-87e6-252d08d1ce47)
 
 ---
 
-### Onchain Channels
+## Onchain Channels
 
 The onchain channel contract supports:
 
@@ -93,7 +91,7 @@ The onchain channel contract supports:
 - **Jettons**
 - **ExtraCurrencies**
 
-#### Channel Discovery
+### Channel Discovery
 
 Discovery works by:
 
@@ -105,7 +103,7 @@ For example:
 - Detecting deployment of new contracts with known keys when someone wants to establish a channel
 - Catching events related to **uncoordinated closures**
 
-#### Establishing a Channel
+### Establishing a Channel
 
 If a node wants to connect with another node:
 
@@ -114,7 +112,7 @@ If a node wants to connect with another node:
 3. The contract includes **two public keys**: the node's own key and the target node’s key.
 4. The target node detects the contract, verifies its parameters, and if everything is correct — **allows channel specific communication** after authentication.
 
-#### Authentication
+### Authentication
 
 For network authentication:
 
@@ -125,7 +123,7 @@ For network authentication:
     - The **same timestamp**
     - A **valid signature** from the other party
 
-### Virtual Channels
+## Virtual Channels
 
 A virtual channel can be opened between **any two nodes** in the network, as long as there is a **chain of links** between them — including an onchain contract and an active network connection.  
 **No onchain action** is required to create or close a virtual channel.
@@ -153,7 +151,7 @@ Thus, the chain becomes: `A → B → C`.
 
 ---
 
-#### Security: Why can't `B` steal `A`'s funds?
+### Security: Why can't `B` steal `A`'s funds?
 
 Thanks to **elliptic cryptography** and the **flexible nature of the TON blockchain**, `B` cannot simply take the funds from `A` and avoid forwarding them to `C`.
 
@@ -176,12 +174,12 @@ Each link in the chain creates a virtual channel with its neighbor, starting fro
 
 ---
 
-##### Rollbacks and Fallbacks
+#### Rollbacks and Fallbacks
 
 - If **any node** in the chain refuses to open the channel with the next node, the **entire channel is rolled back** and capacity is unlocked for the sender.
 - In rare worst-case scenarios (e.g., a node misbehaves or fails to respond), the capacity will be automatically **unlocked after the channel’s lifetime expires**.
 
-#### Safety Guarantees
+### Safety Guarantees
 
 The entire process works **offchain**, meaning there is **no interaction with the blockchain** during normal operation — and therefore, **no network fees** are paid.
 
@@ -210,7 +208,7 @@ int cond(slice input, int fee, int capacity, int deadline, int key) {
 - The logic of conditional payments is executed **offchain** when both parties agree.
 - If there is a **disagreement**, the same logic is executed **onchain** by the smart contract.
 
-##### Onchain Uncooperative Close
+### Onchain Uncooperative Close
 
 An **uncooperative channel close** happens when one of the parties becomes unresponsive or refuses to close the channel properly.  
 This process is handled fully onchain and consists of **four key stages**:
@@ -237,7 +235,7 @@ This process is handled fully onchain and consists of **four key stages**:
 
 This mechanism ensures fair handling of disputes and protects both parties from data manipulation or malicious behavior.
 
-##### Virtual Channels and Onchain Settlement
+#### Virtual Channels and Onchain Settlement
 
 - **The number of virtual channels per one onchain channel** is theoretically unlimited.  
   This is achieved by using Merkle proofs to commit conditionals onchain.
@@ -251,7 +249,7 @@ This mechanism ensures fair handling of disputes and protects both parties from 
   and the Merkle root hash is updated.  
   This ensures that no conditional can be resolved more than once.
 
-#### Privacy of the Virtual Channel
+### Privacy of the Virtual Channel
 
 The full structure of the virtual channel chain is known **only to the creator** of the channel, as they are the one who forms the chain.  
 Other participants are aware of:
@@ -279,7 +277,7 @@ Each **task** includes:
 Nodes **cannot cheat** each other, as each step is verifiable through the task data.  
 If a mismatch occurs, the **channel fails** and is **rolled back** safely.
 
-#### Networking Interactions in a Chain
+### Networking Interactions in a Chain
 
 Networking is based on two core actions: `ProposeAction` and `RequestAction`.
 
@@ -295,7 +293,7 @@ Networking is based on two core actions: `ProposeAction` and `RequestAction`.
 - **`Request`**  
   This action is used to ask the neighboring node to perform a `Propose` — for example, to **close a virtual channel**.
 
-##### Distributed Lock for Channel State Changes
+#### Distributed Lock for Channel State Changes
 
 For actions that modify the channel state, a **distributed lock** mechanism is used.
 
@@ -307,7 +305,7 @@ This mechanism is necessary to **prevent concurrent modifications** and **avoid 
 
 It is designed for safety, but can be **optimized later** if performance becomes a concern.
 
-### Speed, Reliability, and Cross-Platform
+## Speed, Reliability, and Cross-Platform
 
 Opening a virtual channel, while technically complex, is **very fast** — it takes only **milliseconds** to process an action on the node side, even on basic hardware.  
 Performance can be further improved in the future with **enhanced lock separation**.
@@ -319,7 +317,7 @@ The entire implementation is written in **pure Golang**, making it **cross-platf
 
 ---
 
-#### Standalone Node Management and First Startup
+### Standalone Node Management and First Startup
 
 On the **first startup**, a `payment-network-config.json` config file and `payment-node-db` folder are generated.
 
@@ -347,7 +345,7 @@ The standalone node currently supports several **console commands**:
 
 ---
 
-### Integration Scenario for Wallets
+## Integration Scenario for Wallets
 
 As a wallet, you can operate your own payment node to serve your users.  
 Set it up as a standalone node and inject its ID into the wallet application.
