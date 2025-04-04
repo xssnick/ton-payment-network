@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
@@ -75,6 +75,11 @@ func (s *Server) handleChannelOpen(w http.ResponseWriter, r *http.Request) {
 		jetton, err = address.ParseAddr(req.JettonMaster)
 		if err != nil {
 			writeErr(w, 400, "incorrect jetton address format: "+err.Error())
+			return
+		}
+
+		if req.ExtraCurrencyID != 0 {
+			writeErr(w, 400, "jetton master address and extra currency id are mutually exclusive")
 			return
 		}
 	}
@@ -309,7 +314,7 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 	}
 
 	return OnchainChannel{
-		ID:               hex.EncodeToString(c.ID),
+		ID:               base64.StdEncoding.EncodeToString(c.ID),
 		Address:          c.Address,
 		JettonAddress:    c.JettonAddress,
 		ExtraCurrencyID:  c.ExtraCurrencyID,
@@ -317,7 +322,7 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 		Status:           status,
 		WeLeft:           c.WeLeft,
 		Our: Side{
-			Key:              hex.EncodeToString(c.OurOnchain.Key),
+			Key:              base64.StdEncoding.EncodeToString(c.OurOnchain.Key),
 			AvailableBalance: tlb.FromNanoTON(ourBalance).String(),
 			Onchain: Onchain{
 				CommittedSeqno: c.OurOnchain.CommittedSeqno,
@@ -326,7 +331,7 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 			},
 		},
 		Their: Side{
-			Key:              hex.EncodeToString(c.TheirOnchain.Key),
+			Key:              base64.StdEncoding.EncodeToString(c.TheirOnchain.Key),
 			AvailableBalance: tlb.FromNanoTON(theirBalance).String(),
 			Onchain: Onchain{
 				CommittedSeqno: c.TheirOnchain.CommittedSeqno,
@@ -350,7 +355,7 @@ func (s *Server) PushChannelEvent(ctx context.Context, ch *db.Channel) error {
 		ch.Address+"-"+fmt.Sprint(res.LastProcessedLT),
 		res, nil, nil,
 	); err != nil {
-		return fmt.Errorf("failed to create ask-remove-virtual task: %w", err)
+		return fmt.Errorf("failed to create webhook task: %w", err)
 	}
 
 	return nil

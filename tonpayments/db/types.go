@@ -53,10 +53,11 @@ var ErrNotFound = errors.New("not found")
 var ErrChannelBusy = fmt.Errorf("channel is busy")
 
 type VirtualChannelMetaSide struct {
-	ChannelAddress string
-	Capacity       string
-	Fee            string
-	Deadline       time.Time
+	ChannelAddress        string
+	Capacity              string
+	Fee                   string
+	UncooperativeDeadline time.Time
+	SafeDeadline          time.Time
 }
 
 type VirtualChannelMeta struct {
@@ -286,7 +287,7 @@ func (ch *VirtualChannelMeta) AddKnownResolve(key ed25519.PublicKey, state *paym
 			return fmt.Errorf("failed to parse old start: %w", err)
 		}
 
-		if oldState.Amount.Nano().Cmp(state.Amount.Nano()) == 1 {
+		if oldState.Amount.Nano().Cmp(state.Amount.Nano()) > 0 {
 			return ErrNewerStateIsKnown
 		}
 	}

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
@@ -17,6 +17,7 @@ import (
 	"github.com/xssnick/tonutils-go/ton"
 	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-go/tvm/cell"
+	"math/big"
 	"sync"
 	"time"
 )
@@ -31,7 +32,7 @@ const PaymentsTaskPool = "pn"
 type Transport interface {
 	AddUrgentPeer(channelKey ed25519.PublicKey)
 	RemoveUrgentPeer(channelKey ed25519.PublicKey)
-	GetChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey) (*transport.ChannelConfig, error)
+	ProposeChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey, prop transport.ProposeChannelConfig) (*address.Address, error)
 	RequestAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, action transport.Action) (*transport.Decision, error)
 	ProposeAction(ctx context.Context, lockId int64, channelAddr *address.Address, theirChannelKey []byte, state, updateProof *cell.Cell, action transport.Action) (*transport.ProposalDecision, error)
 	RequestChannelLock(ctx context.Context, theirChannelKey ed25519.PublicKey, channel *address.Address, id int64, lock bool) (*transport.Decision, error)
@@ -89,13 +90,12 @@ type Service struct {
 
 	key ed25519.PrivateKey
 
-	virtualChannelProxyFee         tlb.Coins
-	excessFee                      tlb.Coins
 	wallet                         *wallet.Wallet
 	contractMaker                  *payments.Client
-	closingConfig                  payments.ClosingConfig
 	virtualChannelsLimitPerChannel int
 	workerSignal                   chan bool
+
+	cfg config.ChannelsConfig
 
 	// TODO: channel based lock
 	mx sync.Mutex
@@ -106,48 +106,50 @@ type Service struct {
 	lockerMx         sync.Mutex
 	externalLockerMx sync.Mutex
 
-	whitelistedJettons map[string]bool
-	whitelistedEC      map[uint32]bool
-	isTonWhitelisted   bool
+	supportedJettons map[string]config.CoinConfig
+	supportedEC      map[uint32]config.CoinConfig
+	supportedTon     bool
 
 	discoveryMx sync.Mutex
 }
 
-func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, cfg config.ChannelConfig, whitelist config.Whitelist) (*Service, error) {
+func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, cfg config.ChannelsConfig) (*Service, error) {
 	s := &Service{
-		ton:                    api,
-		transport:              transport,
-		updates:                updates,
-		db:                     db,
-		key:                    key,
-		virtualChannelProxyFee: tlb.MustFromTON(cfg.VirtualChannelProxyFee),
-		excessFee:              tlb.MustFromTON("0.25"),
-		wallet:                 wallet,
-		contractMaker:          payments.NewPaymentChannelClient(api),
-		closingConfig: payments.ClosingConfig{
-			QuarantineDuration:       cfg.QuarantineDurationSec,
-			MisbehaviorFine:          tlb.MustFromTON(cfg.MisbehaviorFine),
-			ConditionalCloseDuration: cfg.ConditionalCloseDurationSec,
-		},
+		ton:                            api,
+		transport:                      transport,
+		updates:                        updates,
+		db:                             db,
+		key:                            key,
+		wallet:                         wallet,
+		contractMaker:                  payments.NewPaymentChannelClient(api),
+		cfg:                            cfg,
 		virtualChannelsLimitPerChannel: 30000,
 		workerSignal:                   make(chan bool, 1),
 		channelLocks:                   map[string]*channelLock{},
-		whitelistedJettons:             map[string]bool{},
-		whitelistedEC:                  map[uint32]bool{},
-		isTonWhitelisted:               whitelist.AllowTonChannels,
+		supportedJettons:               map[string]config.CoinConfig{},
+		supportedEC:                    map[uint32]config.CoinConfig{},
+		supportedTon:                   cfg.SupportedCoins.Ton.Enabled,
 	}
 
-	for _, jetton := range whitelist.AllowedJettons {
-		a, err := address.ParseAddr(jetton)
+	for addr, jetton := range cfg.SupportedCoins.Jettons {
+		if !jetton.Enabled {
+			continue
+		}
+
+		a, err := address.ParseAddr(addr)
 		if err != nil {
 			return nil, err
 		}
 
-		s.whitelistedJettons[a.Bounce(true).Testnet(false).String()] = true
+		s.supportedJettons[a.Bounce(true).String()] = jetton
 	}
 
-	for _, currency := range whitelist.AllowedExtraCurrencies {
-		s.whitelistedEC[currency] = true
+	for id, currency := range cfg.SupportedCoins.ExtraCurrencies {
+		if !currency.Enabled {
+			continue
+		}
+
+		s.supportedEC[id] = currency
 	}
 
 	return s, nil
@@ -161,15 +163,101 @@ func (s *Service) GetPrivateKey() ed25519.PrivateKey {
 	return s.key
 }
 
-func (s *Service) GetChannelConfig() transport.ChannelConfig {
-	return transport.ChannelConfig{
-		ExcessFee:                s.excessFee.Nano().Bytes(),
-		VirtualTunnelFee:         s.virtualChannelProxyFee.Nano().Bytes(),
-		WalletAddr:               s.wallet.WalletAddress().Data(),
-		QuarantineDuration:       s.closingConfig.QuarantineDuration,
-		MisbehaviorFine:          s.closingConfig.MisbehaviorFine.Nano().Bytes(),
-		ConditionalCloseDuration: s.closingConfig.ConditionalCloseDuration,
+func (s *Service) GetMinSafeTTL() time.Duration {
+	return time.Duration(s.cfg.MinSafeVirtualChannelTimeoutSec + s.cfg.BufferTimeToCommit + s.cfg.ConditionalCloseDurationSec + s.cfg.QuarantineDurationSec)
+}
+
+func (s *Service) ReviewChannelConfig(prop transport.ProposeChannelConfig) (*address.Address, error) {
+	var jetton *address.Address
+	if !bytes.Equal(prop.JettonAddr, make([]byte, 32)) {
+		jetton = address.NewAddress(0, 0, prop.JettonAddr)
 	}
+
+	if jetton != nil && prop.ExtraCurrencyID != 0 {
+		return nil, fmt.Errorf("both extra currency and jetton are set")
+	}
+
+	var cfg = s.cfg.SupportedCoins.Ton
+	if prop.ExtraCurrencyID != 0 {
+		if c, ok := s.supportedEC[prop.ExtraCurrencyID]; !ok {
+			return nil, fmt.Errorf("extra currency is not whitelisted")
+		} else {
+			cfg = c
+		}
+	}
+
+	if jetton != nil {
+		if c, ok := s.supportedJettons[jetton.Bounce(true).String()]; !ok {
+			return nil, fmt.Errorf("jetton currency is not whitelisted")
+		} else {
+			cfg = c
+		}
+	}
+
+	ourFine := tlb.MustFromDecimal(cfg.MisbehaviorFine, int(cfg.Decimals))
+
+	if prop.QuarantineDuration != s.cfg.QuarantineDurationSec ||
+		prop.ConditionalCloseDuration != s.cfg.ConditionalCloseDurationSec ||
+		new(big.Int).SetBytes(prop.MisbehaviorFine).Cmp(ourFine.Nano()) != 0 {
+		return nil, fmt.Errorf("node wants different channel config: quarantine %d, cond close %d, fine %s; if you wnat to deploy", s.cfg.QuarantineDurationSec, s.cfg.ConditionalCloseDurationSec, ourFine.String())
+	}
+
+	return s.wallet.WalletAddress(), nil
+}
+
+func (s *Service) scanSettledConditionals(channelAddr string, tx *tlb.Transaction, settle payments.SettleConditionals) {
+	kvs, err := settle.Signed.ConditionalsToSettle.LoadAll()
+	if err != nil {
+		log.Warn().Err(err).Str("address", channelAddr).Msg("failed to load settled conditionals")
+		return
+	}
+
+	proofBody, err := settle.Signed.ConditionalsProof.PeekRef(0)
+	if err != nil {
+		log.Warn().Err(err).Str("address", channelAddr).Msg("failed to load settled conditionals proof")
+		return
+	}
+
+	proofDict := proofBody.AsDict(32)
+
+	for _, kv := range kvs {
+		key, err := kv.Key.LoadUInt(32)
+		if err != nil {
+			log.Warn().Err(err).Str("address", channelAddr).Msg("failed to load settled condition key")
+			continue
+		}
+
+		var state payments.VirtualChannelState
+		if err = tlb.LoadFromCell(&state, kv.Value); err != nil {
+			log.Warn().Err(err).Str("address", channelAddr).Uint64("id", key).Msg("failed to load condition state")
+			continue
+		}
+
+		cond, err := proofDict.LoadValueByIntKey(big.NewInt(int64(key)))
+		if err != nil {
+			log.Warn().Err(err).Str("address", channelAddr).Uint64("id", key).Msg("failed to load condition code")
+			continue
+		}
+
+		vch, err := payments.ParseVirtualChannelCond(cond)
+		if err != nil {
+			log.Warn().Err(err).Str("address", channelAddr).Uint64("id", key).Msg("failed to parse condition")
+			continue
+		}
+
+		if err = s.AddVirtualChannelResolve(context.Background(), vch.Key, state); err != nil {
+			log.Warn().Err(err).Str("address", channelAddr).Hex("key", vch.Key).Msg("failed to add virtual channel resolve")
+			continue
+		}
+
+		// close next virtual channels since they commited latest resolve onchain
+		if err = s.CloseVirtualChannel(context.Background(), vch.Key); err != nil {
+			log.Warn().Err(err).Str("address", channelAddr).Hex("key", vch.Key).Msg("failed to create task for close virtual channel")
+			continue
+		}
+	}
+
+	log.Info().Str("address", channelAddr).Hex("tx_hash", tx.Hash).Msg("settlement transaction with condition resolves processed")
 }
 
 func (s *Service) Start() {
@@ -193,32 +281,13 @@ func (s *Service) Start() {
 				continue
 			}
 
-			if upd.Channel.Storage.PaymentConfig.CurrencyConfig == nil && !s.isTonWhitelisted {
-				log.Debug().Any("channel", upd.Channel).Msg("not whitelisted ton")
-				continue
-			}
-
-			switch cc := upd.Channel.Storage.PaymentConfig.CurrencyConfig.(type) {
-			case payments.CurrencyConfigJetton:
-				a := cc.Info.Master.String()
-				if !s.whitelistedJettons[a] {
-					log.Debug().Any("channel", upd.Channel).Str("jetton", a).Msg("not whitelisted jetton")
-					continue
-				}
-			case payments.CurrencyConfigEC:
-				if !s.whitelistedEC[cc.ID] {
-					log.Debug().Any("channel", upd.Channel).Uint32("id", cc.ID).Msg("not whitelisted extra currency")
-					continue
-				}
-			}
-
 			log.Debug().Any("channel", upd.Channel).Msg("verified")
 
 		retry:
 			var err error
 			var channel *db.Channel
 			for {
-				// TODO: not block, DLQ
+				// TODO: not block, DLQ?
 				channel, err = s.db.GetChannel(context.Background(), upd.Channel.Address().String())
 				if err != nil && !errors.Is(err, db.ErrNotFound) {
 					log.Error().Err(err).Msg("failed to get channel from db, retrying...")
@@ -226,6 +295,20 @@ func (s *Service) Start() {
 					continue
 				}
 				break
+			}
+
+			if desc, ok := upd.Transaction.Description.(tlb.TransactionDescriptionOrdinary); ok {
+				if comp, ok := desc.ComputePhase.Phase.(tlb.ComputePhaseVM); ok && comp.Success && upd.Transaction.IO.In.MsgType == tlb.MsgTypeInternal {
+					msg := upd.Transaction.IO.In.AsInternal()
+
+					var settle payments.SettleConditionals
+					if err = tlb.LoadFromCell(&settle, msg.Body.BeginParse()); err == nil {
+						if settle.IsFromA != isLeft {
+							// we need to check their conditional resolves and add missing if any, to resolve our next channels
+							go s.scanSettledConditionals(upd.Channel.Address().String(), upd.Transaction, settle)
+						}
+					}
+				}
 			}
 
 			our := db.OnchainState{
@@ -273,7 +356,7 @@ func (s *Service) Start() {
 					InitAt:                 time.Unix(int64(upd.Transaction.Now), 0),
 					CreatedAt:              createAt,
 					AcceptingActions:       upd.Channel.Status == payments.ChannelStatusOpen,
-					SafeOnchainClosePeriod: 300 + int64(upd.Channel.Storage.ClosingConfig.QuarantineDuration) + int64(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration),
+					SafeOnchainClosePeriod: int64(s.cfg.BufferTimeToCommit) + int64(upd.Channel.Storage.ClosingConfig.QuarantineDuration) + int64(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration),
 					DBVersion:              version,
 				}
 
@@ -323,7 +406,7 @@ func (s *Service) Start() {
 					}
 
 					log.Info().Str("address", channel.Address).
-						Hex("with", channel.TheirOnchain.Key).
+						Str("with", base64.StdEncoding.EncodeToString(channel.TheirOnchain.Key)).
 						Msg("onchain channel opened")
 				}
 			case payments.ChannelStatusClosureStarted:
@@ -338,7 +421,7 @@ func (s *Service) Start() {
 					}
 
 					log.Info().Str("address", channel.Address).
-						Hex("with", channel.TheirOnchain.Key).
+						Str("with", base64.StdEncoding.EncodeToString(channel.TheirOnchain.Key)).
 						Msg("onchain channel closure started")
 
 					// TODO: maybe check only their?
@@ -347,7 +430,7 @@ func (s *Service) Start() {
 						// something is outdated, challenge state
 						settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+1), 0)
 						err = s.db.CreateTask(context.Background(), PaymentsTaskPool, "challenge", channel.Address+"-chain",
-							"challenge-"+hex.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
+							"challenge-"+base64.StdEncoding.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
 							db.ChannelTask{Address: channel.Address}, nil, &settleAt,
 						)
 						if err != nil {
@@ -365,12 +448,12 @@ func (s *Service) Start() {
 				finishAt := settleAt.Add(time.Duration(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration) * time.Second)
 
 				log.Info().Str("address", channel.Address).
-					Hex("with", channel.TheirOnchain.Key).
+					Str("with", base64.StdEncoding.EncodeToString(channel.TheirOnchain.Key)).
 					Time("execute_at", settleAt).
 					Msg("onchain channel uncooperative closing event, settling conditions")
 
 				err = s.db.CreateTask(context.Background(), PaymentsTaskPool, "settle", channel.Address+"-settle",
-					"settle-"+hex.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
+					"settle-"+base64.StdEncoding.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
 					db.ChannelTask{Address: channel.Address}, &settleAt, &finishAt,
 				)
 				if err != nil {
@@ -386,12 +469,12 @@ func (s *Service) Start() {
 				finishAt := settleAt.Add(time.Duration(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration+5) * time.Second)
 
 				log.Info().Str("address", channel.Address).
-					Hex("with", channel.TheirOnchain.Key).
+					Str("with", base64.StdEncoding.EncodeToString(channel.TheirOnchain.Key)).
 					Float64("till_finalize_sec", time.Until(finishAt).Seconds()).
 					Msg("onchain channel awaiting finalization")
 
 				err = s.db.CreateTask(context.Background(), PaymentsTaskPool, "finalize", channel.Address+"-finalize",
-					"finalize-"+hex.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
+					"finalize-"+base64.StdEncoding.EncodeToString(channel.ID)+"-"+fmt.Sprint(channel.InitAt.Unix()),
 					db.ChannelTask{Address: channel.Address}, &finishAt, nil,
 				)
 				if err != nil {
@@ -404,7 +487,7 @@ func (s *Service) Start() {
 					channel.Status = db.ChannelStateInactive
 
 					log.Info().Str("address", channel.Address).
-						Hex("with", channel.TheirOnchain.Key).
+						Str("with", base64.StdEncoding.EncodeToString(channel.TheirOnchain.Key)).
 						Msg("onchain channel closed")
 				}
 			}
@@ -463,7 +546,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 		}
 
 		log.Info().Str("address", ch.Address).
-			Hex("with", ch.TheirOnchain.Key).
+			Str("with", base64.StdEncoding.EncodeToString(ch.TheirOnchain.Key)).
 			Str("out_deposit", tlb.FromNanoTON(ch.OurOnchain.Deposited).String()).
 			Str("out_withdrawn", tlb.FromNanoTON(ch.OurOnchain.Withdrawn).String()).
 			Str("sent_out", ch.Our.State.Data.Sent.String()).
@@ -617,13 +700,34 @@ func (s *Service) verifyChannel(p *payments.AsyncChannel) (ok bool, isLeft bool)
 		return false, false
 	}
 
-	if p.Storage.PaymentConfig.StorageFee.String() != s.excessFee.String() {
+	var cc config.CoinConfig
+	switch v := p.Storage.PaymentConfig.CurrencyConfig.(type) {
+	case payments.CurrencyConfigEC:
+		cc, ok = s.supportedEC[v.ID]
+		if !ok {
+			return false, false
+		}
+	case payments.CurrencyConfigJetton:
+		cc, ok = s.supportedJettons[v.Info.Master.Bounce(true).String()]
+		if !ok {
+			return false, false
+		}
+	case payments.CurrencyConfigTon:
+		if !s.supportedTon {
+			return false, false
+		}
+		cc = s.cfg.SupportedCoins.Ton
+	default:
 		return false, false
 	}
 
-	if p.Storage.ClosingConfig.ConditionalCloseDuration != s.closingConfig.ConditionalCloseDuration ||
-		p.Storage.ClosingConfig.QuarantineDuration != s.closingConfig.QuarantineDuration ||
-		p.Storage.ClosingConfig.MisbehaviorFine.String() != s.closingConfig.MisbehaviorFine.String() {
+	if p.Storage.PaymentConfig.StorageFee.String() != tlb.MustFromTON(cc.ExcessFeeTon).String() {
+		return false, false
+	}
+
+	if p.Storage.ClosingConfig.ConditionalCloseDuration != s.cfg.ConditionalCloseDurationSec ||
+		p.Storage.ClosingConfig.QuarantineDuration != s.cfg.QuarantineDurationSec ||
+		p.Storage.ClosingConfig.MisbehaviorFine.Nano().Cmp(tlb.MustFromDecimal(cc.MisbehaviorFine, int(cc.Decimals)).Nano()) != 0 {
 		return false, false
 	}
 	return true, isLeft
@@ -647,6 +751,37 @@ func (s *Service) IncrementStates(ctx context.Context, channelAddr string, wantR
 	}
 	s.touchWorker()
 
+	return nil
+}
+
+func (s *Service) RequestRemoveVirtual(ctx context.Context, key ed25519.PublicKey) error {
+	meta, err := s.db.GetVirtualChannelMeta(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	if meta.Incoming == nil {
+		return fmt.Errorf("virtual channel has no incoming channel")
+	}
+
+	if meta.Outgoing != nil && !meta.Outgoing.UncooperativeDeadline.Before(time.Now()) {
+		return fmt.Errorf("outgoing direction is not timed out yet, not safe")
+	}
+
+	if meta.Status != db.VirtualChannelStateActive && meta.Status != db.VirtualChannelStatePending {
+		return fmt.Errorf("virtual channel is not active or pending")
+	}
+
+	err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-remove-virtual", meta.Incoming.ChannelAddress,
+		"ask-remove-virtual-"+base64.StdEncoding.EncodeToString(meta.Key)+"-desire",
+		db.AskRemoveVirtualTask{
+			ChannelAddress: meta.Incoming.ChannelAddress,
+			Key:            meta.Key,
+		}, nil, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create ask-remove-virtual task: %w", err)
+	}
 	return nil
 }
 

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
@@ -132,7 +132,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 			if !hasStates {
 				log.Info().Str("address", channel.Address).
-					Hex("with", channel.TheirOnchain.Key).
+					Str("with", base64.StdEncoding.EncodeToString(channel.TheirOnchain.Key)).
 					Msg("onchain channel states exchanged, ready to use")
 			}
 			return nil
@@ -277,8 +277,8 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("invalid fee")
 		}
 
-		if vch.Deadline < time.Now().Unix()+channel.SafeOnchainClosePeriod {
-			return nil, fmt.Errorf("too short virtual channel deadline")
+		if safe := vch.Deadline - (time.Now().Unix() + channel.SafeOnchainClosePeriod); safe < int64(s.cfg.MinSafeVirtualChannelTimeoutSec) {
+			return nil, fmt.Errorf("safe virtual channel deadline is less than acceptable: %d, %d", safe, s.cfg.MinSafeVirtualChannelTimeoutSec)
 		}
 
 		_, oldVC, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.ChannelKey)
@@ -327,23 +327,64 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("incorrect values, not equals to expected")
 		}
 
+		removeAfterTimeout := func(ctx context.Context) error {
+			// try to remove virtual channel in future if it will time out
+			dl := time.Unix(vch.Deadline+1, 0)
+			err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-remove-virtual", channel.Address,
+				"ask-remove-virtual-"+base64.StdEncoding.EncodeToString(vch.Key)+"-timeout",
+				db.AskRemoveVirtualTask{
+					ChannelAddress: channel.Address,
+					Key:            vch.Key,
+				}, &dl, nil,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create ask-remove-virtual task: %w", err)
+			}
+			return nil
+		}
+
 		if !bytes.Equal(currentInstruction.NextTarget, s.key.Public().(ed25519.PublicKey)) {
 			// willing to open tunnel for a virtual channel
 
 			nextFee := new(big.Int).SetBytes(currentInstruction.NextFee)
 			nextCap := new(big.Int).SetBytes(currentInstruction.NextCapacity)
 
-			if currentInstruction.NextDeadline > vch.Deadline-channel.SafeOnchainClosePeriod {
+			if currentInstruction.NextDeadline > vch.Deadline-(channel.SafeOnchainClosePeriod+int64(s.cfg.MinSafeVirtualChannelTimeoutSec)) {
 				return nil, fmt.Errorf("too short next deadline")
 			}
 
-			if nextCap.Cmp(vch.Capacity) == 1 {
+			if nextCap.Cmp(vch.Capacity) > 0 {
 				return nil, fmt.Errorf("capacity cannot increase")
 			}
 
-			ourFee := new(big.Int).Sub(vch.Fee, nextFee)
-			if ourFee.Cmp(s.virtualChannelProxyFee.Nano()) == -1 {
-				return nil, fmt.Errorf("min fee to open channel is %s TON", s.virtualChannelProxyFee.String())
+			cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve coin config: %w", err)
+			}
+
+			if !cc.VirtualTunnelConfig.AllowTunneling {
+				return nil, fmt.Errorf("tunneling of such coin is not allowed through this node")
+			}
+
+			wantMinFee := tlb.MustFromDecimal(cc.VirtualTunnelConfig.ProxyMinFee, int(cc.Decimals))
+			wantFeePercent := cc.VirtualTunnelConfig.ProxyFeePercent / 100.0
+
+			wantFeeInt := new(big.Int).Add(nextCap, nextFee)
+
+			maxCap := tlb.MustFromDecimal(cc.VirtualTunnelConfig.ProxyMaxCapacity, int(cc.Decimals))
+			if wantFeeInt.Cmp(maxCap.Nano()) > 0 {
+				return nil, fmt.Errorf("too big next capacity+fee")
+			}
+
+			wantFeeInt, _ = new(big.Float).Mul(new(big.Float).SetInt(wantFeeInt), big.NewFloat(wantFeePercent)).Int(wantFeeInt)
+			wantFee := tlb.MustFromNano(wantFeeInt, int(cc.Decimals))
+			if wantFee.Compare(&wantMinFee) < 0 {
+				wantFee = wantMinFee
+			}
+
+			proposedFee := new(big.Int).Sub(vch.Fee, nextFee)
+			if proposedFee.Cmp(wantFee.Nano()) < 0 {
+				return nil, fmt.Errorf("min fee to open channel is %s TON", wantFee.String())
 			}
 
 			targetChannels, err := s.db.GetChannels(context.Background(), currentInstruction.NextTarget, db.ChannelStateAny)
@@ -393,7 +434,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 				tryTill := time.Unix(currentInstruction.NextDeadline, 0)
 				err = s.db.CreateTask(ctx, PaymentsTaskPool, "open-virtual", target.Address,
-					"open-virtual-"+hex.EncodeToString(vch.Key),
+					"open-virtual-"+base64.StdEncoding.EncodeToString(vch.Key),
 					db.OpenVirtualTask{
 						PrevChannelAddress: channel.Address,
 						ChannelAddress:     target.Address,
@@ -406,6 +447,10 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				)
 				if err != nil {
 					return fmt.Errorf("failed to create open-virtual task: %w", err)
+				}
+
+				if err = removeAfterTimeout(ctx); err != nil {
+					return err
 				}
 
 				log.Info().Hex("key", data.ChannelKey).
@@ -422,10 +467,11 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 					Key:    vch.Key,
 					Status: db.VirtualChannelStateActive,
 					Incoming: &db.VirtualChannelMetaSide{
-						ChannelAddress: channel.Address,
-						Capacity:       tlb.FromNanoTON(vch.Capacity).String(),
-						Fee:            tlb.FromNanoTON(vch.Fee).String(),
-						Deadline:       time.Unix(vch.Deadline, 0),
+						ChannelAddress:        channel.Address,
+						Capacity:              tlb.FromNanoTON(vch.Capacity).String(),
+						Fee:                   tlb.FromNanoTON(vch.Fee).String(),
+						UncooperativeDeadline: time.Unix(vch.Deadline, 0),
+						SafeDeadline:          time.Unix(vch.Deadline, 0).Add(-time.Duration(channel.SafeOnchainClosePeriod+int64(s.cfg.MinSafeVirtualChannelTimeoutSec)) * time.Second),
 					},
 					CreatedAt: time.Now(),
 					UpdatedAt: time.Now(),
@@ -451,7 +497,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 					tryTill := time.Unix(vch.Deadline, 0)
 					if err = s.db.CreateTask(ctx, PaymentsTaskPool, "close-next-virtual", channel.Address,
-						"close-next-"+hex.EncodeToString(vch.Key),
+						"close-next-"+base64.StdEncoding.EncodeToString(vch.Key),
 						db.CloseNextVirtualTask{
 							VirtualKey: vch.Key,
 							State:      currentInstruction.FinalState.ToBOC(),
@@ -459,6 +505,10 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 						}, nil, &tryTill,
 					); err != nil {
 						return fmt.Errorf("failed to create close-next-virtual task: %w", err)
+					}
+				} else {
+					if err = removeAfterTimeout(ctx); err != nil {
+						return err
 					}
 				}
 
@@ -581,12 +631,11 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return nil, fmt.Errorf("failed to find virtual channel: %w", err)
 		}
 
-		tryTill := time.Unix(vch.Deadline, 0)
 		if err = s.db.CreateTask(context.Background(), PaymentsTaskPool, "remove-virtual", channel.Address,
-			"remove-virtual-"+hex.EncodeToString(vch.Key),
+			"remove-virtual-"+base64.StdEncoding.EncodeToString(vch.Key)+"-requested",
 			db.RemoveVirtualTask{
 				Key: data.Key,
-			}, nil, &tryTill,
+			}, nil, nil,
 		); err != nil {
 			return nil, fmt.Errorf("failed to create remove-virtual task: %w", err)
 		}
@@ -625,7 +674,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 
 			tryTill := time.Unix(vch.Deadline+(channel.SafeOnchainClosePeriod/2), 0)
 			if err = s.db.CreateTask(ctx, PaymentsTaskPool, "confirm-close-virtual", channel.Address,
-				"confirm-close-virtual-"+hex.EncodeToString(vch.Key),
+				"confirm-close-virtual-"+base64.StdEncoding.EncodeToString(vch.Key),
 				db.ConfirmCloseVirtualTask{
 					VirtualKey: data.Key,
 				}, nil, &tryTill,
@@ -645,7 +694,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			// Creating aggressive onchain close task, for the future,
 			// in case we will not be able to communicate with party
 			if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", channel.Address+"-uncoop",
-				"uncooperative-close-"+channel.Address+"-vc-"+hex.EncodeToString(vch.Key),
+				"uncooperative-close-"+channel.Address+"-vc-"+base64.StdEncoding.EncodeToString(vch.Key),
 				db.ChannelUncooperativeCloseTask{
 					Address:                 channel.Address,
 					CheckVirtualStillExists: vch.Key,

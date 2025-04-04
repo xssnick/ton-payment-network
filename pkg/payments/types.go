@@ -3,6 +3,7 @@ package payments
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -322,13 +323,13 @@ func (s *SemiChannel) Dump() string {
 			return "failed cell"
 		}
 		cpData = fmt.Sprintf("(data_hash: %s seqno: %d; sent: %s; conditionals_hash: %s)",
-			hex.EncodeToString(cp.Hash()[:8]),
-			s.CounterpartyData.Seqno, s.CounterpartyData.Sent.String(), hex.EncodeToString(s.CounterpartyData.ConditionalsHash))
+			base64.StdEncoding.EncodeToString(cp.Hash()[:8]),
+			s.CounterpartyData.Seqno, s.CounterpartyData.Sent.String(), base64.StdEncoding.EncodeToString(s.CounterpartyData.ConditionalsHash))
 	}
 
 	return fmt.Sprintf("data_hash: %s seqno: %d; sent: %s; conditionals_hash: %s; counterparty: %s",
-		hex.EncodeToString(c.Hash()[:8]),
-		s.Data.Seqno, s.Data.Sent.String(), hex.EncodeToString(s.Data.ConditionalsHash), cpData)
+		base64.StdEncoding.EncodeToString(c.Hash()[:8]),
+		s.Data.Seqno, s.Data.Sent.String(), base64.StdEncoding.EncodeToString(s.Data.ConditionalsHash), cpData)
 }
 
 func (s *SemiChannelBody) Copy() (SemiChannelBody, error) {

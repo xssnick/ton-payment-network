@@ -15,22 +15,41 @@ import (
 	"time"
 )
 
-type ChannelConfig struct {
-	VirtualChannelProxyFee      string
-	QuarantineDurationSec       uint32
-	MisbehaviorFine             string
-	ConditionalCloseDurationSec uint32
+type VirtualConfig struct {
+	ProxyMaxCapacity string
+	ProxyMinFee      string
+	ProxyFeePercent  float64
+	AllowTunneling   bool
+}
+
+type CoinConfig struct {
+	Enabled             bool
+	VirtualTunnelConfig VirtualConfig
+	MisbehaviorFine     string
+	ExcessFeeTon        string
+	Symbol              string
+	Decimals            uint8
+}
+
+type ChannelsConfig struct {
+	SupportedCoins Whitelist
+
+	BufferTimeToCommit              uint32
+	QuarantineDurationSec           uint32
+	ConditionalCloseDurationSec     uint32
+	MinSafeVirtualChannelTimeoutSec uint32
 }
 
 type Whitelist struct {
-	AllowTonChannels       bool
-	AllowedJettons         []string
-	AllowedExtraCurrencies []uint32
+	Ton             CoinConfig
+	Jettons         map[string]CoinConfig
+	ExtraCurrencies map[uint32]CoinConfig
 }
 
 type Config struct {
-	ADNLServerKey                  ed25519.PrivateKey
-	PaymentNodePrivateKey          ed25519.PrivateKey
+	ADNLServerKey                  []byte
+	PaymentNodePrivateKey          []byte
+	WalletPrivateKey               []byte
 	APIListenAddr                  string
 	WebhooksSignatureHMACSHA256Key string
 	NodeListenAddr                 string
@@ -38,8 +57,7 @@ type Config struct {
 	NetworkConfigUrl               string
 	DBPath                         string
 	SecureProofPolicy              bool
-	ChannelConfig                  ChannelConfig
-	Whitelist                      Whitelist
+	ChannelConfig                  ChannelsConfig
 }
 
 func checkIPAddress(ip string) string {
@@ -149,6 +167,11 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 
+		_, walletPriv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			return nil, err
+		}
+
 		_, nodePriv, err := ed25519.GenerateKey(nil)
 		if err != nil {
 			return nil, err
@@ -160,8 +183,9 @@ func LoadConfig(path string) (*Config, error) {
 		}
 
 		cfg := &Config{
-			ADNLServerKey:                  nodePriv,
-			PaymentNodePrivateKey:          priv,
+			ADNLServerKey:                  nodePriv.Seed(),
+			PaymentNodePrivateKey:          priv.Seed(),
+			WalletPrivateKey:               walletPriv.Seed(),
 			APIListenAddr:                  "0.0.0.0:8096",
 			NodeListenAddr:                 "0.0.0.0:17555",
 			ExternalIP:                     "",
@@ -169,16 +193,42 @@ func LoadConfig(path string) (*Config, error) {
 			DBPath:                         "./payment-node-db",
 			WebhooksSignatureHMACSHA256Key: base64.StdEncoding.EncodeToString(whKey),
 			SecureProofPolicy:              false,
-			ChannelConfig: ChannelConfig{
-				VirtualChannelProxyFee:      "0.01",
-				QuarantineDurationSec:       600,
-				MisbehaviorFine:             "0.15",
-				ConditionalCloseDurationSec: 180,
-			},
-			Whitelist: Whitelist{
-				AllowTonChannels:       true,
-				AllowedJettons:         []string{},
-				AllowedExtraCurrencies: []uint32{},
+			ChannelConfig: ChannelsConfig{
+				SupportedCoins: Whitelist{
+					Ton: CoinConfig{
+						Enabled: true,
+						VirtualTunnelConfig: VirtualConfig{
+							ProxyMaxCapacity: "5",
+							ProxyMinFee:      "0.0005",
+							ProxyFeePercent:  0.5,
+							AllowTunneling:   true,
+						},
+						MisbehaviorFine: "3",
+						ExcessFeeTon:    "0.25",
+						Symbol:          "TON",
+						Decimals:        9,
+					},
+					Jettons: map[string]CoinConfig{
+						"EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs": {
+							Enabled: false,
+							VirtualTunnelConfig: VirtualConfig{
+								ProxyMaxCapacity: "15.5",
+								ProxyMinFee:      "0.002",
+								ProxyFeePercent:  0.8,
+								AllowTunneling:   false,
+							},
+							MisbehaviorFine: "12",
+							ExcessFeeTon:    "0.35",
+							Symbol:          "USDT",
+							Decimals:        6,
+						},
+					},
+					ExtraCurrencies: map[uint32]CoinConfig{},
+				},
+				BufferTimeToCommit:              3 * 3600,
+				QuarantineDurationSec:           6 * 3600,
+				ConditionalCloseDurationSec:     3 * 3600,
+				MinSafeVirtualChannelTimeoutSec: 60,
 			},
 		}
 
@@ -204,6 +254,7 @@ func LoadConfig(path string) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		cfg.ChannelConfig.SupportedCoins.Ton.Decimals = 9 // force to avoid problems on change
 		return &cfg, nil
 	}
 

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/hex"
+	"encoding/base64"
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
@@ -34,7 +34,7 @@ type PeerConnection struct {
 var ErrNotConnected = fmt.Errorf("not connected with peer")
 
 type Service interface {
-	GetChannelConfig() ChannelConfig
+	ReviewChannelConfig(prop ProposeChannelConfig) (*address.Address, error)
 	ProcessAction(ctx context.Context, key ed25519.PublicKey, lockId int64, channelAddr *address.Address, signedState payments.SignedSemiChannel, action Action, updateProof *cell.Cell) (*payments.SignedSemiChannel, error)
 	ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action Action) ([]byte, error)
 	ProcessExternalChannelLock(ctx context.Context, key ed25519.PublicKey, addr *address.Address, id int64, lock bool) error
@@ -265,19 +265,27 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				return fmt.Errorf("failed to hash our auth data: %w", err)
 			}
 
-			if err = peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Authenticate{
+			if err = peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Authenticate{
 				Key:       s.channelKey.Public().(ed25519.PublicKey),
 				Timestamp: q.Timestamp,
 				Signature: ed25519.Sign(s.channelKey, authData),
 			}); err != nil {
 				return err
 			}
-		case GetChannelConfig:
-			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, s.svc.GetChannelConfig()); err != nil {
+		case ProposeChannelConfig:
+			var res ChannelConfigDecision
+			if addr, err := s.svc.ReviewChannelConfig(q); err == nil {
+				res.WalletAddr = addr.Data()
+				res.Ok = true
+			} else {
+				res.Reason = err.Error()
+			}
+
+			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, res); err != nil {
 				return err
 			}
 		case Ping:
-			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Pong{Value: q.Value}); err != nil {
+			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Pong{Value: q.Value}); err != nil {
 				return err
 			}
 		case ProposeAction:
@@ -315,7 +323,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				updCell = updCell.MustPeekRef(0)
 			}
 
-			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, ProposalDecision{Agreed: ok, Reason: reason, SignedState: updCell}); err != nil {
+			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, ProposalDecision{Agreed: ok, Reason: reason, SignedState: updCell}); err != nil {
 				return err
 			}
 		case RequestAction:
@@ -332,7 +340,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				ok = false
 			}
 
-			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Decision{Agreed: ok, Reason: reason, Signature: sign}); err != nil {
+			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Decision{Agreed: ok, Reason: reason, Signature: sign}); err != nil {
 				return err
 			}
 		}
@@ -400,7 +408,7 @@ func (s *Server) RemoveUrgentPeer(channelKey ed25519.PublicKey) {
 func (s *Server) connect(ctx context.Context, channelKey ed25519.PublicKey) (*PeerConnection, error) {
 	channelKeyId, err := tl.Hash(adnl.PublicKeyED25519{Key: channelKey})
 	if err != nil {
-		return nil, fmt.Errorf("failed to calc hash of channel key %s: %w", hex.EncodeToString(channelKey), err)
+		return nil, fmt.Errorf("failed to calc hash of channel key %s: %w", base64.StdEncoding.EncodeToString(channelKey), err)
 	}
 
 	dhtVal, _, err := s.dht.FindValue(ctx, &dht.Key{
@@ -409,27 +417,27 @@ func (s *Server) connect(ctx context.Context, channelKey ed25519.PublicKey) (*Pe
 		Index: 0,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to find payment-node in dht of %s: %w", hex.EncodeToString(channelKey), err)
+		return nil, fmt.Errorf("failed to find payment-node in dht of %s: %w", base64.StdEncoding.EncodeToString(channelKey), err)
 	}
 
 	var nodeAddr NodeAddress
 	if _, err = tl.Parse(&nodeAddr, dhtVal.Data, true); err != nil {
-		return nil, fmt.Errorf("failed to parse node dht value of %s: %w", hex.EncodeToString(channelKey), err)
+		return nil, fmt.Errorf("failed to parse node dht value of %s: %w", base64.StdEncoding.EncodeToString(channelKey), err)
 	}
 
 	list, key, err := s.dht.FindAddresses(ctx, nodeAddr.ADNLAddr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find address in dht of %s: %w", hex.EncodeToString(channelKey), err)
+		return nil, fmt.Errorf("failed to find address in dht of %s: %w", base64.StdEncoding.EncodeToString(channelKey), err)
 	}
 
 	if len(list.Addresses) == 0 {
-		return nil, fmt.Errorf("no addresses for %s", hex.EncodeToString(channelKey))
+		return nil, fmt.Errorf("no addresses for %s", base64.StdEncoding.EncodeToString(channelKey))
 	}
 	addr := fmt.Sprintf("%s:%d", list.Addresses[0].IP.String(), list.Addresses[0].Port)
 
 	peer, err := s.gate.RegisterClient(addr, key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to peer of %s at %s: %w", hex.EncodeToString(channelKey), addr, err)
+		return nil, fmt.Errorf("failed to connect to peer of %s at %s: %w", base64.StdEncoding.EncodeToString(channelKey), addr, err)
 	}
 	return s.bootstrapPeer(peer), nil
 }
@@ -512,13 +520,17 @@ func (s *Server) preparePeer(ctx context.Context, key []byte, connect bool) (pee
 	return peer, nil
 }
 
-func (s *Server) GetChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey) (*ChannelConfig, error) {
-	var res ChannelConfig
-	err := s.doRLDPQuery(ctx, theirChannelKey, GetChannelConfig{}, &res, true)
+func (s *Server) ProposeChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey, prop ProposeChannelConfig) (*address.Address, error) {
+	var res ChannelConfigDecision
+	err := s.doRLDPQuery(ctx, theirChannelKey, prop, &res, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
-	return &res, nil
+
+	if !res.Ok {
+		return nil, fmt.Errorf("rejected: %s", res.Reason)
+	}
+	return address.NewAddress(0, 0, res.WalletAddr), nil
 }
 
 func (s *Server) RequestChannelLock(ctx context.Context, theirChannelKey ed25519.PublicKey, channel *address.Address, id int64, lock bool) (*Decision, error) {

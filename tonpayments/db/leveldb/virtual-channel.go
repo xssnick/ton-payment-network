@@ -2,7 +2,7 @@ package leveldb
 
 import (
 	"context"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +12,7 @@ import (
 )
 
 func (d *DB) CreateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChannelMeta) error {
-	key := []byte("vch:" + hex.EncodeToString(meta.Key))
+	key := []byte("vch:" + base64.StdEncoding.EncodeToString(meta.Key))
 
 	return d.Transaction(ctx, func(ctx context.Context) error {
 		tx := d.getExecutor(ctx)
@@ -40,7 +40,7 @@ func (d *DB) CreateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChann
 }
 
 func (d *DB) UpdateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChannelMeta) error {
-	key := []byte("vch:" + hex.EncodeToString(meta.Key))
+	key := []byte("vch:" + base64.StdEncoding.EncodeToString(meta.Key))
 
 	return d.Transaction(ctx, func(ctx context.Context) error {
 		tx := d.getExecutor(ctx)
@@ -70,7 +70,7 @@ func (d *DB) UpdateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChann
 func (d *DB) GetVirtualChannelMeta(ctx context.Context, key []byte) (*db.VirtualChannelMeta, error) {
 	tx := d.getExecutor(ctx)
 
-	data, err := tx.Get([]byte("vch:"+hex.EncodeToString(key)), nil)
+	data, err := tx.Get([]byte("vch:"+base64.StdEncoding.EncodeToString(key)), nil)
 	if err != nil {
 		if errors.Is(err, leveldb.ErrNotFound) {
 			return nil, db.ErrNotFound

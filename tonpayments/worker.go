@@ -2,7 +2,7 @@ package tonpayments
 
 import (
 	"context"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,7 +125,7 @@ func (s *Service) taskExecutor() {
 
 						tryTill := time.Unix(vch.Deadline, 0)
 						if err = s.db.CreateTask(ctx, PaymentsTaskPool, "close-next-virtual", meta.Incoming.ChannelAddress,
-							"close-next-"+hex.EncodeToString(data.VirtualKey),
+							"close-next-"+base64.StdEncoding.EncodeToString(data.VirtualKey),
 							db.CloseNextVirtualTask{
 								VirtualKey: data.VirtualKey,
 								State:      state.ToBOC(),
@@ -197,10 +197,11 @@ func (s *Service) taskExecutor() {
 						Key:    data.VirtualKey,
 						Status: db.VirtualChannelStatePending,
 						Outgoing: &db.VirtualChannelMetaSide{
-							ChannelAddress: data.ChannelAddress,
-							Capacity:       tlb.FromNanoTON(nextCap).String(),
-							Fee:            tlb.FromNanoTON(nextFee).String(),
-							Deadline:       time.Unix(data.Deadline, 0),
+							ChannelAddress:        data.ChannelAddress,
+							Capacity:              tlb.FromNanoTON(nextCap).String(),
+							Fee:                   tlb.FromNanoTON(nextFee).String(),
+							UncooperativeDeadline: time.Unix(data.Deadline, 0),
+							SafeDeadline:          time.Unix(data.Deadline, 0).Add(-time.Duration(channel.SafeOnchainClosePeriod+int64(s.cfg.MinSafeVirtualChannelTimeoutSec)) * time.Second),
 						},
 						FinalDestination: data.FinalDestinationKey,
 						CreatedAt:        time.Now(),
@@ -219,10 +220,11 @@ func (s *Service) taskExecutor() {
 						}
 
 						meta.Incoming = &db.VirtualChannelMetaSide{
-							ChannelAddress: data.PrevChannelAddress,
-							Capacity:       tlb.FromNanoTON(prevVch.Capacity).String(),
-							Fee:            tlb.FromNanoTON(prevVch.Fee).String(),
-							Deadline:       time.Unix(prevVch.Deadline, 0),
+							ChannelAddress:        data.PrevChannelAddress,
+							Capacity:              tlb.FromNanoTON(prevVch.Capacity).String(),
+							Fee:                   tlb.FromNanoTON(prevVch.Fee).String(),
+							UncooperativeDeadline: time.Unix(prevVch.Deadline, 0),
+							SafeDeadline:          time.Unix(prevVch.Deadline, 0).Add(-time.Duration(prev.SafeOnchainClosePeriod+int64(s.cfg.MinSafeVirtualChannelTimeoutSec)) * time.Second),
 						}
 					}
 
@@ -256,15 +258,14 @@ func (s *Service) taskExecutor() {
 
 								// if we are not the first node of the tunnel
 								if data.PrevChannelAddress != "" {
-									tryTill := time.Unix(data.Deadline, 0)
 									// consider virtual channel unsuccessful and gracefully removed
 									// and notify previous party that we are ready to release locked coins.
 									err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-remove-virtual", data.PrevChannelAddress,
-										"ask-remove-virtual-"+hex.EncodeToString(data.VirtualKey),
+										"ask-remove-virtual-"+base64.StdEncoding.EncodeToString(data.VirtualKey),
 										db.AskRemoveVirtualTask{
 											ChannelAddress: data.PrevChannelAddress,
 											Key:            data.VirtualKey,
-										}, nil, &tryTill,
+										}, nil, nil,
 									)
 									if err != nil {
 										return fmt.Errorf("failed to create ask-remove-virtual task: %w", err)
@@ -309,10 +310,20 @@ func (s *Service) taskExecutor() {
 					}
 
 					if channel.Status != db.ChannelStateActive {
-						// not needed anymore
+						// not possible anymore
 						return nil
 					}
 
+					meta, err := s.db.GetVirtualChannelMeta(ctx, data.Key)
+					if err != nil {
+						return fmt.Errorf("failed to load virtual channel meta: %w", err)
+					}
+
+					if meta.Status == db.VirtualChannelStateRemoved || meta.Status == db.VirtualChannelStateClosed {
+						return nil
+					}
+
+					log.Info().Str("channel", channel.Address).Hex("key", data.Key).Msg("asking to remove virtual channel")
 					_, err = s.requestAction(ctx, data.ChannelAddress, transport.RequestRemoveVirtualAction{
 						Key: data.Key,
 					})
@@ -407,7 +418,7 @@ func (s *Service) taskExecutor() {
 							// Creating aggressive onchain close task, for the future,
 							// in case we will not be able to communicate with party
 							if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", meta.Outgoing.ChannelAddress+"-uncoop",
-								"uncooperative-close-"+meta.Outgoing.ChannelAddress+"-vc-"+hex.EncodeToString(data.Key),
+								"uncooperative-close-"+meta.Outgoing.ChannelAddress+"-vc-"+base64.StdEncoding.EncodeToString(data.Key),
 								db.ChannelUncooperativeCloseTask{
 									Address:                 meta.Outgoing.ChannelAddress,
 									CheckVirtualStillExists: data.Key,
@@ -448,7 +459,7 @@ func (s *Service) taskExecutor() {
 						// consider virtual channel unsuccessful and gracefully removed
 						// and notify previous party that we are ready to release locked coins.
 						err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-remove-virtual", meta.Incoming.ChannelAddress,
-							"ask-remove-virtual-"+hex.EncodeToString(data.Key),
+							"ask-remove-virtual-"+base64.StdEncoding.EncodeToString(data.Key),
 							db.AskRemoveVirtualTask{
 								ChannelAddress: meta.Incoming.ChannelAddress,
 								Key:            data.Key,

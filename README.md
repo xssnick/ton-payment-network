@@ -335,7 +335,7 @@ The standalone node currently supports several **console commands**:
       This command also returns a **private key** for the virtual channel.
 - `send` — Send coins using a **self-closing virtual channel**.  
   Parameters are similar to `open`.
-- `sign` — Accepts a virtual channel private key and amount, returns a **hex-encoded state** that the counterparty can use to close the virtual channel.
+- `sign` — Accepts a virtual channel private key and amount, returns a **base64-encoded state** that the counterparty can use to close the virtual channel.
 - `close` — Close a virtual channel (used by the **recipient**) by providing a signed state.
 - `destroy` — Close an **onchain channel** by address.  
   First attempts a **cooperative closure**, and if that fails, performs a **forced closure**.

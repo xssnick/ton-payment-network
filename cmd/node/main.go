@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -126,7 +126,7 @@ func main() {
 		return
 	}
 
-	gate := adnl.NewGateway(cfg.ADNLServerKey)
+	gate := adnl.NewGateway(ed25519.NewKeyFromSeed(cfg.ADNLServerKey))
 
 	if cfg.ExternalIP != "" {
 		ip := net.ParseIP(cfg.ExternalIP)
@@ -158,13 +158,13 @@ func main() {
 		}
 	}
 
-	fdb, err := leveldb.NewDB(cfg.DBPath, cfg.PaymentNodePrivateKey.Public().(ed25519.PublicKey))
+	fdb, err := leveldb.NewDB(cfg.DBPath, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey).Public().(ed25519.PublicKey))
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init leveldb")
 		return
 	}
 
-	tr := transport.NewServer(dhtClient, gate, cfg.ADNLServerKey, cfg.PaymentNodePrivateKey, cfg.ExternalIP != "")
+	tr := transport.NewServer(dhtClient, gate, ed25519.NewKeyFromSeed(cfg.ADNLServerKey), ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), cfg.ExternalIP != "")
 
 	var seqno uint32
 	if bo, err := fdb.GetBlockOffset(context.Background()); err != nil {
@@ -207,13 +207,16 @@ func main() {
 		for _, channel := range chList {
 			if channel.Status != db.ChannelStateInactive {
 				sc.OnChannelUpdate(channel)
-				log.Info().Msg("start listening for channel events")
 			}
+		}
+
+		if len(chList) > 16 {
+			log.Warn().Msg("too many channels, it is recommended to switch to block scanner instead of individual account scanner by using --use-block-scanner flag")
 		}
 	}
 
 	walletAbstractSeqno := uint32(0)
-	w, err := wallet.FromPrivateKey(apiClient, cfg.PaymentNodePrivateKey, wallet.ConfigHighloadV3{
+	w, err := wallet.FromPrivateKey(apiClient, ed25519.NewKeyFromSeed(cfg.WalletPrivateKey), wallet.ConfigHighloadV3{
 		MessageTTL: 3*60 + 30,
 		MessageBuilder: func(ctx context.Context, subWalletId uint32) (id uint32, createdAt int64, err error) {
 			createdAt = time.Now().Unix() - 30 // something older than last master block, to pass through LS external's time validation
@@ -228,19 +231,19 @@ func main() {
 	}
 	log.Info().Str("addr", w.WalletAddress().String()).Msg("wallet initialized")
 
-	svc, err := tonpayments.NewService(apiClient, fdb, tr, w, inv, cfg.PaymentNodePrivateKey, cfg.ChannelConfig, cfg.Whitelist)
+	svc, err := tonpayments.NewService(apiClient, fdb, tr, w, inv, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), cfg.ChannelConfig)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init service")
 		return
 	}
 
 	tr.SetService(svc)
-	log.Info().Hex("pubkey", cfg.PaymentNodePrivateKey.Public().(ed25519.PublicKey)).Msg("node initialized")
+	log.Info().Str("pubkey", base64.StdEncoding.EncodeToString(ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey).Public().(ed25519.PublicKey))).Msg("node initialized")
 
 	if !*DaemonMode {
 		go func() {
 			for {
-				if err := commandReader(svc); err != nil {
+				if err := commandReader(svc, cfg, fdb); err != nil {
 					log.Error().Err(err).Msg("command failed")
 				}
 			}
@@ -278,7 +281,7 @@ func main() {
 	svc.Start()
 }
 
-func commandReader(svc *tonpayments.Service) error {
+func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB) error {
 	var cmd string
 	_, _ = fmt.Scanln(&cmd)
 
@@ -330,7 +333,7 @@ func commandReader(svc *tonpayments.Service) error {
 		var strKey string
 		_, _ = fmt.Scanln(&strKey)
 
-		btsKey, err := hex.DecodeString(strKey)
+		btsKey, err := base64.StdEncoding.DecodeString(strKey)
 		if err != nil {
 			return fmt.Errorf("incorrect format of key: %w", err)
 		}
@@ -363,14 +366,14 @@ func commandReader(svc *tonpayments.Service) error {
 			return fmt.Errorf("failed to sign state: %w", err)
 		}
 
-		log.Info().Str("signed_state", hex.EncodeToString(state)).Msg("state was signed")
+		log.Info().Str("signed_state", base64.StdEncoding.EncodeToString(state)).Msg("state was signed")
 	case "close":
-		log.Info().Msg("enter the virtual channel final state hex:")
+		log.Info().Msg("enter the virtual channel final state base64:")
 
 		var stateStr string
 		_, _ = fmt.Scanln(&stateStr)
 
-		btsState, err := hex.DecodeString(stateStr)
+		btsState, err := base64.StdEncoding.DecodeString(stateStr)
 		if err != nil {
 			return fmt.Errorf("incorrect format of state: %w", err)
 		}
@@ -390,6 +393,22 @@ func commandReader(svc *tonpayments.Service) error {
 			return fmt.Errorf("failed to close channel: %w", err)
 		}
 		log.Info().Msg("virtual channel closure requested")
+	case "ask-remove":
+		log.Info().Msg("input virtual channel public key:")
+		var strKey string
+		_, _ = fmt.Scanln(&strKey)
+
+		btsKey, err := base64.StdEncoding.DecodeString(strKey)
+		if err != nil {
+			return fmt.Errorf("incorrect format of key: %w", err)
+		}
+		if len(btsKey) != 32 {
+			return fmt.Errorf("incorrect len of key: %d, should be 32", len(btsKey))
+		}
+
+		if err = svc.RequestRemoveVirtual(context.Background(), btsKey); err != nil {
+			return fmt.Errorf("failed to remove virtual channel: %w", err)
+		}
 	case "topup":
 		log.Info().Msg("enter channel address to topup:")
 
@@ -443,7 +462,7 @@ func commandReader(svc *tonpayments.Service) error {
 		var strKey string
 		_, _ = fmt.Scanln(&strKey)
 
-		btsKey, err := hex.DecodeString(strKey)
+		btsKey, err := base64.StdEncoding.DecodeString(strKey)
 		if err != nil {
 			return fmt.Errorf("incorrect format of key: %w", err)
 		}
@@ -481,10 +500,10 @@ func commandReader(svc *tonpayments.Service) error {
 
 		keys := strings.Split(strings.ReplaceAll(strKeys, " ", ""), ",")
 
-		var with []byte
+		var err error
 		var parsedKeys [][]byte
 		for _, strKey := range keys {
-			btsKey, err := hex.DecodeString(strKey)
+			btsKey, err := base64.StdEncoding.DecodeString(strKey)
 			if err != nil {
 				return fmt.Errorf("incorrect format of key: %w", err)
 			}
@@ -492,11 +511,23 @@ func commandReader(svc *tonpayments.Service) error {
 				return fmt.Errorf("incorrect len of key: %d, should be 32", len(btsKey))
 			}
 
-			if with == nil {
-				with = btsKey
-			}
-
 			parsedKeys = append(parsedKeys, btsKey)
+		}
+
+		log.Info().Msg("input jetton master address or extra currency id, or skip for ton:")
+		var jetton string
+		_, _ = fmt.Scanln(&jetton)
+
+		var ecID uint64
+		var jettonMaster *address.Address
+		if jetton != "" {
+			ecID, err = strconv.ParseUint(jetton, 10, 32)
+			if err != nil {
+				jettonMaster, err = address.ParseAddr(jetton)
+				if err != nil {
+					return fmt.Errorf("incorrect format: %w", err)
+				}
+			}
 		}
 
 		log.Info().Msg("input amount nano, excluding tunnelling fee:")
@@ -519,6 +550,9 @@ func commandReader(svc *tonpayments.Service) error {
 			return fmt.Errorf("incorrect format of amount fee")
 		}
 
+		safeHopTTL := time.Duration(cfg.ChannelConfig.QuarantineDurationSec+cfg.ChannelConfig.BufferTimeToCommit+cfg.ChannelConfig.ConditionalCloseDurationSec+
+			cfg.ChannelConfig.MinSafeVirtualChannelTimeoutSec) * time.Second
+
 		fullAmt := new(big.Int).Set(amt)
 		var tunChain []transport.TunnelChainPart
 		for i, parsedKey := range parsedKeys {
@@ -532,7 +566,7 @@ func commandReader(svc *tonpayments.Service) error {
 				Target:   parsedKey,
 				Capacity: amt,
 				Fee:      fee,
-				Deadline: time.Now().Add(1*time.Hour + (30*time.Minute)*time.Duration(len(parsedKeys)-i)),
+				Deadline: time.Now().Add(1*time.Minute + safeHopTTL*time.Duration(len(parsedKeys)-i)),
 			})
 		}
 
@@ -543,7 +577,7 @@ func commandReader(svc *tonpayments.Service) error {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		err = svc.OpenVirtualChannel(ctx, with, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc)
+		err = svc.OpenVirtualChannel(ctx, tunChain[0].Target, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc, jettonMaster, uint32(ecID))
 		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to open virtual channel with node: %w", err)
@@ -551,7 +585,7 @@ func commandReader(svc *tonpayments.Service) error {
 
 		if cmd != "send" {
 			log.Info().
-				Str("private_key", hex.EncodeToString(vPriv.Seed())).
+				Str("private_key", base64.StdEncoding.EncodeToString(vPriv.Seed())).
 				Str("total_amount", tlb.FromNanoTON(fullAmt).String()).
 				Str("capacity", amt.String()).
 				Msg("virtual channel opening requested")
@@ -561,6 +595,50 @@ func commandReader(svc *tonpayments.Service) error {
 				Str("amount", amt.String()).
 				Msg("virtual transfer requested")
 		}
+	case "debug-tasks", "debug-tasks-all":
+		log.Info().Msg("input tasks prefix to search:")
+		var pfx string
+		_, _ = fmt.Scanln(&pfx)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		list, err := fdb.DumpTasks(ctx, pfx)
+		cancel()
+		if err != nil {
+			log.Error().Err(err).Msg("failed to load planned tasks")
+			break
+		}
+
+		for _, task := range list {
+			if task.CompletedAt != nil {
+				if cmd == "debug-tasks-all" {
+					log.Info().Str("type", task.Type).
+						Str("id", task.ID).
+						Time("created_at", task.CreatedAt).
+						Time("completed_at", *task.CompletedAt).
+						Msg("completed task")
+				}
+				continue
+			}
+
+			if task.ExecuteTill != nil && task.ExecuteTill.Before(time.Now()) {
+				if cmd == "debug-tasks-all" {
+					log.Info().Str("type", task.Type).
+						Str("id", task.ID).
+						Time("created_at", task.CreatedAt).
+						Time("execute_till", *task.ExecuteTill).
+						Msg("outdated task")
+				}
+				continue
+			}
+
+			log.Info().Str("type", task.Type).
+				Str("id", task.ID).
+				Time("created_at", task.CreatedAt).
+				Str("last_error", task.LastError).
+				Time("after", task.ExecuteAfter).
+				Msg("planned task")
+		}
+		log.Info().Msg("done")
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}

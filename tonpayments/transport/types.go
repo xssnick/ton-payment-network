@@ -23,7 +23,7 @@ func init() {
 
 	tl.Register(Decision{}, "payments.decision agreed:Bool reason:string signature:bytes = payments.Decision")
 	tl.Register(ProposalDecision{}, "payments.proposalDecision agreed:Bool reason:string signedState:bytes = payments.ProposalDecision")
-	tl.Register(ChannelConfig{}, "payments.channelConfig excessFee:bytes virtualTunnelFee:bytes walletAddr:int256 quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.ChannelConfig")
+	tl.Register(ChannelConfigDecision{}, "payments.channelConfig ok:Bool walletAddr:int256 reason:string = payments.ChannelConfigDecision")
 	tl.Register(AuthenticateToSign{}, "payments.authenticateToSign a:int256 b:int256 timestamp:long = payments.AuthenticateToSign")
 	tl.Register(NodeAddress{}, "payments.nodeAddress adnl_addr:int256 = payments.NodeAddress")
 
@@ -36,7 +36,7 @@ func init() {
 	tl.Register(CooperativeCommitAction{}, "payments.cooperativeCommitAction signedCommitRequest:bytes = payments.Action")
 	tl.Register(IncrementStatesAction{}, "payments.incrementStatesAction wantResponse:Bool = payments.Action")
 
-	tl.Register(GetChannelConfig{}, "payments.getChannelConfig = payments.Request")
+	tl.Register(ProposeChannelConfig{}, "payments.proposeChannelConfig jettonAddr:int256 ec_id:int excessFee:bytes quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.Request")
 	tl.Register(RequestAction{}, "payments.requestAction channelAddr:int256 action:payments.Action = payments.Request")
 	tl.Register(ProposeAction{}, "payments.proposeAction lockId:long channelAddr:int256 action:payments.Action state:bytes conditionals:bytes = payments.Request")
 	tl.Register(Authenticate{}, "payments.authenticate key:int256 timestamp:long signature:bytes = payments.Authenticate")
@@ -209,18 +209,23 @@ type IncrementStatesAction struct {
 	WantResponse bool `tl:"bool"`
 }
 
-// GetChannelConfig - request channel params supported by party,
+// ProposeChannelConfig - request channel params supported by party,
 // to deploy contract and initialize communication
-type GetChannelConfig struct{}
+type ProposeChannelConfig struct {
+	JettonAddr      []byte `tl:"int256"`
+	ExtraCurrencyID uint32 `tl:"int"`
 
-// ChannelConfig - response of GetChannelConfig
-type ChannelConfig struct {
 	ExcessFee                []byte `tl:"bytes"`
-	VirtualTunnelFee         []byte `tl:"bytes"`
-	WalletAddr               []byte `tl:"int256"`
 	QuarantineDuration       uint32 `tl:"int"`
 	MisbehaviorFine          []byte `tl:"bytes"`
 	ConditionalCloseDuration uint32 `tl:"int"`
+}
+
+// ChannelConfigDecision - response for ProposeChannelConfig
+type ChannelConfigDecision struct {
+	Ok         bool   `tl:"bool"`
+	WalletAddr []byte `tl:"int256"`
+	Reason     string `tl:"string"`
 }
 
 func (a *OpenVirtualAction) SetInstructions(actions []OpenVirtualInstruction, key ed25519.PrivateKey) error {

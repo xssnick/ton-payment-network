@@ -11,13 +11,13 @@ Query parameter `address` must be set to channel address.
 Response example:
 ```json
 {
-   "id": "3e4c462d14277d25e89b063e4df4e000",
+   "id": "PkxGLRQnfSXomwY+TfTgAA==",
    "address": "EQAxZGOOZAXU5XhCAp8bbGG5xQZfGhc6ppHrdIXJrla6Ji8i",
    "accepting_actions": true,
    "status": "active",
    "we_left": true,
    "our": {
-      "key": "fdf66ea12228f2dab720d3f4deffc82d8a10eef7400ff604aa5d4e7e80758370",
+      "key": "/fZuoSIo8tq3INP03v/ILYoQ7vdAD/YEql1OfoB1g3A=",
       "available_balance": "0",
       "onchain": {
          "committed_seqno": 0,
@@ -26,7 +26,7 @@ Response example:
       }
    },
    "their": {
-      "key": "3e4c462d14277d25e89b063e4df4e0476d4f5729c11da0ea716d7003cc6ba26c",
+      "key": "PkxGLRQnfSXomwY+TfTgR21PVynBHaDqcW1wA8xromw=",
       "available_balance": "0",
       "onchain": {
          "committed_seqno": 0,
@@ -48,13 +48,13 @@ Response example:
 ```json
 [
    {
-      "id": "3e4c462d14277d25e89b063e4df4e000",
+      "id": "PkxGLRQnfSXomwY+TfTgAA==",
       "address": "EQAxZGOOZAXU5XhCAp8bbGG5xQZfGhc6ppHrdIXJrla6Ji8i",
       "accepting_actions": true,
       "status": "active",
       "we_left": true,
       "our": {
-         "key": "fdf66ea12228f2dab720d3f4deffc82d8a10eef7400ff604aa5d4e7e80758370",
+         "key": "/fZuoSIo8tq3INP03v/ILYoQ7vdAD/YEql1OfoB1g3A=",
          "available_balance": "0",
          "onchain": {
             "committed_seqno": 0,
@@ -63,7 +63,7 @@ Response example:
          }
       },
       "their": {
-         "key": "3e4c462d14277d25e89b063e4df4e0476d4f5729c11da0ea716d7003cc6ba26c",
+         "key": "PkxGLRQnfSXomwY+TfTgR21PVynBHaDqcW1wA8xromw=",
          "available_balance": "0",
          "onchain": {
             "committed_seqno": 0,
@@ -76,13 +76,13 @@ Response example:
       "created_at": "2024-02-04T14:39:10.094014354Z"
    },
    {
-      "id": "fdf66ea12228f2dab720d3f4deffc800",
+      "id": "/fZuoSIo8tq3INP03v/IAA==",
       "address": "EQCEFA5lzhJbJGIWoSokRoJFeEMisCON-qlvVUgZjwyGDoxR",
       "accepting_actions": true,
       "status": "active",
       "we_left": false,
       "our": {
-         "key": "fdf66ea12228f2dab720d3f4deffc82d8a10eef7400ff604aa5d4e7e80758370",
+         "key": "/fZuoSIo8tq3INP03v/ILYoQ7vdAD/YEql1OfoB1g3A=",
          "available_balance": "0.1",
          "onchain": {
             "committed_seqno": 0,
@@ -91,7 +91,7 @@ Response example:
          }
       },
       "their": {
-         "key": "3e4c462d14277d25e89b063e4df4e0476d4f5729c11da0ea716d7003cc6ba26c",
+         "key": "PkxGLRQnfSXomwY+TfTgR21PVynBHaDqcW1wA8xromw=",
          "available_balance": "0.1",
          "onchain": {
             "committed_seqno": 0,
@@ -110,14 +110,14 @@ Response example:
 
 Connects to neighbour node by its key and deploys onchain channel contract with it.
 
-Requires body parameters: `with_node` - hex neighbour node key, `capacity` - amount of ton to add to initial balance.
+Requires body parameters: `with_node` - base64 neighbour node key, `capacity` - amount of ton to add to initial balance.
 
 Optional body parameters: `ec_id` - extra currency id, `jetton_master` - jetton master address, (only one of them or none should be set) if not specified payment channel will use ton.
 
 Request:
 ```json
 {
-   "with_node": "3e4c462d14277d25e89b063e4df4e0476d4f5729c11da0ea716d7003cc6ba26c",
+   "with_node": "PkxGLRQnfSXomwY+TfTgR21PVynBHaDqcW1wA8xromw=",
    "jetton_master": "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
 }
 ```
@@ -210,6 +210,8 @@ Opens virtual channel using specified chain and parameters.
 
 Requires body parameters: `ttl_seconds` - virtual channel life duration, `capacity` - max transferable amount. `nodes_chain` - list of nodes with parameters to build chain.
 
+Optional body parameters: `ec_id` - extra currency id, `jetton_master` - jetton master address, (only one of them or none should be set) if not specified payment channel will use ton.
+
 Node parameters: `deadline_gap_seconds` - seconds to increase channel lifetime for safety reasons, can be got from node parameters, same as `fee` which will be paid to proxy node for the service after channel close. `key` - node key.
 
 Last node is considered as final destination.
@@ -219,14 +221,15 @@ Request:
 {
    "ttl_seconds": 86400,
    "capacity": "3.711",
+   "jetton_master": "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs",
    "nodes_chain": [
       {
-         "key": "3e4c462d14277d25e89b063e4df4e0476d4f5729c11da0ea716d7003cc6ba26c",
+         "key": "PkxGLRQnfSXomwY+TfTgR21PVynBHaDqcW1wA8xromw=",
          "fee": "0.005",
          "deadline_gap_seconds": 1800
       },
       {
-         "key": "1e4c462d14277d25e89b063e4df4e0472d4f5729c11da0ea716d7003cc6ba11f",
+         "key": "HkxGLRQnfSXomwY+TfTgRy1PVynBHaDqcW1wA8xroR8=",
          "fee": "0",
          "deadline_gap_seconds": 1800
       }
@@ -237,8 +240,8 @@ Request:
 Response example:
 ```json
 {
-   "public_key": "af9ad86e9201d7c2b930f6a2707475bfa84faf3633729ec7139c0592d2823d6b",
-   "private_key_seed": "095822d7dc66312d59dd54311d665f26748229bd3a67c80391baef6745e39cf8",
+   "public_key": "r5rYbpIB18K5MPaicHR1v6hPrzYzcp7HE5wFktKCPWs=",
+   "private_key_seed": "CVgi19xmMS1Z3VQxHWZfJnSCKb06Z8gDkbrvZ0XjnPg=",
    "status": "pending",
    "deadline": "2024-02-07T07:55:43+00:00"
 }
@@ -261,12 +264,12 @@ Request:
    "amount": "2.05",
    "nodes_chain": [
       {
-         "key": "3e4c462d14277d25e89b063e4df4e0476d4f5729c11da0ea716d7003cc6ba26c",
+         "key": "PkxGLRQnfSXomwY+TfTgR21PVynBHaDqcW1wA8xromw=",
          "fee": "0.005",
          "deadline_gap_seconds": 300
       },
       {
-         "key": "1e4c462d14277d25e89b063e4df4e0472d4f5729c11da0ea716d7003cc6ba11f",
+         "key": "HkxGLRQnfSXomwY+TfTgRy1PVynBHaDqcW1wA8xroR8=",
          "fee": "0",
          "deadline_gap_seconds": 300
       }
@@ -286,13 +289,13 @@ Response example:
 
 Close virtual channel using specified state.
 
-Requires body parameters: `key` - virtual channel public key, `state` - signed hex state to close channel with.
+Requires body parameters: `key` - virtual channel public key, `state` - signed base64 state to close channel with.
 
 Request:
 ```json
 {
-   "key": "af9ad86e9201d7c2b930f6a2707475bfa84faf3633729ec7139c0592d2823d6b",
-   "state": "f509a550365e4fbb75479b076cf6144d52b20fd97d21d9f9d3873df3fe9615918628129551a29480498744c3b412e590446a632db92204d0e48dadc177624ae2cb123cd6659eceaec432f77d6b2820ca1b6e7006b95163c9942e680b9afed0650bdb2f5513f9219eaad4809209106f02ccff31eb66be9ee8b0c03f78a90dee90623ceb9e2eda39e916ecbb8015771d0d13f615c6d279f26e1f3af56544f283e3"
+   "key": "r5rYbpIB18K5MPaicHR1v6hPrzYzcp7HE5wFktKCPWs=",
+   "state": "9QmlUDZeT7t1R5sHbPYUTVKyD9l9Idn504c98/6WFZGGKBKVUaKUgEmHRMO0EuWQRGpjLbkiBNDkja3Bd2JK4ssSPNZlns6uxDL3fWsoIMobbnAGuVFjyZQuaAua/tBlC9svVRP5IZ6q1ICSCRBvAsz/Metmvp7osMA/eKkN7pBiPOueLto56Rbsu4AVdx0NE/YVxtJ58m4fOvVlRPKD4w=="
 }
 ```
 
@@ -307,13 +310,13 @@ Response example:
 
 Save virtual channel state. Call it each time when you receive update, to have actual state on closure.
 
-Requires body parameters: `key` - virtual channel public key, `state` - signed hex state to save.
+Requires body parameters: `key` - virtual channel public key, `state` - signed base64 state to save.
 
 Request:
 ```json
 {
-   "key": "af9ad86e9201d7c2b930f6a2707475bfa84faf3633729ec7139c0592d2823d6b",
-   "state": "f509a550365e4fbb75479b076cf6144d52b20fd97d21d9f9d3873df3fe9615918628129551a29480498744c3b412e590446a632db92204d0e48dadc177624ae2cb123cd6659eceaec432f77d6b2820ca1b6e7006b95163c9942e680b9afed0650bdb2f5513f9219eaad4809209106f02ccff31eb66be9ee8b0c03f78a90dee90623ceb9e2eda39e916ecbb8015771d0d13f615c6d279f26e1f3af56544f283e3"
+   "key": "r5rYbpIB18K5MPaicHR1v6hPrzYzcp7HE5wFktKCPWs=",
+   "state": "9QmlUDZeT7t1R5sHbPYUTVKyD9l9Idn504c98/6WFZGGKBKVUaKUgEmHRMO0EuWQRGpjLbkiBNDkja3Bd2JK4ssSPNZlns6uxDL3fWsoIMobbnAGuVFjyZQuaAua/tBlC9svVRP5IZ6q1ICSCRBvAsz/Metmvp7osMA/eKkN7pBiPOueLto56Rbsu4AVdx0NE/YVxtJ58m4fOvVlRPKD4w=="
 }
 ```
 
@@ -333,7 +336,7 @@ Response example:
 {
    "their": [
       {
-         "key": "1e8bd2e8a72fd005d9c7b1b144d5d2634906c681dacee4475ef9798118142b30",
+         "key": "HovS6Kcv0AXZx7GxRNXSY0kGxoHazuRHXvl5gRgUKzA=",
          "status": "active",
          "amount": "0",
          "outgoing": null,
@@ -341,7 +344,8 @@ Response example:
             "channel_address": "EQC0K4-WwDACT8XxWO4A5zYMi5W9np9CdbPd34OxO33Bq73L",
             "capacity": "0.2",
             "fee": "0",
-            "deadline_at": "2024-02-07T13:35:49Z"
+            "uncooperative_deadline_at": "2024-02-07T13:35:49Z",
+            "safe_deadline_at": "2024-02-07T13:35:49Z"
          },
          "created_at": "2024-02-07T12:06:11.177563296Z",
          "updated_at": "2024-02-07T12:06:11.177563426Z"
@@ -358,7 +362,7 @@ Returns virtual channel specified with `key` (virtual channel's public key) quer
 Response example:
 ```json
 {
-   "key": "1e8bd2e8a72fd005d9c7b1b144d5d2634906c681dacee4475ef9798118142b30",
+   "key": "HovS6Kcv0AXZx7GxRNXSY0kGxoHazuRHXvl5gRgUKzA=",
    "status": "active",
    "amount": "0",
    "outgoing": null,
@@ -366,7 +370,8 @@ Response example:
       "channel_address": "EQC0K4-WwDACT8XxWO4A5zYMi5W9np9CdbPd34OxO33Bq73L",
       "capacity": "0.2",
       "fee": "0",
-      "deadline_at": "2024-02-07T13:35:49Z"
+      "uncooperative_deadline_at": "2024-02-07T13:35:49Z",
+      "safe_deadline_at": "2024-02-07T13:35:49Z"
    },
    "created_at": "2024-02-07T12:06:11.177563296Z",
    "updated_at": "2024-02-07T12:06:11.177563426Z"
@@ -442,10 +447,11 @@ type OnchainChannel struct {
 ##### Virtual event structure (type = `virtual-channel-event`)
 ```go
 type VirtualSide struct {
-	ChannelAddress string    `json:"channel_address"`
-	Capacity       string    `json:"capacity"`
-	Fee            string    `json:"fee"`
-	DeadlineAt     time.Time `json:"deadline_at"`
+    ChannelAddress          string    `json:"channel_address"`
+    Capacity                string    `json:"capacity"`
+    Fee                     string    `json:"fee"`
+    UncooperativeDeadlineAt time.Time `json:"uncooperative_deadline_at"`
+    SafeDeadlineAt          time.Time `json:"safe_deadline_at"`
 }
 
 type VirtualChannel struct {

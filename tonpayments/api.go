@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/tonpayments/config"
 	db "github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
@@ -38,17 +39,36 @@ func (s *Service) ListChannels(ctx context.Context, key ed25519.PublicKey, statu
 	return channels, nil
 }
 
-func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error) {
-	cfg, err := s.transport.GetChannelConfig(ctx, nodeKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get channel config: %w", err)
+func (s *Service) ResolveCoinConfig(jetton string, ecID uint32) (*config.CoinConfig, error) {
+	if jetton != "" && ecID != 0 {
+		return nil, fmt.Errorf("jetton and ec cannot be used together")
 	}
 
-	log.Info().Msg("starting channel deploy")
-	return s.deployChannelWithNode(ctx, nodeKey, address.NewAddress(0, 0, cfg.WalletAddr), jettonMaster, ecID)
+	var ok bool
+	var cc config.CoinConfig
+	if jetton != "" {
+		cc, ok = s.supportedJettons[jetton]
+		if !ok {
+			return nil, fmt.Errorf("jetton is not whitelisted in config")
+		}
+	} else if ecID > 0 {
+		cc, ok = s.supportedEC[ecID]
+		if !ok {
+			return nil, fmt.Errorf("ec is not whitelisted in config")
+		}
+	} else {
+		if !s.supportedTon {
+			return nil, fmt.Errorf("ton is not whitelisted in config")
+		}
+		cc = s.cfg.SupportedCoins.Ton
+	}
+
+	return &cc, nil
 }
 
-func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, nodeAddr *address.Address, jettonMaster *address.Address, ecID uint32) (*address.Address, error) {
+func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error) {
+	log.Info().Msg("locating node and proposing channel config...")
+
 	channelId := make([]byte, 16)
 	copy(channelId, nodeKey[:15])
 
@@ -86,10 +106,38 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		return nil, fmt.Errorf("too many channels are already open")
 	}
 
+	var jettonAddr string
+	if jettonMaster != nil {
+		jettonAddr = jettonMaster.Bounce(true).String()
+	}
+
+	cc, err := s.ResolveCoinConfig(jettonAddr, ecID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve coin config: %w", err)
+	}
+
+	var jettonData []byte
+	if jettonMaster != nil {
+		jettonData = jettonMaster.Data()
+	}
+
+	excessFee := tlb.MustFromTON(cc.ExcessFeeTon)
+	destWallet, err := s.transport.ProposeChannelConfig(ctx, nodeKey, transport.ProposeChannelConfig{
+		JettonAddr:               jettonData,
+		ExtraCurrencyID:          ecID,
+		ExcessFee:                excessFee.Nano().Bytes(),
+		QuarantineDuration:       s.cfg.QuarantineDurationSec,
+		MisbehaviorFine:          tlb.MustFromTON(cc.MisbehaviorFine).Nano().Bytes(),
+		ConditionalCloseDuration: s.cfg.ConditionalCloseDurationSec,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("channel proposal failed: %w", err)
+	}
+
 	pc := payments.PaymentConfig{
-		StorageFee:     s.excessFee,
+		StorageFee:     tlb.MustFromTON(cc.ExcessFeeTon),
 		DestA:          s.wallet.WalletAddress(),
-		DestB:          nodeAddr,
+		DestB:          destWallet,
 		CurrencyConfig: payments.CurrencyConfigTon{},
 	}
 
@@ -106,7 +154,13 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		}
 	}
 
-	body, code, data, err := s.contractMaker.GetDeployAsyncChannelParams(channelId, true, s.key, nodeKey, s.closingConfig, pc)
+	log.Info().Msg("starting channel deploy...")
+
+	body, code, data, err := s.contractMaker.GetDeployAsyncChannelParams(channelId, true, s.key, nodeKey, payments.ClosingConfig{
+		QuarantineDuration:       s.cfg.QuarantineDurationSec,
+		MisbehaviorFine:          tlb.MustFromDecimal(cc.MisbehaviorFine, int(cc.Decimals)),
+		ConditionalCloseDuration: s.cfg.ConditionalCloseDurationSec,
+	}, pc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get deploy params: %w", err)
 	}
@@ -121,7 +175,8 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		return accAddr, nil
 	}
 
-	addr, tx, _, err := s.wallet.DeployContractWaitTransaction(ctx, tlb.MustFromTON("0.4"), body, code, data)
+	fee := new(big.Int).Add(excessFee.Nano(), tlb.MustFromTON("0.25").Nano())
+	addr, tx, _, err := s.wallet.DeployContractWaitTransaction(ctx, tlb.FromNanoTON(fee), body, code, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deploy: %w", err)
 	}
@@ -133,7 +188,7 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(time.Second):
-			log.Info().Str("addr", addr.String()).Msg("waiting for channel discovery")
+			log.Info().Str("addr", addr.String()).Msg("trying to discover channel onchain...")
 		}
 	}
 
@@ -142,7 +197,7 @@ func (s *Service) deployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 	return addr, nil
 }
 
-func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, finalDest ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error {
+func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, finalDest ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel, jettonMaster *address.Address, ecID uint32) error {
 	if len(chain) == 0 {
 		return fmt.Errorf("chain is empty")
 	}
@@ -155,6 +210,16 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, 
 	needAmount := new(big.Int).Add(vch.Fee, vch.Capacity)
 	var channel *db.Channel
 	for _, ch := range channels {
+		if ch.ExtraCurrencyID != ecID {
+			continue
+		}
+		if jettonMaster == nil && ch.JettonAddress != "" {
+			continue
+		}
+		if jettonMaster != nil && ch.JettonAddress != jettonMaster.Bounce(true).String() {
+			continue
+		}
+
 		balance, err := ch.CalcBalance(false)
 		if err != nil {
 			return fmt.Errorf("failed to calc channel balance: %w", err)
@@ -171,6 +236,10 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, 
 		return fmt.Errorf("failed to open virtual channel, %w: no active channel with enough balance exists", ErrNotPossible)
 	}
 
+	if safe := vch.Deadline - (time.Now().Unix() + channel.SafeOnchainClosePeriod); safe < int64(s.cfg.MinSafeVirtualChannelTimeoutSec) {
+		return fmt.Errorf("safe deadline is less than acceptable: %d, %d", safe, s.cfg.MinSafeVirtualChannelTimeoutSec)
+	}
+
 	act := transport.OpenVirtualAction{
 		ChannelKey:     vch.Key,
 		InstructionKey: instructionKey,
@@ -180,9 +249,9 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, 
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	tryTill := time.Unix(vch.Deadline, 0)
+	tryTill := time.Unix(vch.Deadline-channel.SafeOnchainClosePeriod, 0)
 	err = s.db.CreateTask(ctx, PaymentsTaskPool, "open-virtual", channel.Address,
-		"open-virtual-"+hex.EncodeToString(vch.Key),
+		"open-virtual-"+base64.StdEncoding.EncodeToString(vch.Key),
 		db.OpenVirtualTask{
 			FinalDestinationKey: finalDest,
 			ChannelAddress:      channel.Address,
@@ -401,7 +470,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 	// Creating aggressive onchain close task, for the future,
 	// in case we will not be able to communicate with party
 	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", ch.Address+"-uncoop",
-		"uncooperative-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
+		"uncooperative-close-"+ch.Address+"-vc-"+base64.StdEncoding.EncodeToString(vch.Key),
 		db.ChannelUncooperativeCloseTask{
 			Address:                 ch.Address,
 			CheckVirtualStillExists: vch.Key,
@@ -411,7 +480,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 	}
 
 	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-close-virtual", ch.Address+"-coop",
-		"virtual-close-"+ch.Address+"-vc-"+hex.EncodeToString(vch.Key),
+		"virtual-close-"+ch.Address+"-vc-"+base64.StdEncoding.EncodeToString(vch.Key),
 		db.AskCloseVirtualTask{
 			Key:            vch.Key,
 			ChannelAddress: ch.Address,

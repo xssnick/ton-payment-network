@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,10 +24,11 @@ type NodeChain struct {
 }
 
 type VirtualSide struct {
-	ChannelAddress string    `json:"channel_address"`
-	Capacity       string    `json:"capacity"`
-	Fee            string    `json:"fee"`
-	DeadlineAt     time.Time `json:"deadline_at"`
+	ChannelAddress          string    `json:"channel_address"`
+	Capacity                string    `json:"capacity"`
+	Fee                     string    `json:"fee"`
+	UncooperativeDeadlineAt time.Time `json:"uncooperative_deadline_at"`
+	SafeDeadlineAt          time.Time `json:"safe_deadline_at"`
 }
 
 type VirtualChannel struct {
@@ -172,11 +173,11 @@ func (s *Server) getVirtual(ctx context.Context, meta *db.VirtualChannelMeta) (*
 	case db.VirtualChannelStateWantClose:
 		status = "want_close"
 	default:
-		return nil, fmt.Errorf("unknown virtual channel %s state: %d", hex.EncodeToString(meta.Key), meta.Status)
+		return nil, fmt.Errorf("unknown virtual channel %s state: %d", base64.StdEncoding.EncodeToString(meta.Key), meta.Status)
 	}
 
 	res := &VirtualChannel{
-		Key:       hex.EncodeToString(meta.Key),
+		Key:       base64.StdEncoding.EncodeToString(meta.Key),
 		Status:    status,
 		CreatedAt: meta.CreatedAt,
 		UpdatedAt: meta.UpdatedAt,
@@ -204,19 +205,21 @@ func (s *Server) getVirtual(ctx context.Context, meta *db.VirtualChannelMeta) (*
 	if meta.Status != db.VirtualChannelStateClosed && meta.Status != db.VirtualChannelStateRemoved {
 		if meta.Incoming != nil {
 			res.Incoming = &VirtualSide{
-				ChannelAddress: meta.Incoming.ChannelAddress,
-				Capacity:       meta.Incoming.Capacity,
-				Fee:            meta.Incoming.Fee,
-				DeadlineAt:     meta.Incoming.Deadline,
+				ChannelAddress:          meta.Incoming.ChannelAddress,
+				Capacity:                meta.Incoming.Capacity,
+				Fee:                     meta.Incoming.Fee,
+				UncooperativeDeadlineAt: meta.Incoming.UncooperativeDeadline,
+				SafeDeadlineAt:          meta.Incoming.SafeDeadline,
 			}
 		}
 
 		if meta.Outgoing != nil {
 			res.Outgoing = &VirtualSide{
-				ChannelAddress: meta.Outgoing.ChannelAddress,
-				Capacity:       meta.Outgoing.Capacity,
-				Fee:            meta.Outgoing.Fee,
-				DeadlineAt:     meta.Outgoing.Deadline,
+				ChannelAddress:          meta.Outgoing.ChannelAddress,
+				Capacity:                meta.Outgoing.Capacity,
+				Fee:                     meta.Outgoing.Fee,
+				UncooperativeDeadlineAt: meta.Outgoing.UncooperativeDeadline,
+				SafeDeadlineAt:          meta.Outgoing.SafeDeadline,
 			}
 		}
 	}
@@ -305,9 +308,11 @@ func (s *Server) handleVirtualClose(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleVirtualOpen(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		TTLSeconds int64       `json:"ttl_seconds"`
-		Capacity   string      `json:"capacity"`
-		NodesChain []NodeChain `json:"nodes_chain"`
+		TTLSeconds      int64       `json:"ttl_seconds"`
+		Capacity        string      `json:"capacity"`
+		JettonMaster    string      `json:"jetton_master"`
+		ExtraCurrencyID uint32      `json:"ec_id"`
+		NodesChain      []NodeChain `json:"nodes_chain"`
 	}
 
 	if r.Method != "POST" {
@@ -319,6 +324,21 @@ func (s *Server) handleVirtualOpen(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "incorrect request body: "+err.Error())
 		return
+	}
+
+	var jetton *address.Address
+	if req.JettonMaster != "" {
+		var err error
+		jetton, err = address.ParseAddr(req.JettonMaster)
+		if err != nil {
+			writeErr(w, 400, "incorrect jetton address format: "+err.Error())
+			return
+		}
+
+		if req.ExtraCurrencyID != 0 {
+			writeErr(w, 400, "jetton master address and extra currency id are mutually exclusive")
+			return
+		}
 	}
 
 	if len(req.NodesChain) == 0 {
@@ -379,7 +399,7 @@ func (s *Server) handleVirtualOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.svc.OpenVirtualChannel(r.Context(), with, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc)
+	err = s.svc.OpenVirtualChannel(r.Context(), with, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc, jetton, req.ExtraCurrencyID)
 	if err != nil {
 		writeErr(w, 403, "failed to request virtual channel open: "+err.Error())
 		return
@@ -391,8 +411,8 @@ func (s *Server) handleVirtualOpen(w http.ResponseWriter, r *http.Request) {
 		Status         string    `json:"status"`
 		Deadline       time.Time `json:"deadline"`
 	}{
-		PublicKey:      hex.EncodeToString(vPriv.Public().(ed25519.PublicKey)),
-		PrivateKeySeed: hex.EncodeToString(vPriv.Seed()),
+		PublicKey:      base64.StdEncoding.EncodeToString(vPriv.Public().(ed25519.PublicKey)),
+		PrivateKeySeed: base64.StdEncoding.EncodeToString(vPriv.Seed()),
 		Status:         "pending",
 		Deadline:       deadlines[len(req.NodesChain)-1],
 	})
@@ -400,9 +420,11 @@ func (s *Server) handleVirtualOpen(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		TTLSeconds int64       `json:"ttl_seconds"`
-		Amount     string      `json:"amount"`
-		NodesChain []NodeChain `json:"nodes_chain"`
+		TTLSeconds      int64       `json:"ttl_seconds"`
+		Amount          string      `json:"amount"`
+		JettonMaster    string      `json:"jetton_master"`
+		ExtraCurrencyID uint32      `json:"ec_id"`
+		NodesChain      []NodeChain `json:"nodes_chain"`
 	}
 
 	if r.Method != "POST" {
@@ -414,6 +436,21 @@ func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "incorrect request body: "+err.Error())
 		return
+	}
+
+	var jetton *address.Address
+	if req.JettonMaster != "" {
+		var err error
+		jetton, err = address.ParseAddr(req.JettonMaster)
+		if err != nil {
+			writeErr(w, 400, "incorrect jetton address format: "+err.Error())
+			return
+		}
+
+		if req.ExtraCurrencyID != 0 {
+			writeErr(w, 400, "jetton master address and extra currency id are mutually exclusive")
+			return
+		}
 	}
 
 	if len(req.NodesChain) == 0 {
@@ -474,7 +511,7 @@ func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.svc.OpenVirtualChannel(r.Context(), with, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc)
+	err = s.svc.OpenVirtualChannel(r.Context(), with, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc, jetton, req.ExtraCurrencyID)
 	if err != nil {
 		writeErr(w, 403, "failed to request virtual channel open: "+err.Error())
 		return

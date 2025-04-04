@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
@@ -33,7 +33,7 @@ type Service interface {
 	RequestUncooperativeClose(ctx context.Context, addr string) error
 	CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey) error
 	AddVirtualChannelResolve(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error
-	OpenVirtualChannel(ctx context.Context, with, instructionKey, finalDest ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel) error
+	OpenVirtualChannel(ctx context.Context, with, instructionKey, finalDest ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel, jettonMaster *address.Address, ecID uint32) error
 	DeployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error)
 	TopupChannel(ctx context.Context, addr *address.Address, amount tlb.Coins) error
 	RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins) error
@@ -143,9 +143,9 @@ func writeSuccess(w http.ResponseWriter) {
 }
 
 func parseKey(key string) (ed25519.PublicKey, error) {
-	k, err := hex.DecodeString(key)
+	k, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
-		return nil, fmt.Errorf("incorrect key format, should be in hex: %w", err)
+		return nil, fmt.Errorf("incorrect key format, should be in base64: %w", err)
 	}
 	if len(k) != 32 {
 		return nil, fmt.Errorf("incorrect key length, should be 32")
@@ -154,7 +154,7 @@ func parseKey(key string) (ed25519.PublicKey, error) {
 }
 
 func parseState(state string, key ed25519.PublicKey) (payments.VirtualChannelState, error) {
-	s, err := hex.DecodeString(state)
+	s, err := base64.StdEncoding.DecodeString(state)
 	if err != nil {
 		return payments.VirtualChannelState{}, fmt.Errorf("failed to decode state from hex: %w", err)
 	}

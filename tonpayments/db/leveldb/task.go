@@ -9,8 +9,39 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
+	"sort"
 	"time"
 )
+
+func (d *DB) DumpTasks(ctx context.Context, prefix string) (res []*db.Task, err error) {
+	tx := d.getExecutor(ctx)
+
+	keyIndex := []byte("tv:" + prefix)
+
+	iter := tx.NewIterator(util.BytesPrefix(keyIndex), nil)
+	defer iter.Release()
+
+	for iter.Next() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		var task *db.Task
+		if err := json.Unmarshal(iter.Value(), &task); err != nil {
+			return nil, fmt.Errorf("failed to decode json data: %w", err)
+		}
+
+		res = append(res, task)
+	}
+
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].CreatedAt.After(res[j].CreatedAt)
+	})
+
+	return res, nil
+}
 
 func (d *DB) AcquireTask(ctx context.Context, poolName string) (*db.Task, error) {
 	var result *db.Task

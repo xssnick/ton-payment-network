@@ -38,13 +38,12 @@ func (v *Scanner) OnChannelUpdate(ch *db.Channel) {
 			lt = ch.LastProcessedLT - 1
 		}
 
+		log.Info().Str("address", ch.Address).Msg("start listening for channel events")
 		go v.startForContract(ctx, address.MustParseAddr(ch.Address), lt)
 	}
 }
 
 func (v *Scanner) startForContract(ctx context.Context, addr *address.Address, sinceLT uint64) {
-	log.Info().Str("address", addr.String()).Msg("start listening for channel events")
-
 	ch := make(chan *tlb.Transaction, 1)
 	go v.api.SubscribeOnTransactions(ctx, addr, sinceLT, ch)
 
