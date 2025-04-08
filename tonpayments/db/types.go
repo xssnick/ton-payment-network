@@ -232,12 +232,16 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 
 	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), new(big.Int).Sub(s1chain.Deposited, s1chain.Withdrawn))
 	balance = balance.Sub(balance, s1.State.Data.Sent.Nano())
+	balance = balance.Sub(balance, s1.PendingWithdraw)
 
+	if s1.Conditionals.IsEmpty() {
+		return balance, nil
+	}
+	
 	all, err := s1.Conditionals.LoadAll()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load conditions: %w", err)
 	}
-	balance = balance.Sub(balance, s1.PendingWithdraw)
 
 	for _, kv := range all {
 		// TODO: support other types of conditions
