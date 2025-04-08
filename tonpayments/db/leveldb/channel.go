@@ -15,8 +15,12 @@ import (
 	"time"
 )
 
-func (d *DB) SetOnChannelUpdated(f func(ch *db.Channel)) {
+func (d *DB) SetOnChannelUpdated(f func(ctx context.Context, ch *db.Channel, statusChanged bool)) {
 	d.onChannelStateChange = f
+}
+
+func (d *DB) GetOnChannelUpdated() func(ctx context.Context, ch *db.Channel, statusChanged bool) {
+	return d.onChannelStateChange
 }
 
 func (d *DB) CreateChannel(ctx context.Context, channel *db.Channel) error {
@@ -46,7 +50,7 @@ func (d *DB) CreateChannel(ctx context.Context, channel *db.Channel) error {
 		}
 
 		if d.onChannelStateChange != nil {
-			d.onChannelStateChange(channel)
+			d.onChannelStateChange(ctx, channel, true)
 		}
 		return nil
 	})
@@ -79,8 +83,8 @@ func (d *DB) UpdateChannel(ctx context.Context, channel *db.Channel) error {
 			return fmt.Errorf("failed to put: %w", err)
 		}
 
-		if d.onChannelStateChange != nil && curChannel.Status != channel.Status {
-			d.onChannelStateChange(channel)
+		if d.onChannelStateChange != nil {
+			d.onChannelStateChange(ctx, channel, curChannel.Status != channel.Status)
 		}
 
 		return nil

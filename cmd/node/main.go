@@ -20,6 +20,7 @@ import (
 	"github.com/xssnick/tonutils-go/adnl"
 	adnlAddress "github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl/dht"
+	"github.com/xssnick/tonutils-go/adnl/rldp"
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
@@ -55,6 +56,9 @@ func main() {
 	}
 
 	if *Verbosity >= 5 {
+		rldp.Logger = func(v ...any) {
+			log.Logger.Debug().Msg(fmt.Sprintln(v...))
+		}
 		dht.Logger = func(v ...any) {
 			log.Logger.Debug().Msg(fmt.Sprintln(v...))
 		}
@@ -206,7 +210,7 @@ func main() {
 
 		for _, channel := range chList {
 			if channel.Status != db.ChannelStateInactive {
-				sc.OnChannelUpdate(channel)
+				sc.OnChannelUpdate(context.Background(), channel, true)
 			}
 		}
 
@@ -341,15 +345,6 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 			return fmt.Errorf("incorrect len of key: %d, should be 32", len(btsKey))
 		}
 
-		log.Info().Msg("input amount nano:")
-		var strAmt string
-		_, _ = fmt.Scanln(&strAmt)
-
-		iAmt, _ := new(big.Int).SetString(strAmt, 10)
-		if iAmt == nil {
-			return fmt.Errorf("incorrect format of amount")
-		}
-
 		vcKey := ed25519.NewKeyFromSeed(btsKey)
 
 		meta, err := svc.GetVirtualChannelMeta(context.Background(), vcKey.Public().(ed25519.PublicKey))
@@ -361,7 +356,26 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 			return fmt.Errorf("you are not initiator of this virtual channel")
 		}
 
-		state, err := payments.SignState(tlb.FromNanoTON(iAmt), vcKey, meta.FinalDestination)
+		ch, err := svc.GetChannel(context.Background(), meta.Outgoing.ChannelAddress)
+		if err != nil {
+			return fmt.Errorf("failed to get channel: %w", err)
+		}
+
+		cc, err := svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID)
+		if err != nil {
+			return fmt.Errorf("failed to get coin config: %w", err)
+		}
+
+		log.Info().Msg("input amount:")
+		var strAmt string
+		_, _ = fmt.Scanln(&strAmt)
+
+		amt, err := tlb.FromDecimal(strAmt, int(cc.Decimals))
+		if err != nil {
+			return fmt.Errorf("incorrect format of amount")
+		}
+
+		state, err := payments.SignState(amt, vcKey, meta.FinalDestination)
 		if err != nil {
 			return fmt.Errorf("failed to sign state: %w", err)
 		}
@@ -420,19 +434,28 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 			return fmt.Errorf("incorrect format of address: %w", err)
 		}
 
-		log.Info().Msg("input amount nano:")
+		ch, err := svc.GetChannel(context.Background(), addrStr)
+		if err != nil {
+			return fmt.Errorf("failed to get channel: %w", err)
+		}
+
+		cc, err := svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID)
+		if err != nil {
+			return fmt.Errorf("failed to get coin config: %w", err)
+		}
+
+		log.Info().Msg("input amount:")
 		var strAmt string
 		_, _ = fmt.Scanln(&strAmt)
 
-		iAmt, _ := new(big.Int).SetString(strAmt, 10)
-		if iAmt == nil {
+		amt, err := tlb.FromDecimal(strAmt, int(cc.Decimals))
+		if err != nil {
 			return fmt.Errorf("incorrect format of amount")
 		}
 
-		if err = svc.TopupChannel(context.Background(), addr, tlb.FromNanoTON(iAmt)); err != nil {
+		if err = svc.TopupChannel(context.Background(), addr, amt); err != nil {
 			return fmt.Errorf("failed to topup channel: %w", err)
 		}
-		log.Info().Str("address", addr.String()).Msg("topup task registered")
 	case "withdraw":
 		log.Info().Msg("enter channel address to withdraw from:")
 
@@ -444,13 +467,23 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 			return fmt.Errorf("incorrect format of address: %w", err)
 		}
 
+		ch, err := svc.GetChannel(context.Background(), addrStr)
+		if err != nil {
+			return fmt.Errorf("failed to get channel: %w", err)
+		}
+
+		cc, err := svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID)
+		if err != nil {
+			return fmt.Errorf("failed to get coin config: %w", err)
+		}
+
 		log.Info().Msg("input amount:")
 		var strAmt string
 		_, _ = fmt.Scanln(&strAmt)
 
-		amt, err := tlb.FromTON(strAmt)
+		amt, err := tlb.FromDecimal(strAmt, int(cc.Decimals))
 		if err != nil {
-			return fmt.Errorf("incorrect format of amount: %w", err)
+			return fmt.Errorf("incorrect format of amount")
 		}
 
 		if err = svc.RequestWithdraw(context.Background(), addr, amt); err != nil {
@@ -520,6 +553,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 
 		var ecID uint64
 		var jettonMaster *address.Address
+		var jettonMasterStr string
 		if jetton != "" {
 			ecID, err = strconv.ParseUint(jetton, 10, 32)
 			if err != nil {
@@ -527,16 +561,22 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 				if err != nil {
 					return fmt.Errorf("incorrect format: %w", err)
 				}
+				jettonMasterStr = jettonMaster.Bounce(true).String()
 			}
 		}
 
-		log.Info().Msg("input amount nano, excluding tunnelling fee:")
+		log.Info().Msg("input amount, excluding tunnelling fee:")
+
+		cc, err := svc.ResolveCoinConfig(jettonMasterStr, uint32(ecID))
+		if err != nil {
+			return fmt.Errorf("failed to get coin config: %w", err)
+		}
 
 		var strAmt string
 		_, _ = fmt.Scanln(&strAmt)
 
-		amt, _ := new(big.Int).SetString(strAmt, 10)
-		if amt == nil {
+		amt, err := tlb.FromDecimal(strAmt, int(cc.Decimals))
+		if err != nil {
 			return fmt.Errorf("incorrect format of amount")
 		}
 
@@ -544,27 +584,30 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 
 		var strAmtFee string
 		_, _ = fmt.Scanln(&strAmtFee)
+		if strAmtFee == "" {
+			strAmtFee = "0"
+		}
 
-		feeAmt, _ := new(big.Int).SetString(strAmtFee, 10)
-		if feeAmt == nil {
-			return fmt.Errorf("incorrect format of amount fee")
+		feeAmt, err := tlb.FromDecimal(strAmtFee, int(cc.Decimals))
+		if err != nil {
+			return fmt.Errorf("incorrect format of fee amount")
 		}
 
 		safeHopTTL := time.Duration(cfg.ChannelConfig.QuarantineDurationSec+cfg.ChannelConfig.BufferTimeToCommit+cfg.ChannelConfig.ConditionalCloseDurationSec+
 			cfg.ChannelConfig.MinSafeVirtualChannelTimeoutSec) * time.Second
 
-		fullAmt := new(big.Int).Set(amt)
+		fullAmt := new(big.Int).Set(amt.Nano())
 		var tunChain []transport.TunnelChainPart
 		for i, parsedKey := range parsedKeys {
 			fee := big.NewInt(0)
 			if len(parsedKeys)-i > 1 {
-				fee = new(big.Int).Mul(feeAmt, big.NewInt(int64(len(parsedKeys)-i)-1))
+				fee = new(big.Int).Mul(feeAmt.Nano(), big.NewInt(int64(len(parsedKeys)-i)-1))
 				fullAmt = fullAmt.Add(fullAmt, fee)
 			}
 
 			tunChain = append(tunChain, transport.TunnelChainPart{
 				Target:   parsedKey,
-				Capacity: amt,
+				Capacity: amt.Nano(),
 				Fee:      fee,
 				Deadline: time.Now().Add(1*time.Minute + safeHopTTL*time.Duration(len(parsedKeys)-i)),
 			})

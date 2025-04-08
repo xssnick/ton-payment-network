@@ -16,7 +16,7 @@ type DB struct {
 	_db    *leveldb.DB
 	pubKey ed25519.PublicKey
 
-	onChannelStateChange func(ch *db.Channel)
+	onChannelStateChange func(ctx context.Context, ch *db.Channel, statusChanged bool)
 
 	mx sync.Mutex
 }

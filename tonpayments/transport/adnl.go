@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
@@ -253,7 +254,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			peer.authKey = append([]byte{}, q.Key...)
 			s.peersByKey[string(peer.authKey)] = peer
 			s.mx.Unlock()
-			log.Info().Hex("key", peer.authKey).Msg("connected with payment node peer")
+			log.Info().Str("key", base64.StdEncoding.EncodeToString(peer.authKey)).Msg("connected with payment node peer")
 
 			// reverse A and B, and sign, so party can verify us too
 			authData, err = tl.Hash(AuthenticateToSign{
@@ -366,29 +367,29 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 		for {
 			select {
 			case <-peerCtx.Done():
-				log.Debug().Hex("key", channelKey).Msg("closing urgent peer")
+				log.Debug().Str("key", base64.StdEncoding.EncodeToString(channelKey)).Msg("closing urgent peer")
 				return
 			case <-time.After(wait):
 			}
 
 			start := time.Now()
 
-			log.Debug().Hex("key", channelKey).Msg("pinging peer...")
+			log.Debug().Str("key", base64.StdEncoding.EncodeToString(channelKey)).Msg("pinging urgent peer...")
 
 			var pong Pong
 			ctx, cancel := context.WithTimeout(peerCtx, timeout)
 			err := s.doRLDPQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong, true)
 			cancel()
 			if err != nil {
-				timeout = 15 * time.Second
+				timeout = 10 * time.Second
 				wait = 3 * time.Second
-				log.Debug().Err(err).Hex("key", channelKey).Msg("failed to ping urgent peer, retrying in 3s")
+				log.Warn().Err(err).Str("key", base64.StdEncoding.EncodeToString(channelKey)).Msg("failed to ping urgent peer, retrying in 3s")
 				continue
 			}
 
-			timeout = 10 * time.Second
+			timeout = 7 * time.Second
 			wait = 10 * time.Second
-			log.Debug().Hex("key", channelKey).Dur("ping_ms", time.Since(start).Round(time.Millisecond)).Msg("urgent peer successfully pinged")
+			log.Debug().Str("key", base64.StdEncoding.EncodeToString(channelKey)).Dur("ping_ms", time.Since(start).Round(time.Millisecond)).Msg("urgent peer successfully pinged")
 		}
 	}()
 }
@@ -484,7 +485,7 @@ func (s *Server) auth(ctx context.Context, peer *PeerConnection) error {
 	peer.authKey = append([]byte{}, res.Key...)
 	s.peersByKey[string(peer.authKey)] = peer
 	s.mx.Unlock()
-	log.Info().Hex("key", peer.authKey).Msg("connected with payment node peer")
+	log.Info().Str("key", base64.StdEncoding.EncodeToString(peer.authKey)).Msg("connected with payment node peer")
 
 	return nil
 }
@@ -588,7 +589,7 @@ func (s *Server) RequestAction(ctx context.Context, channelAddr *address.Address
 func (s *Server) doRLDPQuery(ctx context.Context, theirKey []byte, req, resp tl.Serializable, connect bool) error {
 	peer, err := s.preparePeer(ctx, theirKey, connect)
 	if err != nil {
-		return fmt.Errorf("failed to prepare peer: %w", err)
+		return fmt.Errorf("failed to prepare peer %s: %w", hex.EncodeToString(theirKey), err)
 	}
 
 	var cancel func()

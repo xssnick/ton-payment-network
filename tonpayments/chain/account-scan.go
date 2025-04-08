@@ -15,7 +15,11 @@ func (v *Scanner) StartSmall(events chan<- any) error {
 	return nil
 }
 
-func (v *Scanner) OnChannelUpdate(ch *db.Channel) {
+func (v *Scanner) OnChannelUpdate(_ context.Context, ch *db.Channel, statusChanged bool) {
+	if !statusChanged {
+		return
+	}
+	
 	v.mx.Lock()
 	defer v.mx.Unlock()
 

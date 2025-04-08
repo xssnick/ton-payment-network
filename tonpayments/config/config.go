@@ -22,6 +22,12 @@ type VirtualConfig struct {
 	AllowTunneling   bool
 }
 
+type BalanceControlConfig struct {
+	DepositWhenAmountLessThan string
+	DepositUpToAmount         string
+	WithdrawWhenAmountReached string
+}
+
 type CoinConfig struct {
 	Enabled             bool
 	VirtualTunnelConfig VirtualConfig
@@ -29,10 +35,12 @@ type CoinConfig struct {
 	ExcessFeeTon        string
 	Symbol              string
 	Decimals            uint8
+
+	BalanceControl *BalanceControlConfig
 }
 
 type ChannelsConfig struct {
-	SupportedCoins Whitelist
+	SupportedCoins CoinTypes
 
 	BufferTimeToCommit              uint32
 	QuarantineDurationSec           uint32
@@ -40,7 +48,7 @@ type ChannelsConfig struct {
 	MinSafeVirtualChannelTimeoutSec uint32
 }
 
-type Whitelist struct {
+type CoinTypes struct {
 	Ton             CoinConfig
 	Jettons         map[string]CoinConfig
 	ExtraCurrencies map[uint32]CoinConfig
@@ -194,7 +202,7 @@ func LoadConfig(path string) (*Config, error) {
 			WebhooksSignatureHMACSHA256Key: base64.StdEncoding.EncodeToString(whKey),
 			SecureProofPolicy:              false,
 			ChannelConfig: ChannelsConfig{
-				SupportedCoins: Whitelist{
+				SupportedCoins: CoinTypes{
 					Ton: CoinConfig{
 						Enabled: true,
 						VirtualTunnelConfig: VirtualConfig{
@@ -202,6 +210,11 @@ func LoadConfig(path string) (*Config, error) {
 							ProxyMinFee:      "0.0005",
 							ProxyFeePercent:  0.5,
 							AllowTunneling:   true,
+						},
+						BalanceControl: &BalanceControlConfig{
+							DepositWhenAmountLessThan: "2",
+							DepositUpToAmount:         "3",
+							WithdrawWhenAmountReached: "5",
 						},
 						MisbehaviorFine: "3",
 						ExcessFeeTon:    "0.25",

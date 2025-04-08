@@ -62,6 +62,8 @@ type DB interface {
 	CreateChannel(ctx context.Context, channel *db.Channel) error
 	GetChannel(ctx context.Context, addr string) (*db.Channel, error)
 	UpdateChannel(ctx context.Context, channel *db.Channel) error
+	SetOnChannelUpdated(f func(ctx context.Context, ch *db.Channel, statusChanged bool))
+	GetOnChannelUpdated() func(ctx context.Context, ch *db.Channel, statusChanged bool)
 }
 
 type BlockCheckedEvent struct {
@@ -79,6 +81,15 @@ type channelLock struct {
 	mx    sync.Mutex
 
 	// pending bool
+}
+
+type balanceControlConfig struct {
+	DepositWhenAmountLessThan tlb.Coins
+	DepositUpToAmount         tlb.Coins
+	WithdrawWhenAmountReached tlb.Coins
+
+	depositStartedAtBalance  *big.Int
+	withdrawStartedAtBalance *big.Int
 }
 
 type Service struct {
@@ -106,19 +117,20 @@ type Service struct {
 	lockerMx         sync.Mutex
 	externalLockerMx sync.Mutex
 
-	supportedJettons map[string]config.CoinConfig
-	supportedEC      map[uint32]config.CoinConfig
-	supportedTon     bool
+	supportedJettons   map[string]config.CoinConfig
+	supportedEC        map[uint32]config.CoinConfig
+	supportedTon       bool
+	balanceControllers map[string]*balanceControlConfig
 
 	discoveryMx sync.Mutex
 }
 
-func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, cfg config.ChannelsConfig) (*Service, error) {
+func NewService(api ton.APIClientWrapped, database DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, cfg config.ChannelsConfig) (*Service, error) {
 	s := &Service{
 		ton:                            api,
 		transport:                      transport,
 		updates:                        updates,
-		db:                             db,
+		db:                             database,
 		key:                            key,
 		wallet:                         wallet,
 		contractMaker:                  payments.NewPaymentChannelClient(api),
@@ -129,10 +141,33 @@ func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wa
 		supportedJettons:               map[string]config.CoinConfig{},
 		supportedEC:                    map[uint32]config.CoinConfig{},
 		supportedTon:                   cfg.SupportedCoins.Ton.Enabled,
+		balanceControllers:             map[string]*balanceControlConfig{},
 	}
 
-	for addr, jetton := range cfg.SupportedCoins.Jettons {
-		if !jetton.Enabled {
+	addBalanceControl := func(jetton string, ecID uint32, currency config.CoinConfig) error {
+		conf := &balanceControlConfig{
+			DepositWhenAmountLessThan: tlb.MustFromDecimal(currency.BalanceControl.DepositWhenAmountLessThan, int(currency.Decimals)),
+			DepositUpToAmount:         tlb.MustFromDecimal(currency.BalanceControl.DepositUpToAmount, int(currency.Decimals)),
+			WithdrawWhenAmountReached: tlb.MustFromDecimal(currency.BalanceControl.WithdrawWhenAmountReached, int(currency.Decimals)),
+		}
+
+		if conf.WithdrawWhenAmountReached.Nano().Sign() != 0 &&
+			conf.DepositUpToAmount.Nano().Sign() != 0 && conf.WithdrawWhenAmountReached.Compare(&conf.DepositUpToAmount) < 0 {
+			return fmt.Errorf("withdraw amount must be greater than deposit amount")
+		}
+
+		if conf.DepositWhenAmountLessThan.Nano().Sign() != 0 &&
+			conf.DepositUpToAmount.Nano().Sign() != 0 && conf.DepositWhenAmountLessThan.Compare(&conf.DepositUpToAmount) > 0 {
+			return fmt.Errorf("deposit up to amount must be greater than deposit when amount less than")
+		}
+
+		s.balanceControllers[ccToKey(jetton, ecID)] = conf
+		return nil
+	}
+
+	var balanceControl bool
+	for addr, currency := range cfg.SupportedCoins.Jettons {
+		if !currency.Enabled {
 			continue
 		}
 
@@ -140,8 +175,16 @@ func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wa
 		if err != nil {
 			return nil, err
 		}
+		addr = a.Bounce(true).String()
 
-		s.supportedJettons[a.Bounce(true).String()] = jetton
+		s.supportedJettons[addr] = currency
+
+		if currency.BalanceControl != nil {
+			balanceControl = true
+			if err = addBalanceControl(addr, 0, currency); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	for id, currency := range cfg.SupportedCoins.ExtraCurrencies {
@@ -149,10 +192,95 @@ func NewService(api ton.APIClientWrapped, db DB, transport Transport, wallet *wa
 			continue
 		}
 
+		if id == 0 {
+			return nil, fmt.Errorf("extra currency id 0 is reserved")
+		}
+
 		s.supportedEC[id] = currency
+
+		if currency.BalanceControl != nil {
+			balanceControl = true
+			if err := addBalanceControl("", id, currency); err != nil {
+				return nil, err
+			}
+		}
 	}
 
+	if cfg.SupportedCoins.Ton.BalanceControl != nil {
+		balanceControl = true
+		if err := addBalanceControl("", 0, cfg.SupportedCoins.Ton); err != nil {
+			return nil, err
+		}
+	}
+
+	if balanceControl {
+		handler := s.balanceControlCallback
+		if current := database.GetOnChannelUpdated(); current != nil {
+			handler = func(ctx context.Context, ch *db.Channel, statusChanged bool) {
+				current(ctx, ch, statusChanged)
+				s.balanceControlCallback(ctx, ch, statusChanged)
+			}
+		}
+		database.SetOnChannelUpdated(handler)
+	}
+
+	go func() {
+		// some startup delay for indexing
+		time.Sleep(15 * time.Second)
+
+		channels, err := s.ListChannels(context.Background(), nil, db.ChannelStateActive)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to list active channels")
+			return
+		}
+
+		for _, ch := range channels {
+			s.balanceControlCallback(context.Background(), ch, false)
+		}
+	}()
+
 	return s, nil
+}
+
+func ccToKey(jetton string, ecID uint32) string {
+	return "J:" + jetton + "E:" + fmt.Sprint(ecID)
+}
+
+func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ bool) {
+	if ch.Status != db.ChannelStateActive {
+		return
+	}
+
+	bc := s.balanceControllers[ccToKey(ch.JettonAddress, ch.ExtraCurrencyID)]
+	if bc == nil {
+		return
+	}
+
+	balance, err := ch.CalcBalance(false)
+	if err != nil {
+		log.Error().Str("address", ch.Address).Err(err).Msg("failed to calc our balance in balance controller")
+		return
+	}
+
+	if balance.Cmp(bc.DepositWhenAmountLessThan.Nano()) < 0 {
+		if bc.depositStartedAtBalance == nil || bc.depositStartedAtBalance.Cmp(ch.OurOnchain.Deposited) < 0 {
+			amt := tlb.MustFromNano(new(big.Int).Sub(bc.DepositUpToAmount.Nano(), balance), bc.DepositUpToAmount.Decimals())
+			if err = s.TopupChannel(ctx, address.MustParseAddr(ch.Address), amt); err != nil {
+				log.Error().Err(err).Str("address", ch.Address).Str("amount", amt.String()).Msg("failed to topup channel")
+				return
+			}
+			bc.depositStartedAtBalance = new(big.Int).Set(ch.OurOnchain.Deposited)
+		}
+	} else if bc.WithdrawWhenAmountReached.Nano().Sign() > 0 && balance.Cmp(bc.WithdrawWhenAmountReached.Nano()) > 0 {
+		if bc.withdrawStartedAtBalance == nil || bc.withdrawStartedAtBalance.Cmp(ch.OurOnchain.Withdrawn) < 0 {
+			amt := tlb.MustFromNano(new(big.Int).Sub(balance, bc.DepositUpToAmount.Nano()), bc.DepositUpToAmount.Decimals())
+			if err = s.requestWithdraw(ctx, ch, amt); err != nil {
+				log.Error().Err(err).Str("address", ch.Address).Str("amount", amt.String()).Msg("failed to withdraw from channel")
+				return
+			}
+			bc.withdrawStartedAtBalance = new(big.Int).Set(ch.OurOnchain.Withdrawn)
+		}
+	}
 }
 
 func (s *Service) SetWebhook(webhook Webhook) {
@@ -559,12 +687,16 @@ func (s *Service) DebugPrintVirtualChannels() {
 			Uint64("seqno_our", ch.Our.State.Data.Seqno).
 			Bool("accepting_actions", ch.AcceptingActions).
 			Bool("we_master", ch.WeLeft).
+			Str("jetton", ch.JettonAddress).
+			Uint32("ec", ch.ExtraCurrencyID).
 			Msg("active onchain channel")
 		for _, kv := range ch.Our.Conditionals.All() {
 			vch, _ := payments.ParseVirtualChannelCond(kv.Value.BeginParse())
+			till := time.Unix(vch.Deadline, 0).Sub(time.Now())
 			log.Info().
 				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
-				Str("till_deadline", time.Unix(vch.Deadline, 0).Sub(time.Now()).String()).
+				Str("till_deadline", till.String()).
+				Str("till_safe_deadline", (till-time.Duration(ch.SafeOnchainClosePeriod)*time.Second).String()).
 				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
 				Hex("key", vch.Key).
 				Msg("virtual from us")

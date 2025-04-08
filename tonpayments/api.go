@@ -39,6 +39,8 @@ func (s *Service) ListChannels(ctx context.Context, key ed25519.PublicKey, statu
 	return channels, nil
 }
 
+var ErrNotWhitelisted = errors.New("not whitelisted")
+
 func (s *Service) ResolveCoinConfig(jetton string, ecID uint32) (*config.CoinConfig, error) {
 	if jetton != "" && ecID != 0 {
 		return nil, fmt.Errorf("jetton and ec cannot be used together")
@@ -48,22 +50,38 @@ func (s *Service) ResolveCoinConfig(jetton string, ecID uint32) (*config.CoinCon
 	var cc config.CoinConfig
 	if jetton != "" {
 		cc, ok = s.supportedJettons[jetton]
-		if !ok {
-			return nil, fmt.Errorf("jetton is not whitelisted in config")
+		if !ok || !cc.Enabled {
+			return nil, ErrNotWhitelisted
 		}
 	} else if ecID > 0 {
 		cc, ok = s.supportedEC[ecID]
-		if !ok {
-			return nil, fmt.Errorf("ec is not whitelisted in config")
+		if !ok || !cc.Enabled {
+			return nil, ErrNotWhitelisted
 		}
 	} else {
-		if !s.supportedTon {
-			return nil, fmt.Errorf("ton is not whitelisted in config")
+		if !s.supportedTon || !s.cfg.SupportedCoins.Ton.Enabled {
+			return nil, ErrNotWhitelisted
 		}
 		cc = s.cfg.SupportedCoins.Ton
 	}
 
 	return &cc, nil
+}
+
+func (s *Service) GetTunnelingFees(ctx context.Context, jetton string, ecID uint32) (enabled bool, minFee, maxCap tlb.Coins, percentFee float64, err error) {
+	cc, err := s.ResolveCoinConfig(jetton, ecID)
+	if err != nil {
+		if errors.Is(err, ErrNotWhitelisted) {
+			return false, tlb.ZeroCoins, tlb.ZeroCoins, 0, nil
+		}
+		return false, tlb.ZeroCoins, tlb.ZeroCoins, 0, fmt.Errorf("failed to resolve coin config: %w", err)
+	}
+
+	if !cc.VirtualTunnelConfig.AllowTunneling {
+		return false, tlb.ZeroCoins, tlb.ZeroCoins, 0, nil
+	}
+
+	return true, tlb.MustFromDecimal(cc.VirtualTunnelConfig.ProxyMinFee, int(cc.Decimals)), tlb.MustFromDecimal(cc.VirtualTunnelConfig.ProxyMaxCapacity, int(cc.Decimals)), cc.VirtualTunnelConfig.ProxyFeePercent, nil
 }
 
 func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error) {
@@ -386,6 +404,7 @@ func (s *Service) TopupChannel(ctx context.Context, addr *address.Address, amoun
 	); err != nil {
 		return err
 	}
+	log.Info().Str("address", addr.String()).Str("amount", amount.String()).Msg("topup task registered")
 	return nil
 }
 
@@ -394,12 +413,15 @@ func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, am
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
+	return s.requestWithdraw(ctx, channel, amount)
+}
 
-	if _, _, _, err = s.getCommitRequest(amount, tlb.MustFromTON("0"), channel); err != nil {
+func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amount tlb.Coins) error {
+	if _, _, _, err := s.getCommitRequest(amount, tlb.MustFromTON("0"), channel); err != nil {
 		return fmt.Errorf("failed to prepare close channel request: %w", err)
 	}
 
-	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "withdraw", channel.Address+"-withdraw",
+	if err := s.db.CreateTask(ctx, PaymentsTaskPool, "withdraw", channel.Address+"-withdraw",
 		"withdraw-"+channel.Address+"-"+fmt.Sprint(channel.InitAt.Unix())+fmt.Sprintf("-%d-%d", channel.Their.State.Data.Seqno, channel.Our.State.Data.Seqno),
 		db.WithdrawTask{
 			Address:            channel.Address,
@@ -409,6 +431,7 @@ func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, am
 	); err != nil {
 		return err
 	}
+	log.Info().Str("address", channel.Address).Str("amount", amount.String()).Msg("withdraw task registered")
 	return nil
 }
 
