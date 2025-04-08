@@ -292,7 +292,7 @@ func (s *Service) GetPrivateKey() ed25519.PrivateKey {
 }
 
 func (s *Service) GetMinSafeTTL() time.Duration {
-	return time.Duration(s.cfg.MinSafeVirtualChannelTimeoutSec + s.cfg.BufferTimeToCommit + s.cfg.ConditionalCloseDurationSec + s.cfg.QuarantineDurationSec)
+	return time.Duration(s.cfg.MinSafeVirtualChannelTimeoutSec+s.cfg.BufferTimeToCommit+s.cfg.ConditionalCloseDurationSec+s.cfg.QuarantineDurationSec) * time.Second
 }
 
 func (s *Service) ReviewChannelConfig(prop transport.ProposeChannelConfig) (*address.Address, error) {
