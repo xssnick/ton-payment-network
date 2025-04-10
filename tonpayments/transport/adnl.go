@@ -170,7 +170,7 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 	client.SetDisconnectHandler(func(_ string, _ ed25519.PublicKey) {
 		s.mx.Lock()
 		if p.authKey != nil {
-			log.Info().Hex("key", p.authKey).Msg("peer disconnected")
+			log.Info().Str("key", base64.StdEncoding.EncodeToString(p.authKey)).Msg("peer disconnected")
 
 			delete(s.peersByKey, string(p.authKey))
 		}

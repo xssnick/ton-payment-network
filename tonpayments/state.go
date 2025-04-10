@@ -2,6 +2,7 @@ package tonpayments
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -104,7 +105,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		}
 
 		onSuccess = func() {
-			log.Info().Hex("key", vch.Key).
+			log.Info().Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
 				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 				Str("channel", channel.Address).
 				Msg("virtual channel successfully removed")
@@ -152,7 +153,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		channel.Our.State.Data.Sent = tlb.FromNanoTON(sent)
 
 		onSuccess = func() {
-			log.Info().Hex("key", vch.Key).
+			log.Info().Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
 				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
 				Str("amount", vState.Amount.String()).

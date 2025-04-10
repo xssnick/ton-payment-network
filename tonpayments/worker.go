@@ -23,8 +23,15 @@ func (s *Service) addPeersForChannels() error {
 		return err
 	}
 
+	oldChannelsBefore := time.Unix(1744287966, 0)
 	for _, v := range list {
-		s.transport.AddUrgentPeer(v.TheirOnchain.Key)
+		// backwards compatibility to not lose old channels
+		// TODO: (remove later)
+		if v.CreatedAt.After(oldChannelsBefore) {
+			continue
+		}
+
+		_ = s.AddUrgentPeer(context.Background(), v.TheirOnchain.Key)
 	}
 	return nil
 }
@@ -293,7 +300,7 @@ func (s *Service) taskExecutor() {
 						}
 					}
 
-					log.Info().Hex("key", data.VirtualKey).
+					log.Info().Str("key", base64.StdEncoding.EncodeToString(data.VirtualKey)).
 						Str("next_capacity", tlb.FromNanoTON(nextCap).String()).
 						Str("next_fee", tlb.FromNanoTON(nextFee).String()).
 						Str("target", data.ChannelAddress).
@@ -323,7 +330,7 @@ func (s *Service) taskExecutor() {
 						return nil
 					}
 
-					log.Info().Str("channel", channel.Address).Hex("key", data.Key).Msg("asking to remove virtual channel")
+					log.Debug().Str("channel", channel.Address).Str("key", base64.StdEncoding.EncodeToString(data.Key)).Msg("asking to remove virtual channel")
 					_, err = s.requestAction(ctx, data.ChannelAddress, transport.RequestRemoveVirtualAction{
 						Key: data.Key,
 					})
@@ -342,7 +349,7 @@ func (s *Service) taskExecutor() {
 					}
 
 					if channel.Status != db.ChannelStateActive {
-						log.Warn().Str("channel", channel.Address).Hex("key", data.Key).Msg("onchain channel is not active, cannot close virtual")
+						log.Warn().Str("channel", channel.Address).Str("key", base64.StdEncoding.EncodeToString(data.Key)).Msg("onchain channel is not active, cannot close virtual")
 
 						// not needed anymore
 						return nil
@@ -351,7 +358,7 @@ func (s *Service) taskExecutor() {
 					_, vch, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.Key)
 					if err != nil {
 						if errors.Is(err, payments.ErrNotFound) {
-							log.Warn().Str("channel", channel.Address).Hex("key", data.Key).Msg("nothing virtual to close, not exists anymore")
+							log.Warn().Str("channel", channel.Address).Str("key", base64.StdEncoding.EncodeToString(data.Key)).Msg("nothing virtual to close, not exists anymore")
 
 							// nothing to close anymore
 							return nil

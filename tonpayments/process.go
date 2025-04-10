@@ -181,7 +181,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				}
 			}
 
-			log.Info().Hex("key", data.Key).Msg("virtual channel removed")
+			log.Info().Str("key", base64.StdEncoding.EncodeToString(data.Key)).Msg("virtual channel removed")
 			return nil
 		}
 	case transport.ConfirmCloseAction:
@@ -256,7 +256,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				}
 			}
 
-			log.Info().Hex("key", data.Key).
+			log.Info().Str("key", base64.StdEncoding.EncodeToString(data.Key)).
 				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
 				Msg("virtual channel closed")
@@ -453,7 +453,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 					return err
 				}
 
-				log.Info().Hex("key", data.ChannelKey).
+				log.Info().Str("key", base64.StdEncoding.EncodeToString(data.ChannelKey)).
 					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 					Str("fee", tlb.FromNanoTON(vch.Fee).String()).
 					Str("target", target.Address).
@@ -522,7 +522,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 					}
 				}
 
-				log.Info().Hex("key", data.ChannelKey).
+				log.Info().Str("key", base64.StdEncoding.EncodeToString(data.ChannelKey)).
 					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
 					Msg("virtual channel opened with us")
 

@@ -189,6 +189,10 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 	}
 	accAddr := state.CalcAddress(0)
 
+	if err = s.AddUrgentPeer(ctx, nodeKey); err != nil {
+		return nil, fmt.Errorf("failed to add urgent peer: %w", err)
+	}
+
 	if s.discoverChannel(state.CalcAddress(0)) {
 		return accAddr, nil
 	}
@@ -199,7 +203,7 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		return nil, fmt.Errorf("failed to deploy: %w", err)
 	}
 
-	log.Info().Str("addr", addr.String()).Hex("tx", tx.Hash).Msg("contract deployed")
+	log.Info().Str("addr", addr.String()).Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("contract deployed")
 
 	for !s.discoverChannel(addr) {
 		select {
@@ -435,6 +439,8 @@ func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amou
 	return nil
 }
 
+var ErrCannotCloseOngoingVirtual = fmt.Errorf("cannot close outgoing channel")
+
 func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey) error {
 	s.mx.Lock()
 	defer s.mx.Unlock()
@@ -448,7 +454,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 	}
 
 	if meta.Incoming == nil {
-		return fmt.Errorf("cannot close outgoing channel")
+		return ErrCannotCloseOngoingVirtual
 	}
 
 	ch, err := s.GetActiveChannel(ctx, meta.Incoming.ChannelAddress)
@@ -499,7 +505,7 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 			CheckVirtualStillExists: vch.Key,
 		}, &uncooperativeAfter, nil,
 	); err != nil {
-		log.Warn().Err(err).Str("channel", ch.Address).Hex("key", vch.Key).Msg("failed to create uncooperative close task")
+		log.Warn().Err(err).Str("channel", ch.Address).Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("failed to create uncooperative close task")
 	}
 
 	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-close-virtual", ch.Address+"-coop",
@@ -509,10 +515,10 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 			ChannelAddress: ch.Address,
 		}, nil, &uncooperativeAfter,
 	); err != nil {
-		log.Warn().Err(err).Str("channel", ch.Address).Hex("key", vch.Key).Msg("failed to create cooperative close task")
+		log.Warn().Err(err).Str("channel", ch.Address).Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("failed to create cooperative close task")
 	}
 
-	log.Info().Err(err).Str("channel", ch.Address).Hex("key", vch.Key).Msg("virtual channel close task created and will be executed soon")
+	log.Info().Err(err).Str("channel", ch.Address).Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("virtual channel close task created and will be executed soon")
 
 	return nil
 }
@@ -527,7 +533,7 @@ func (s *Service) executeCooperativeCommit(ctx context.Context, req *payments.Co
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Hex("hash", tx.Hash).Msg("cooperative commit transaction completed")
+	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("cooperative commit transaction completed")
 	return nil
 }
 
@@ -541,7 +547,7 @@ func (s *Service) executeCooperativeClose(ctx context.Context, req *payments.Coo
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Hex("hash", tx.Hash).Msg("cooperative close transaction completed")
+	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("cooperative close transaction completed")
 
 	return nil
 }
@@ -770,7 +776,7 @@ func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr strin
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Hex("hash", tx.Hash).Msg("uncooperative close transaction completed")
+	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("uncooperative close transaction completed")
 
 	return nil
 }
@@ -823,7 +829,7 @@ func (s *Service) challengeChannelState(ctx context.Context, channelAddr string)
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Hex("hash", tx.Hash).Msg("challenge channel state transaction completed")
+	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("challenge channel state transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
@@ -859,7 +865,7 @@ func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAd
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Hex("hash", tx.Hash).Msg("finish uncooperative close transaction completed")
+	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("finish uncooperative close transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
@@ -1063,7 +1069,7 @@ func (s *Service) executeSettleStep(ctx context.Context, channelAddr string, mes
 	if err != nil {
 		return fmt.Errorf("failed to send internal messages to channel: %w", err)
 	}
-	log.Info().Hex("hash", tx.Hash).Int("step", step).Int("messages", len(list)).Msg("settle conditions step transaction completed")
+	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Int("step", step).Int("messages", len(list)).Msg("settle conditions step transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
@@ -1126,7 +1132,7 @@ func (s *Service) executeTopup(ctx context.Context, channelAddr string, amount t
 	if err != nil {
 		return fmt.Errorf("failed to send internal messages to channel: %w", err)
 	}
-	log.Info().Hex("hash", tx.Hash).Msg("topup transaction completed")
+	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("topup transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil

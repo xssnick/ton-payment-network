@@ -221,7 +221,7 @@ func (s *SignedSemiChannel) Verify(key ed25519.PublicKey) error {
 		return err
 	}
 	if !ed25519.Verify(key, c.Hash(2), s.Signature.Value) {
-		log.Warn().Hex("sig", s.Signature.Value).Msg("invalid signature")
+		log.Warn().Str("sig", base64.StdEncoding.EncodeToString(s.Signature.Value)).Msg("invalid signature")
 		return fmt.Errorf("invalid signature")
 	}
 	return nil

@@ -64,6 +64,9 @@ type DB interface {
 	UpdateChannel(ctx context.Context, channel *db.Channel) error
 	SetOnChannelUpdated(f func(ctx context.Context, ch *db.Channel, statusChanged bool))
 	GetOnChannelUpdated() func(ctx context.Context, ch *db.Channel, statusChanged bool)
+
+	GetUrgentPeers(ctx context.Context) ([][]byte, error)
+	AddUrgentPeer(ctx context.Context, peerAddress []byte) error
 }
 
 type BlockCheckedEvent struct {
@@ -224,9 +227,13 @@ func NewService(api ton.APIClientWrapped, database DB, transport Transport, wall
 		database.SetOnChannelUpdated(handler)
 	}
 
+	if err := s.loadUrgentPeers(context.Background()); err != nil {
+		return nil, err
+	}
+
 	go func() {
 		// some startup delay for indexing
-		time.Sleep(15 * time.Second)
+		time.Sleep(10 * time.Second)
 
 		channels, err := s.ListChannels(context.Background(), nil, db.ChannelStateActive)
 		if err != nil {
@@ -244,6 +251,26 @@ func NewService(api ton.APIClientWrapped, database DB, transport Transport, wall
 
 func ccToKey(jetton string, ecID uint32) string {
 	return "J:" + jetton + "E:" + fmt.Sprint(ecID)
+}
+
+func (s *Service) AddUrgentPeer(ctx context.Context, peer []byte) error {
+	if err := s.db.AddUrgentPeer(ctx, peer); err != nil {
+		return err
+	}
+	s.transport.AddUrgentPeer(peer)
+	return nil
+}
+
+func (s *Service) loadUrgentPeers(ctx context.Context) error {
+	peers, err := s.db.GetUrgentPeers(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, peer := range peers {
+		s.transport.AddUrgentPeer(peer)
+	}
+	return nil
 }
 
 func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ bool) {
@@ -374,18 +401,21 @@ func (s *Service) scanSettledConditionals(channelAddr string, tx *tlb.Transactio
 		}
 
 		if err = s.AddVirtualChannelResolve(context.Background(), vch.Key, state); err != nil {
-			log.Warn().Err(err).Str("address", channelAddr).Hex("key", vch.Key).Msg("failed to add virtual channel resolve")
+			log.Warn().Err(err).Str("address", channelAddr).Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("failed to add virtual channel resolve")
 			continue
 		}
 
 		// close next virtual channels since they commited latest resolve onchain
 		if err = s.CloseVirtualChannel(context.Background(), vch.Key); err != nil {
-			log.Warn().Err(err).Str("address", channelAddr).Hex("key", vch.Key).Msg("failed to create task for close virtual channel")
+			if !errors.Is(err, ErrCannotCloseOngoingVirtual) {
+				log.Warn().Err(err).Str("address", channelAddr).
+					Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("failed to create task for close virtual channel")
+			}
 			continue
 		}
 	}
 
-	log.Info().Str("address", channelAddr).Hex("tx_hash", tx.Hash).Msg("settlement transaction with condition resolves processed")
+	log.Info().Str("address", channelAddr).Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("settlement transaction with condition resolves processed")
 }
 
 func (s *Service) Start() {
@@ -632,8 +662,6 @@ func (s *Service) Start() {
 				// we retry full process because we need to reproduce all changes in case of concurrent update
 				goto retry
 			}
-
-			s.transport.AddUrgentPeer(channel.TheirOnchain.Key)
 
 			if s.webhook != nil {
 				for {

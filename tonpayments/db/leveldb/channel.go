@@ -23,6 +23,51 @@ func (d *DB) GetOnChannelUpdated() func(ctx context.Context, ch *db.Channel, sta
 	return d.onChannelStateChange
 }
 
+func (d *DB) AddUrgentPeer(ctx context.Context, peerAddress []byte) error {
+	if len(peerAddress) != 32 {
+		return fmt.Errorf("invalid peer address length: expected 32 bytes, got %d", len(peerAddress))
+	}
+
+	key := []byte("urgent-peer:" + string(peerAddress))
+
+	return d.Transaction(ctx, func(ctx context.Context) error {
+		tx := d.getExecutor(ctx)
+
+		has, err := tx.Has(key, nil)
+		if err != nil {
+			return fmt.Errorf("failed to check existence: %w", err)
+		}
+		if has {
+			// Peer already exists, no need to add
+			return nil
+		}
+
+		if err := tx.Put(key, []byte{}, &opt.WriteOptions{Sync: true}); err != nil {
+			return fmt.Errorf("failed to add urgent peer to db: %w", err)
+		}
+		return nil
+	})
+}
+
+func (d *DB) GetUrgentPeers(ctx context.Context) ([][]byte, error) {
+	tx := d.getExecutor(ctx)
+
+	iter := tx.NewIterator(util.BytesPrefix([]byte("urgent-peer:")), nil)
+	defer iter.Release()
+
+	var peers [][]byte
+	for iter.Next() {
+		peerAddress := iter.Key()[len("urgent-peer:"):] // Strip the prefix
+		peers = append(peers, peerAddress)
+	}
+
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("failed to retrieve urgent peers: %w", err)
+	}
+
+	return peers, nil
+}
+
 func (d *DB) CreateChannel(ctx context.Context, channel *db.Channel) error {
 	key := []byte("ch:" + channel.Address)
 
