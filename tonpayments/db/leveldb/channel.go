@@ -57,8 +57,8 @@ func (d *DB) GetUrgentPeers(ctx context.Context) ([][]byte, error) {
 
 	var peers [][]byte
 	for iter.Next() {
-		peerAddress := iter.Key()[len("urgent-peer:"):] // Strip the prefix
-		peers = append(peers, peerAddress)
+		peerAddress := iter.Key()[len("urgent-peer:"):]
+		peers = append(peers, append([]byte{}, peerAddress...))
 	}
 
 	if err := iter.Error(); err != nil {
