@@ -73,4 +73,5 @@ func RegisterMetrics() {
 	prometheus.MustRegister(QueuedTasks)
 	prometheus.MustRegister(ActiveVirtualChannelsCapacity)
 	prometheus.MustRegister(ActiveVirtualChannelsFee)
+	prometheus.MustRegister(WalletBalance)
 }
