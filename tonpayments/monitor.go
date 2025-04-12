@@ -3,15 +3,91 @@ package tonpayments
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/metrics"
+	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
+	"github.com/xssnick/tonutils-go/ton/jetton"
 	"math/big"
 	"strconv"
 	"time"
 )
+
+func (s *Service) walletMonitor() {
+	for {
+		select {
+		case <-s.globalCtx.Done():
+		case <-time.After(5 * time.Second):
+		}
+
+		err := func() error {
+			ctx, cancel := context.WithTimeout(s.globalCtx, 10*time.Second)
+			defer cancel()
+
+			master, err := s.ton.CurrentMasterchainInfo(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to get masterchain info: %w", err)
+			}
+
+			acc, err := s.ton.GetAccount(ctx, master, s.wallet.WalletAddress())
+			if err != nil {
+				return fmt.Errorf("failed to get ton balance: %w", err)
+			}
+
+			for ec, config := range s.cfg.SupportedCoins.ExtraCurrencies {
+				var balance float64
+				if !acc.State.ExtraCurrencies.IsEmpty() {
+					val, err := acc.State.ExtraCurrencies.LoadValueByIntKey(big.NewInt(int64(ec)))
+					if err != nil {
+						log.Debug().Err(err).Msg("failed to get ec key")
+						continue
+					}
+
+					x, err := val.LoadVarUInt(32)
+					if err != nil {
+						log.Debug().Err(err).Msg("failed to get ec value")
+						continue
+					}
+
+					balance, _ = strconv.ParseFloat(tlb.MustFromNano(x, int(config.Decimals)).String(), 64)
+				}
+
+				metrics.WalletBalance.WithLabelValues(config.Symbol).Set(balance)
+			}
+
+			for jettonAddr, config := range s.cfg.SupportedCoins.Jettons {
+				var balance float64
+				jc := jetton.NewJettonMasterClient(s.ton, address.MustParseAddr(jettonAddr))
+				jw, err := jc.GetJettonWallet(ctx, s.wallet.WalletAddress())
+				if err != nil {
+					log.Debug().Err(err).Msg("failed to get jetton wallet")
+					continue
+				}
+
+				jb, err := jw.GetBalance(ctx)
+				if err != nil {
+					log.Debug().Err(err).Msg("failed to get jetton balance")
+					continue
+				}
+
+				balance, _ = strconv.ParseFloat(tlb.MustFromNano(jb, int(config.Decimals)).String(), 64)
+
+				metrics.WalletBalance.WithLabelValues(config.Symbol).Set(balance)
+			}
+
+			balance, _ := strconv.ParseFloat(acc.State.Balance.String(), 64)
+			metrics.WalletBalance.WithLabelValues("TON").Set(balance)
+
+			return nil
+		}()
+		if err != nil {
+			log.Debug().Err(err).Msg("failed to monitor wallet balance")
+		}
+	}
+}
 
 func (s *Service) channelsMonitor() {
 	type virtualData struct {
@@ -139,7 +215,7 @@ func (s *Service) channelsMonitor() {
 						metrics.ActiveVirtualChannels.WithLabelValues(channelName, coinSymbol, strconv.FormatBool(isOurSide), strconv.FormatBool(wantRemove)).Set(float64(v.num))
 						metrics.ActiveVirtualChannelsCapacity.WithLabelValues(channelName, coinSymbol, strconv.FormatBool(isOurSide), strconv.FormatBool(wantRemove)).Set(capacity)
 						metrics.ActiveVirtualChannelsFee.WithLabelValues(channelName, coinSymbol, strconv.FormatBool(isOurSide), strconv.FormatBool(wantRemove)).Set(fee)
-						
+
 						sideStats.virtual[wantRemove] = &virtualData{
 							decimals: v.decimals,
 							num:      0,

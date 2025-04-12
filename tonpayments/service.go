@@ -451,6 +451,7 @@ func (s *Service) Start() {
 	go s.taskExecutor()
 	if metrics.Registered {
 		go s.channelsMonitor()
+		go s.walletMonitor()
 	}
 
 	for {

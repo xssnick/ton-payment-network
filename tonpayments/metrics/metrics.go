@@ -5,6 +5,15 @@ import (
 )
 
 var (
+	WalletBalance = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name:      "wallet_balance",
+			Namespace: "payments",
+			Help:      "The current balance of wallet.",
+		},
+		[]string{"coin"},
+	)
+
 	ChannelBalance = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name:      "channels_balance",
