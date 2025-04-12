@@ -14,9 +14,16 @@ import (
 )
 
 func (s *Service) channelsMonitor() {
+	type virtualData struct {
+		decimals int
+		num      int
+		capacity *big.Int
+		fees     *big.Int
+	}
+
 	type split struct {
 		balance map[string]float64
-		virtual map[bool]float64
+		virtual map[bool]*virtualData
 	}
 	stats := map[string]map[string]map[bool]*split{}
 
@@ -65,7 +72,7 @@ func (s *Service) channelsMonitor() {
 				if !exists {
 					sideStats = &split{
 						balance: map[string]float64{},
-						virtual: map[bool]float64{},
+						virtual: map[bool]*virtualData{},
 					}
 					coinStats[isOurSide] = sideStats
 				}
@@ -83,7 +90,20 @@ func (s *Service) channelsMonitor() {
 					}
 
 					outdated := time.Now().After(time.Unix(vch.Deadline, 0))
-					sideStats.virtual[outdated] += 1
+					v := sideStats.virtual[outdated]
+					if v == nil {
+						v = &virtualData{
+							decimals: int(coinConfig.Decimals),
+							num:      0,
+							capacity: big.NewInt(0),
+							fees:     big.NewInt(0),
+						}
+					}
+					v.num++
+					v.capacity.Add(v.capacity, vch.Capacity)
+					v.fees.Add(v.fees, vch.Fee)
+
+					sideStats.virtual[outdated] = v
 				}
 
 				for _, category := range []string{"deposited", "balance", "balance_committed", "withdrawn"} {
@@ -112,9 +132,20 @@ func (s *Service) channelsMonitor() {
 		for channelName, channelStats := range stats {
 			for coinSymbol, coinStats := range channelStats {
 				for isOurSide, sideStats := range coinStats {
-					for wantRemove, num := range sideStats.virtual {
-						metrics.ActiveVirtualChannels.WithLabelValues(channelName, coinSymbol, strconv.FormatBool(isOurSide), strconv.FormatBool(wantRemove)).Set(num)
-						sideStats.virtual[wantRemove] = 0 // reset to calc in next iteration
+					for wantRemove, v := range sideStats.virtual {
+						capacity, _ := strconv.ParseFloat(tlb.MustFromNano(v.capacity, v.decimals).String(), 64)
+						fee, _ := strconv.ParseFloat(tlb.MustFromNano(v.fees, v.decimals).String(), 64)
+
+						metrics.ActiveVirtualChannels.WithLabelValues(channelName, coinSymbol, strconv.FormatBool(isOurSide), strconv.FormatBool(wantRemove)).Set(float64(v.num))
+						metrics.ActiveVirtualChannelsCapacity.WithLabelValues(channelName, coinSymbol, strconv.FormatBool(isOurSide), strconv.FormatBool(wantRemove)).Set(capacity)
+						metrics.ActiveVirtualChannelsFee.WithLabelValues(channelName, coinSymbol, strconv.FormatBool(isOurSide), strconv.FormatBool(wantRemove)).Set(fee)
+						
+						sideStats.virtual[wantRemove] = &virtualData{
+							decimals: v.decimals,
+							num:      0,
+							capacity: big.NewInt(0),
+							fees:     big.NewInt(0),
+						} // reset to calc in next iteration
 					}
 
 					for category, balance := range sideStats.balance {

@@ -23,6 +23,24 @@ var (
 		[]string{"peer", "coin", "is_out", "want_remove"},
 	)
 
+	ActiveVirtualChannelsCapacity = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name:      "virtual_channels_capacity",
+			Namespace: "payments",
+			Help:      "Active virtual channels capacity.",
+		},
+		[]string{"peer", "coin", "is_out", "want_remove"},
+	)
+
+	ActiveVirtualChannelsFee = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name:      "virtual_channels_fee",
+			Namespace: "payments",
+			Help:      "Active virtual channels fee.",
+		},
+		[]string{"peer", "coin", "is_out", "want_remove"},
+	)
+
 	QueuedTasks = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name:      "queued_tasks",
@@ -44,4 +62,6 @@ func RegisterMetrics() {
 	prometheus.MustRegister(ChannelBalance)
 	prometheus.MustRegister(ActiveVirtualChannels)
 	prometheus.MustRegister(QueuedTasks)
+	prometheus.MustRegister(ActiveVirtualChannelsCapacity)
+	prometheus.MustRegister(ActiveVirtualChannelsFee)
 }
