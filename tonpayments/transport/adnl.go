@@ -324,7 +324,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				updCell = updCell.MustPeekRef(0)
 			}
 
-			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, ProposalDecision{Agreed: ok, Reason: reason, SignedState: updCell}); err != nil {
+			if err = peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, ProposalDecision{Agreed: ok, Reason: reason, SignedState: updCell}); err != nil {
 				return err
 			}
 		case RequestAction:
@@ -341,7 +341,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				ok = false
 			}
 
-			if err := peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Decision{Agreed: ok, Reason: reason, Signature: sign}); err != nil {
+			if err = peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Decision{Agreed: ok, Reason: reason, Signature: sign}); err != nil {
 				return err
 			}
 		}

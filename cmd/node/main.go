@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
@@ -15,6 +16,7 @@ import (
 	"github.com/xssnick/ton-payment-network/tonpayments/config"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/db/leveldb"
+	"github.com/xssnick/ton-payment-network/tonpayments/metrics"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl"
@@ -29,6 +31,7 @@ import (
 	"math"
 	"math/big"
 	"net"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -89,7 +92,7 @@ func main() {
 		return
 	}
 
-	log.Info().Msg("initializing ton client with verified proof chain...")
+	log.Info().Msg("initializing ton client...")
 
 	client := liteclient.NewConnectionPool()
 
@@ -130,6 +133,24 @@ func main() {
 		return
 	}
 
+	if cfg.MetricsListenAddr != "" {
+		metrics.RegisterMetrics()
+		go func() {
+			mx := http.NewServeMux()
+			mx.Handle("/metrics", promhttp.Handler())
+
+			srv := http.Server{
+				Addr:    cfg.MetricsListenAddr,
+				Handler: mx,
+			}
+			log.Info().Str("listen", cfg.MetricsListenAddr).Msg("metrics server initialized")
+
+			if err = srv.ListenAndServe(); err != nil {
+				log.Error().Err(err).Msg("failed to start metrics server")
+			}
+		}()
+	}
+	
 	gate := adnl.NewGateway(ed25519.NewKeyFromSeed(cfg.ADNLServerKey))
 
 	if cfg.ExternalIP != "" {
@@ -361,7 +382,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 			return fmt.Errorf("failed to get channel: %w", err)
 		}
 
-		cc, err := svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID)
+		cc, err := svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
 		if err != nil {
 			return fmt.Errorf("failed to get coin config: %w", err)
 		}
@@ -439,7 +460,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 			return fmt.Errorf("failed to get channel: %w", err)
 		}
 
-		cc, err := svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID)
+		cc, err := svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, true)
 		if err != nil {
 			return fmt.Errorf("failed to get coin config: %w", err)
 		}
@@ -472,7 +493,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 			return fmt.Errorf("failed to get channel: %w", err)
 		}
 
-		cc, err := svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID)
+		cc, err := svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, true)
 		if err != nil {
 			return fmt.Errorf("failed to get coin config: %w", err)
 		}
@@ -567,7 +588,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 
 		log.Info().Msg("input amount, excluding tunnelling fee:")
 
-		cc, err := svc.ResolveCoinConfig(jettonMasterStr, uint32(ecID))
+		cc, err := svc.ResolveCoinConfig(jettonMasterStr, uint32(ecID), false)
 		if err != nil {
 			return fmt.Errorf("failed to get coin config: %w", err)
 		}

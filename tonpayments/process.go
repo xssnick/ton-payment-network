@@ -357,7 +357,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				return nil, fmt.Errorf("capacity cannot increase")
 			}
 
-			cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID)
+			cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, true)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve coin config: %w", err)
 			}

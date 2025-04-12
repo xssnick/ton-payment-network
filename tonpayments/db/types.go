@@ -237,14 +237,13 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 	if s1.Conditionals.IsEmpty() {
 		return balance, nil
 	}
-	
+
 	all, err := s1.Conditionals.LoadAll()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load conditions: %w", err)
 	}
 
 	for _, kv := range all {
-		// TODO: support other types of conditions
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse condition %d: %w", kv.Key.MustLoadUInt(32), err)

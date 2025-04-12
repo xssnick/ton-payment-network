@@ -41,7 +41,7 @@ func (s *Service) ListChannels(ctx context.Context, key ed25519.PublicKey, statu
 
 var ErrNotWhitelisted = errors.New("not whitelisted")
 
-func (s *Service) ResolveCoinConfig(jetton string, ecID uint32) (*config.CoinConfig, error) {
+func (s *Service) ResolveCoinConfig(jetton string, ecID uint32, onlyEnabled bool) (*config.CoinConfig, error) {
 	if jetton != "" && ecID != 0 {
 		return nil, fmt.Errorf("jetton and ec cannot be used together")
 	}
@@ -50,16 +50,16 @@ func (s *Service) ResolveCoinConfig(jetton string, ecID uint32) (*config.CoinCon
 	var cc config.CoinConfig
 	if jetton != "" {
 		cc, ok = s.supportedJettons[jetton]
-		if !ok || !cc.Enabled {
+		if !ok || (!cc.Enabled && onlyEnabled) {
 			return nil, ErrNotWhitelisted
 		}
 	} else if ecID > 0 {
 		cc, ok = s.supportedEC[ecID]
-		if !ok || !cc.Enabled {
+		if !ok || (!cc.Enabled && onlyEnabled) {
 			return nil, ErrNotWhitelisted
 		}
 	} else {
-		if !s.supportedTon || !s.cfg.SupportedCoins.Ton.Enabled {
+		if !s.supportedTon || (!s.cfg.SupportedCoins.Ton.Enabled && onlyEnabled) {
 			return nil, ErrNotWhitelisted
 		}
 		cc = s.cfg.SupportedCoins.Ton
@@ -69,7 +69,7 @@ func (s *Service) ResolveCoinConfig(jetton string, ecID uint32) (*config.CoinCon
 }
 
 func (s *Service) GetTunnelingFees(ctx context.Context, jetton string, ecID uint32) (enabled bool, minFee, maxCap tlb.Coins, percentFee float64, err error) {
-	cc, err := s.ResolveCoinConfig(jetton, ecID)
+	cc, err := s.ResolveCoinConfig(jetton, ecID, true)
 	if err != nil {
 		if errors.Is(err, ErrNotWhitelisted) {
 			return false, tlb.ZeroCoins, tlb.ZeroCoins, 0, nil
@@ -129,7 +129,7 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		jettonAddr = jettonMaster.Bounce(true).String()
 	}
 
-	cc, err := s.ResolveCoinConfig(jettonAddr, ecID)
+	cc, err := s.ResolveCoinConfig(jettonAddr, ecID, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve coin config: %w", err)
 	}

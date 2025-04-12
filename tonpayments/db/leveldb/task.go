@@ -43,6 +43,51 @@ func (d *DB) DumpTasks(ctx context.Context, prefix string) (res []*db.Task, err 
 	return res, nil
 }
 
+func (d *DB) ListActiveTasks(ctx context.Context, poolName string) ([]*db.Task, error) {
+	var result []*db.Task
+	tx := d.getExecutor(ctx)
+
+	keyIndex := []byte("ti:" + poolName + ":")
+
+	iter := tx.NewIterator(util.BytesPrefix(keyIndex), nil)
+	defer iter.Release()
+
+	now := time.Now()
+
+	for iter.Next() {
+		key := iter.Key()
+
+		if binary.BigEndian.Uint64(key[len(keyIndex):]) > uint64(now.UnixNano()) {
+			// no tasks ready to execute
+			break
+		}
+
+		dataKey := iter.Value()
+		if dataKey == nil {
+			continue
+		}
+
+		data, err := tx.Get(dataKey, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get task by index: %w", err)
+		}
+
+		var task *db.Task
+		if err := json.Unmarshal(data, &task); err != nil {
+			return nil, fmt.Errorf("failed to decode json data: %w", err)
+		}
+
+		// it should be removed from index when completed, but just to be sure
+		if task.CompletedAt != nil {
+			continue
+		}
+
+		result = append(result, task)
+	}
+
+	return result, nil
+}
+
 func (d *DB) AcquireTask(ctx context.Context, poolName string) (*db.Task, error) {
 	var result *db.Task
 	err := d.Transaction(ctx, func(ctx context.Context) error {

@@ -59,6 +59,7 @@ type Config struct {
 	PaymentNodePrivateKey          []byte
 	WalletPrivateKey               []byte
 	APIListenAddr                  string
+	MetricsListenAddr              string
 	WebhooksSignatureHMACSHA256Key string
 	NodeListenAddr                 string
 	ExternalIP                     string
@@ -195,9 +196,10 @@ func LoadConfig(path string) (*Config, error) {
 			PaymentNodePrivateKey:          priv.Seed(),
 			WalletPrivateKey:               walletPriv.Seed(),
 			APIListenAddr:                  "0.0.0.0:8096",
+			MetricsListenAddr:              "0.0.0.0:8097",
 			NodeListenAddr:                 "0.0.0.0:17555",
 			ExternalIP:                     "",
-			NetworkConfigUrl:               "https://ton.org/testnet-global.config.json",
+			NetworkConfigUrl:               "https://ton-blockchain.github.io/global.config.json",
 			DBPath:                         "./payment-node-db",
 			WebhooksSignatureHMACSHA256Key: base64.StdEncoding.EncodeToString(whKey),
 			SecureProofPolicy:              false,

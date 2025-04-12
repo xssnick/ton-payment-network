@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/config"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/metrics"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
@@ -50,6 +52,7 @@ type DB interface {
 	AcquireTask(ctx context.Context, poolName string) (*db.Task, error)
 	RetryTask(ctx context.Context, task *db.Task, reason string, retryAt time.Time) error
 	CompleteTask(ctx context.Context, poolName string, task *db.Task) error
+	ListActiveTasks(ctx context.Context, poolName string) ([]*db.Task, error)
 
 	GetVirtualChannelMeta(ctx context.Context, key []byte) (*db.VirtualChannelMeta, error)
 	UpdateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChannelMeta) error
@@ -124,11 +127,17 @@ type Service struct {
 	supportedEC        map[uint32]config.CoinConfig
 	supportedTon       bool
 	balanceControllers map[string]*balanceControlConfig
+	urgentPeers        map[string]bool
 
-	discoveryMx sync.Mutex
+	globalCtx    context.Context
+	globalCancel context.CancelFunc
+
+	urgentPeersMx sync.RWMutex
+	discoveryMx   sync.Mutex
 }
 
 func NewService(api ton.APIClientWrapped, database DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, cfg config.ChannelsConfig) (*Service, error) {
+	globalCtx, globalCancel := context.WithCancel(context.Background())
 	s := &Service{
 		ton:                            api,
 		transport:                      transport,
@@ -145,6 +154,9 @@ func NewService(api ton.APIClientWrapped, database DB, transport Transport, wall
 		supportedEC:                    map[uint32]config.CoinConfig{},
 		supportedTon:                   cfg.SupportedCoins.Ton.Enabled,
 		balanceControllers:             map[string]*balanceControlConfig{},
+		urgentPeers:                    map[string]bool{},
+		globalCtx:                      globalCtx,
+		globalCancel:                   globalCancel,
 	}
 
 	addBalanceControl := func(jetton string, ecID uint32, currency config.CoinConfig) error {
@@ -253,10 +265,19 @@ func ccToKey(jetton string, ecID uint32) string {
 	return "J:" + jetton + "E:" + fmt.Sprint(ecID)
 }
 
+func (s *Service) Stop() {
+	s.globalCancel()
+}
+
 func (s *Service) AddUrgentPeer(ctx context.Context, peer []byte) error {
 	if err := s.db.AddUrgentPeer(ctx, peer); err != nil {
 		return err
 	}
+
+	s.urgentPeersMx.Lock()
+	s.urgentPeers[hex.EncodeToString(peer)] = true
+	s.urgentPeersMx.Unlock()
+
 	s.transport.AddUrgentPeer(peer)
 	return nil
 }
@@ -268,6 +289,10 @@ func (s *Service) loadUrgentPeers(ctx context.Context) error {
 	}
 
 	for _, peer := range peers {
+		s.urgentPeersMx.Lock()
+		s.urgentPeers[hex.EncodeToString(peer)] = true
+		s.urgentPeersMx.Unlock()
+
 		s.transport.AddUrgentPeer(peer)
 	}
 	return nil
@@ -424,8 +449,18 @@ func (s *Service) Start() {
 	}
 
 	go s.taskExecutor()
+	if metrics.Registered {
+		go s.channelsMonitor()
+	}
 
-	for update := range s.updates {
+	for {
+		var update any
+		select {
+		case <-s.globalCtx.Done():
+			return
+		case update = <-s.updates:
+		}
+
 		switch upd := update.(type) {
 		case BlockCheckedEvent:
 			if err := s.db.SetBlockOffset(context.Background(), upd.Seqno); err != nil {
@@ -445,6 +480,12 @@ func (s *Service) Start() {
 			var err error
 			var channel *db.Channel
 			for {
+				select {
+				case <-s.globalCtx.Done():
+					return
+				default:
+				}
+
 				// TODO: not block, DLQ?
 				channel, err = s.db.GetChannel(context.Background(), upd.Channel.Address().String())
 				if err != nil && !errors.Is(err, db.ErrNotFound) {

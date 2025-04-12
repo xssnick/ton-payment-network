@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/metrics"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
@@ -37,6 +38,10 @@ func (s *Service) addPeersForChannels() error {
 }
 
 func (s *Service) taskExecutor() {
+	if metrics.Registered {
+		go s.taskMonitor()
+	}
+
 	tick := time.Tick(1 * time.Second)
 
 	for {
