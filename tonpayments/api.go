@@ -139,6 +139,10 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		jettonData = jettonMaster.Data()
 	}
 
+	if err = s.checkBalance(ctx, jettonAddr, ecID, tlb.ZeroCoins); err != nil {
+		return nil, fmt.Errorf("failed to check balance: %w", err)
+	}
+
 	excessFee := tlb.MustFromTON(cc.ExcessFeeTon)
 	destWallet, err := s.transport.ProposeChannelConfig(ctx, nodeKey, transport.ProposeChannelConfig{
 		JettonAddr:               jettonData,
@@ -392,10 +396,76 @@ func (s *Service) RequestUncooperativeClose(ctx context.Context, addr string) er
 	return nil
 }
 
+var minTonAmountForTx = tlb.MustFromTON("0.25")
+
+func (s *Service) checkBalance(ctx context.Context, jettonAddr string, ec uint32, amount tlb.Coins) error {
+	master, err := s.ton.CurrentMasterchainInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get masterchain info: %w", err)
+	}
+
+	acc, err := s.ton.GetAccount(ctx, master, s.wallet.WalletAddress())
+	if err != nil {
+		return fmt.Errorf("failed to get ton balance: %w", err)
+	}
+	balance := acc.State.Balance.Nano()
+	balance = balance.Sub(balance, minTonAmountForTx.Nano())
+	if balance.Sign() < 0 {
+		return fmt.Errorf("not enough ton balance")
+	}
+
+	if amount.Nano().Sign() <= 0 {
+		return nil
+	}
+
+	// just checking it is enabled
+	_, err = s.ResolveCoinConfig(jettonAddr, ec, true)
+	if err != nil {
+		return fmt.Errorf("failed to resolve coin config: %w", err)
+	}
+
+	if jettonAddr != "" {
+		jc := jetton.NewJettonMasterClient(s.ton, address.MustParseAddr(jettonAddr))
+		jw, err := jc.GetJettonWallet(ctx, s.wallet.WalletAddress())
+		if err != nil {
+			return fmt.Errorf("failed to get jetton wallet: %w", err)
+		}
+
+		balance, err = jw.GetBalance(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get jetton balance: %w", err)
+		}
+	} else if ec > 0 {
+		if acc.State.ExtraCurrencies.IsEmpty() {
+			return fmt.Errorf("no extra currencies in wallet")
+		}
+
+		val, err := acc.State.ExtraCurrencies.LoadValueByIntKey(big.NewInt(int64(ec)))
+		if err != nil {
+			return fmt.Errorf("failed to get extra currency value: %w", err)
+		}
+
+		balance, err = val.LoadVarUInt(32)
+		if err != nil {
+			return fmt.Errorf("failed to parse extra currency value: %w", err)
+		}
+	}
+
+	if balance.Cmp(amount.Nano()) < 0 {
+		return fmt.Errorf("not enough balance")
+	}
+
+	return nil
+}
+
 func (s *Service) TopupChannel(ctx context.Context, addr *address.Address, amount tlb.Coins) error {
 	channel, err := s.GetActiveChannel(ctx, addr.Bounce(true).String())
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if err = s.checkBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, amount); err != nil {
+		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
 	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "topup", channel.Address+"-topup",
@@ -423,6 +493,10 @@ func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, am
 func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amount tlb.Coins) error {
 	if _, _, _, err := s.getCommitRequest(amount, tlb.MustFromTON("0"), channel); err != nil {
 		return fmt.Errorf("failed to prepare close channel request: %w", err)
+	}
+
+	if err := s.checkBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
+		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
 	if err := s.db.CreateTask(ctx, PaymentsTaskPool, "withdraw", channel.Address+"-withdraw",
@@ -529,6 +603,10 @@ func (s *Service) executeCooperativeCommit(ctx context.Context, req *payments.Co
 		return fmt.Errorf("failed to serialize close channel request: %w", err)
 	}
 
+	if err = s.checkBalance(ctx, ch.JettonAddress, ch.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
+		return fmt.Errorf("failed to check balance: %w", err)
+	}
+
 	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(ch.Address), tlb.MustFromTON("0.16"), msg))
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
@@ -541,6 +619,10 @@ func (s *Service) executeCooperativeClose(ctx context.Context, req *payments.Coo
 	msg, err := tlb.ToCell(req)
 	if err != nil {
 		return fmt.Errorf("failed to serialize close channel request: %w", err)
+	}
+
+	if err = s.checkBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
+		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
 	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msg))
@@ -772,6 +854,10 @@ func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr strin
 		return fmt.Errorf("failed to serialize message to cell: %w", err)
 	}
 
+	if err = s.checkBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
+		return fmt.Errorf("failed to check balance: %w", err)
+	}
+
 	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
@@ -825,6 +911,10 @@ func (s *Service) challengeChannelState(ctx context.Context, channelAddr string)
 		return fmt.Errorf("failed to serialize message to cell: %w", err)
 	}
 
+	if err := s.checkBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
+		return fmt.Errorf("failed to check balance: %w", err)
+	}
+
 	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
@@ -859,6 +949,10 @@ func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAd
 	msgCell, err := tlb.ToCell(payments.FinishUncooperativeClose{})
 	if err != nil {
 		return fmt.Errorf("failed to serialize message to cell: %w", err)
+	}
+
+	if err := s.checkBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
+		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
 	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
@@ -1060,6 +1154,15 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 func (s *Service) executeSettleStep(ctx context.Context, channelAddr string, messages []*cell.Cell, step int) error {
 	log.Info().Str("address", channelAddr).Int("step", step).Msg("executing settle step...")
 
+	channel, err := s.db.GetChannel(ctx, channelAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if err = s.checkBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
+		return fmt.Errorf("failed to check balance: %w", err)
+	}
+
 	var list []*wallet.Message
 	for _, message := range messages {
 		list = append(list, wallet.SimpleMessage(address.MustParseAddr(channelAddr), tlb.MustFromTON("0.5"), message))
@@ -1091,6 +1194,10 @@ func (s *Service) executeTopup(ctx context.Context, channelAddr string, amount t
 	if channel.Status != db.ChannelStateActive {
 		log.Warn().Str("address", channelAddr).Msg("skip topup, channel is not active")
 		return nil
+	}
+
+	if err = s.checkBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, amount); err != nil {
+		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
 	c, err := tlb.ToCell(payments.TopupBalance{
