@@ -60,6 +60,7 @@ type Config struct {
 	WalletPrivateKey               []byte
 	APIListenAddr                  string
 	MetricsListenAddr              string
+	MetricsNamespace               string
 	WebhooksSignatureHMACSHA256Key string
 	NodeListenAddr                 string
 	ExternalIP                     string
@@ -197,6 +198,7 @@ func LoadConfig(path string) (*Config, error) {
 			WalletPrivateKey:               walletPriv.Seed(),
 			APIListenAddr:                  "0.0.0.0:8096",
 			MetricsListenAddr:              "0.0.0.0:8097",
+			MetricsNamespace:               "",
 			NodeListenAddr:                 "0.0.0.0:17555",
 			ExternalIP:                     "",
 			NetworkConfigUrl:               "https://ton-blockchain.github.io/global.config.json",

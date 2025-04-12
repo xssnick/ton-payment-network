@@ -5,10 +5,27 @@ import (
 )
 
 var (
+	WalletBalance                 *prometheus.GaugeVec
+	ChannelBalance                *prometheus.GaugeVec
+	ActiveVirtualChannels         *prometheus.GaugeVec
+	ActiveVirtualChannelsCapacity *prometheus.GaugeVec
+	ActiveVirtualChannelsFee      *prometheus.GaugeVec
+	QueuedTasks                   *prometheus.GaugeVec
+)
+
+var Registered = false
+
+func RegisterMetrics(namespace string) {
+	if Registered {
+		return
+	}
+	Registered = true
+
 	WalletBalance = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name:      "wallet_balance",
-			Namespace: "payments",
+			Namespace: namespace,
+			Subsystem: "payments",
 			Help:      "The current balance of wallet.",
 		},
 		[]string{"coin"},
@@ -17,7 +34,8 @@ var (
 	ChannelBalance = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name:      "channels_balance",
-			Namespace: "payments",
+			Namespace: namespace,
+			Subsystem: "payments",
 			Help:      "The current balance of channels.",
 		},
 		[]string{"peer", "coin", "is_our", "balance_type"},
@@ -26,7 +44,8 @@ var (
 	ActiveVirtualChannels = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name:      "virtual_channels",
-			Namespace: "payments",
+			Namespace: namespace,
+			Subsystem: "payments",
 			Help:      "Active virtual channels count.",
 		},
 		[]string{"peer", "coin", "is_out", "want_remove"},
@@ -35,7 +54,8 @@ var (
 	ActiveVirtualChannelsCapacity = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name:      "virtual_channels_capacity",
-			Namespace: "payments",
+			Namespace: namespace,
+			Subsystem: "payments",
 			Help:      "Active virtual channels capacity.",
 		},
 		[]string{"peer", "coin", "is_out", "want_remove"},
@@ -44,7 +64,8 @@ var (
 	ActiveVirtualChannelsFee = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name:      "virtual_channels_fee",
-			Namespace: "payments",
+			Namespace: namespace,
+			Subsystem: "payments",
 			Help:      "Active virtual channels fee.",
 		},
 		[]string{"peer", "coin", "is_out", "want_remove"},
@@ -53,20 +74,12 @@ var (
 	QueuedTasks = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name:      "queued_tasks",
-			Namespace: "payments",
+			Namespace: namespace,
+			Subsystem: "payments",
 			Help:      "Number of tasks in the queue.",
 		},
 		[]string{"job_type", "in_retry", "execute_later"},
 	)
-)
-
-var Registered = false
-
-func RegisterMetrics() {
-	if Registered {
-		return
-	}
-	Registered = true
 
 	prometheus.MustRegister(ChannelBalance)
 	prometheus.MustRegister(ActiveVirtualChannels)

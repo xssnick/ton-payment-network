@@ -134,7 +134,8 @@ func main() {
 	}
 
 	if cfg.MetricsListenAddr != "" {
-		metrics.RegisterMetrics()
+		metrics.RegisterMetrics(cfg.MetricsNamespace)
+		
 		go func() {
 			mx := http.NewServeMux()
 			mx.Handle("/metrics", promhttp.Handler())
@@ -150,7 +151,7 @@ func main() {
 			}
 		}()
 	}
-	
+
 	gate := adnl.NewGateway(ed25519.NewKeyFromSeed(cfg.ADNLServerKey))
 
 	if cfg.ExternalIP != "" {
