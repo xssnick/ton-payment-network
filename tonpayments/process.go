@@ -425,7 +425,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			}
 
 			if target == nil {
-				return nil, fmt.Errorf("not enough balance with target to tunnel requested capacity")
+				return nil, fmt.Errorf("not enough balance with %s to tunnel requested capacity", base64.StdEncoding.EncodeToString(currentInstruction.NextTarget))
 			}
 
 			// we will execute it only after all checks passed and final signature verify

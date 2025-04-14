@@ -492,7 +492,7 @@ func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, am
 
 func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amount tlb.Coins) error {
 	if _, _, _, err := s.getCommitRequest(amount, tlb.MustFromTON("0"), channel); err != nil {
-		return fmt.Errorf("failed to prepare close channel request: %w", err)
+		return fmt.Errorf("failed to prepare channel commit request: %w", err)
 	}
 
 	if err := s.checkBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
