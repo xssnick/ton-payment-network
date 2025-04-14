@@ -158,7 +158,7 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 		return rl
 	}
 
-	rl := rldp.NewClient(client)
+	rl := rldp.NewClientV2(client)
 	p := &PeerConnection{
 		rldp: rl,
 		adnl: client,
