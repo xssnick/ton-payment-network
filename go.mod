@@ -8,7 +8,7 @@ require (
 	github.com/prometheus/client_golang v1.22.0
 	github.com/rs/zerolog v1.34.0
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/xssnick/tonutils-go v1.12.0
+	github.com/xssnick/tonutils-go v1.11.2-0.20250410181246-8f93de3479f6
 	golang.org/x/crypto v0.37.0
 )
 

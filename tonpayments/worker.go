@@ -95,6 +95,9 @@ func (s *Service) taskExecutor() {
 
 					meta, err := s.db.GetVirtualChannelMeta(ctx, data.VirtualKey)
 					if err != nil {
+						if errors.Is(err, db.ErrNotFound) {
+							return nil
+						}
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
 					}
 
@@ -328,6 +331,9 @@ func (s *Service) taskExecutor() {
 
 					meta, err := s.db.GetVirtualChannelMeta(ctx, data.Key)
 					if err != nil {
+						if errors.Is(err, db.ErrNotFound) {
+							return nil
+						}
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
 					}
 
@@ -374,7 +380,8 @@ func (s *Service) taskExecutor() {
 					meta, err := s.db.GetVirtualChannelMeta(ctx, vch.Key)
 					if err != nil {
 						if errors.Is(err, db.ErrNotFound) {
-							return fmt.Errorf("virtual channel is not exists")
+							log.Warn().Str("channel", channel.Address).Str("key", base64.StdEncoding.EncodeToString(data.Key)).Msg("nothing virtual to close, meta not exists anymore")
+							return nil
 						}
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
 					}
@@ -404,6 +411,9 @@ func (s *Service) taskExecutor() {
 
 					meta, err := s.db.GetVirtualChannelMeta(ctx, data.Key)
 					if err != nil {
+						if errors.Is(err, db.ErrNotFound) {
+							return nil
+						}
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
 					}
 
