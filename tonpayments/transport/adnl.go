@@ -188,45 +188,10 @@ func (s *Server) handleADNLQuery(peer *PeerConnection) func(query *adnl.MessageQ
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		switch q := query.Data.(type) {
-		case RequestChannelLock:
-			if peer.authKey == nil {
-				return fmt.Errorf("not authorized")
-			}
-
-			var reason string
-			err := s.svc.ProcessExternalChannelLock(ctx, peer.authKey, address.NewAddress(0, 0, q.ChannelAddr), q.LockID, q.Lock)
-			if err != nil {
-				reason = err.Error()
-			}
-
-			if err = peer.adnl.Answer(ctx, query.ID, Decision{Agreed: reason == "", Reason: reason}); err != nil {
+		case Ping:
+			if err := peer.adnl.Answer(ctx, query.ID, Pong{Value: q.Value}); err != nil {
 				return err
 			}
-		case IsChannelUnlocked:
-			if peer.authKey == nil {
-				return fmt.Errorf("not authorized")
-			}
-
-			var reason string
-			err := s.svc.ProcessIsChannelLocked(ctx, peer.authKey, address.NewAddress(0, 0, q.ChannelAddr), q.LockID)
-			if err != nil {
-				reason = err.Error()
-			}
-
-			if err = peer.adnl.Answer(ctx, query.ID, Decision{Agreed: reason == "", Reason: reason}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-}
-
-func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, query *rldp.Query) error {
-	return func(transfer []byte, query *rldp.Query) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		switch q := query.Data.(type) {
 		case Authenticate:
 			if q.Timestamp < time.Now().Add(-30*time.Second).Unix() || q.Timestamp > time.Now().Unix() {
 				return fmt.Errorf("outdated auth data")
@@ -266,13 +231,52 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 				return fmt.Errorf("failed to hash our auth data: %w", err)
 			}
 
-			if err = peer.rldp.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Authenticate{
+			if err = peer.adnl.Answer(ctx, query.ID, Authenticate{
 				Key:       s.channelKey.Public().(ed25519.PublicKey),
 				Timestamp: q.Timestamp,
 				Signature: ed25519.Sign(s.channelKey, authData),
 			}); err != nil {
 				return err
 			}
+		case RequestChannelLock:
+			if peer.authKey == nil {
+				return fmt.Errorf("not authorized")
+			}
+
+			var reason string
+			err := s.svc.ProcessExternalChannelLock(ctx, peer.authKey, address.NewAddress(0, 0, q.ChannelAddr), q.LockID, q.Lock)
+			if err != nil {
+				reason = err.Error()
+			}
+
+			if err = peer.adnl.Answer(ctx, query.ID, Decision{Agreed: reason == "", Reason: reason}); err != nil {
+				return err
+			}
+		case IsChannelUnlocked:
+			if peer.authKey == nil {
+				return fmt.Errorf("not authorized")
+			}
+
+			var reason string
+			err := s.svc.ProcessIsChannelLocked(ctx, peer.authKey, address.NewAddress(0, 0, q.ChannelAddr), q.LockID)
+			if err != nil {
+				reason = err.Error()
+			}
+
+			if err = peer.adnl.Answer(ctx, query.ID, Decision{Agreed: reason == "", Reason: reason}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, query *rldp.Query) error {
+	return func(transfer []byte, query *rldp.Query) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		switch q := query.Data.(type) {
 		case ProposeChannelConfig:
 			var res ChannelConfigDecision
 			if addr, err := s.svc.ReviewChannelConfig(q); err == nil {
@@ -378,7 +382,7 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 
 			var pong Pong
 			ctx, cancel := context.WithTimeout(peerCtx, timeout)
-			err := s.doRLDPQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong, true)
+			err := s.doADNLQuery(ctx, channelKey, Ping{Value: rand.Int63()}, &pong, true)
 			cancel()
 			if err != nil {
 				timeout = 10 * time.Second
@@ -455,7 +459,7 @@ func (s *Server) auth(ctx context.Context, peer *PeerConnection) error {
 	}
 
 	var res Authenticate
-	err = peer.rldp.DoQuery(ctx, _RLDPMaxAnswerSize, Authenticate{
+	err = peer.adnl.Query(ctx, Authenticate{
 		Key:       s.channelKey.Public().(ed25519.PublicKey),
 		Timestamp: ts,
 		Signature: ed25519.Sign(s.channelKey, authData),

@@ -37,6 +37,10 @@ func (s *Service) walletMonitor() {
 				return fmt.Errorf("failed to get ton balance: %w", err)
 			}
 
+			if acc.State == nil {
+				return fmt.Errorf("account is not yet initialized")
+			}
+
 			for ec, config := range s.cfg.SupportedCoins.ExtraCurrencies {
 				var balance float64
 				if !acc.State.ExtraCurrencies.IsEmpty() {

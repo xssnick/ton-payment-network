@@ -244,7 +244,6 @@ func FindVirtualChannelWithProof(conditionals *cell.Dictionary, key ed25519.Publ
 	if err != nil {
 		if errors.Is(err, cell.ErrNoSuchKeyInDict) {
 			if proofRoot != nil {
-				proofBranch.SetRecursive()
 				proofRoot.Merge(tempProofRoot)
 			}
 			return nil, nil, ErrNotFound

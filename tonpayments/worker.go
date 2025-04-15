@@ -474,6 +474,9 @@ func (s *Service) taskExecutor() {
 
 						_, vch, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.Key)
 						if err != nil {
+							if errors.Is(err, payments.ErrNotFound) {
+								return nil
+							}
 							return fmt.Errorf("failed to find virtual channel with 'from': %w", err)
 						}
 
