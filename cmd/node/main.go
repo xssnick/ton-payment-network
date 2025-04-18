@@ -26,7 +26,6 @@ import (
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
-	"github.com/xssnick/tonutils-go/ton/wallet"
 	"golang.org/x/crypto/ed25519"
 	"math"
 	"math/big"
@@ -35,7 +34,6 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -135,7 +133,7 @@ func main() {
 
 	if cfg.MetricsListenAddr != "" {
 		metrics.RegisterMetrics(cfg.MetricsNamespace)
-		
+
 		go func() {
 			mx := http.NewServeMux()
 			mx.Handle("/metrics", promhttp.Handler())
@@ -240,17 +238,8 @@ func main() {
 			log.Warn().Msg("too many channels, it is recommended to switch to block scanner instead of individual account scanner by using --use-block-scanner flag")
 		}
 	}
-
-	walletAbstractSeqno := uint32(0)
-	w, err := wallet.FromPrivateKey(apiClient, ed25519.NewKeyFromSeed(cfg.WalletPrivateKey), wallet.ConfigHighloadV3{
-		MessageTTL: 3*60 + 30,
-		MessageBuilder: func(ctx context.Context, subWalletId uint32) (id uint32, createdAt int64, err error) {
-			createdAt = time.Now().Unix() - 30 // something older than last master block, to pass through LS external's time validation
-			// TODO: store seqno in db
-			id = uint32((createdAt%(3*60+30))<<15) | atomic.AddUint32(&walletAbstractSeqno, 1)%(1<<15)
-			return
-		},
-	})
+	
+	w, err := chain.InitWallet(apiClient, ed25519.NewKeyFromSeed(cfg.WalletPrivateKey))
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init wallet")
 		return
