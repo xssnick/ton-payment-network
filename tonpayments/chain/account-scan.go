@@ -48,25 +48,43 @@ func (v *Scanner) OnChannelUpdate(_ context.Context, ch *db.Channel, statusChang
 }
 
 func (v *Scanner) startForContract(ctx context.Context, addr *address.Address, sinceLT uint64) {
-	ch := make(chan *tlb.Transaction, 1)
-	go v.api.SubscribeOnTransactions(ctx, addr, sinceLT, ch)
+	originalCtx := ctx
+	for {
+		ch := make(chan *tlb.Transaction, 1)
+		go v.api.SubscribeOnTransactions(ctx, addr, sinceLT, ch)
 
-	for transaction := range ch {
-		for {
-			m, err := v.api.CurrentMasterchainInfo(ctx)
-			if err != nil {
-				time.Sleep(1 * time.Second)
-				log.Warn().Str("address", addr.String()).Msg("failed to fetch master block, will retry in 1s")
-				continue
-			}
+		for transaction := range ch {
+			for {
+				m, err := v.api.CurrentMasterchainInfo(ctx)
+				if err != nil {
+					time.Sleep(1 * time.Second)
+					log.Warn().Str("address", addr.String()).Msg("failed to fetch master block, will retry in 1s")
+					continue
+				}
 
-			v.taskPool <- accFetchTask{
-				master:   m,
-				tx:       transaction,
-				addr:     addr,
-				callback: func() {},
+				v.taskPool <- accFetchTask{
+					master:   m,
+					tx:       transaction,
+					addr:     addr,
+					callback: func() {},
+				}
+				break
 			}
-			break
+		}
+
+		log.Error().Str("address", addr.String()).Msg("SubscribeOnTransactions stopped listening because of LS reported tx not in DB, will retry with another LS...")
+
+		var err error
+		ctx, err = v.api.Client().StickyContextNextNode(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("all nodes failed, will retry all again :(")
+			ctx = originalCtx
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
 		}
 	}
 }

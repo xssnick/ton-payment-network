@@ -211,15 +211,18 @@ func (s *Server) handleADNLQuery(peer *PeerConnection) func(query *adnl.MessageQ
 				return fmt.Errorf("incorrect signature")
 			}
 
-			s.mx.Lock()
-			if peer.authKey != nil {
-				// when authenticated with new key, delete old record
-				delete(s.peersByKey, string(peer.authKey))
+			if !bytes.Equal(q.Key, peer.authKey) {
+				log.Info().Str("key", base64.StdEncoding.EncodeToString(q.Key)).Msg("connected with payment node peer")
+
+				s.mx.Lock()
+				if peer.authKey != nil {
+					// when authenticated with new key, delete old record
+					delete(s.peersByKey, string(peer.authKey))
+				}
+				peer.authKey = append([]byte{}, q.Key...)
+				s.peersByKey[string(peer.authKey)] = peer
+				s.mx.Unlock()
 			}
-			peer.authKey = append([]byte{}, q.Key...)
-			s.peersByKey[string(peer.authKey)] = peer
-			s.mx.Unlock()
-			log.Info().Str("key", base64.StdEncoding.EncodeToString(peer.authKey)).Msg("connected with payment node peer")
 
 			// reverse A and B, and sign, so party can verify us too
 			authData, err = tl.Hash(AuthenticateToSign{

@@ -228,6 +228,10 @@ func NewService(api ton.APIClientWrapped, database DB, transport Transport, wall
 		}
 	}
 
+	if err := s.loadUrgentPeers(context.Background()); err != nil {
+		return nil, err
+	}
+
 	if balanceControl {
 		handler := s.balanceControlCallback
 		if current := database.GetOnChannelUpdated(); current != nil {
@@ -237,26 +241,22 @@ func NewService(api ton.APIClientWrapped, database DB, transport Transport, wall
 			}
 		}
 		database.SetOnChannelUpdated(handler)
+
+		go func() {
+			// some startup delay for indexing
+			time.Sleep(10 * time.Second)
+
+			channels, err := s.ListChannels(context.Background(), nil, db.ChannelStateActive)
+			if err != nil {
+				log.Error().Err(err).Msg("failed to list active channels")
+				return
+			}
+
+			for _, ch := range channels {
+				s.balanceControlCallback(context.Background(), ch, false)
+			}
+		}()
 	}
-
-	if err := s.loadUrgentPeers(context.Background()); err != nil {
-		return nil, err
-	}
-
-	go func() {
-		// some startup delay for indexing
-		time.Sleep(10 * time.Second)
-
-		channels, err := s.ListChannels(context.Background(), nil, db.ChannelStateActive)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to list active channels")
-			return
-		}
-
-		for _, ch := range channels {
-			s.balanceControlCallback(context.Background(), ch, false)
-		}
-	}()
 
 	return s, nil
 }
