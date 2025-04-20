@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/natefinch/lumberjack"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -50,7 +51,18 @@ var UseBlockScanner = flag.Bool("use-block-scanner", false, "use block scanner i
 func main() {
 	flag.Parse()
 
-	log.Logger = zerolog.New(zerolog.NewConsoleWriter()).With().Timestamp().Logger().Level(zerolog.InfoLevel)
+	// logs rotation
+	logWriter := &lumberjack.Logger{
+		Filename:   "payment-network.log",
+		MaxSize:    1024, // mb
+		MaxBackups: 16,
+		MaxAge:     365, // days
+		Compress:   false,
+	}
+
+	multi := zerolog.MultiLevelWriter(zerolog.NewConsoleWriter(), logWriter)
+
+	log.Logger = zerolog.New(multi).With().Timestamp().Logger().Level(zerolog.InfoLevel)
 	scanLog := log.Logger
 	if *Verbosity >= 4 {
 		scanLog = scanLog.Level(zerolog.DebugLevel).With().Logger()
@@ -238,7 +250,7 @@ func main() {
 			log.Warn().Msg("too many channels, it is recommended to switch to block scanner instead of individual account scanner by using --use-block-scanner flag")
 		}
 	}
-	
+
 	w, err := chain.InitWallet(apiClient, ed25519.NewKeyFromSeed(cfg.WalletPrivateKey))
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init wallet")

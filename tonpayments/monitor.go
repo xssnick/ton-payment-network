@@ -46,13 +46,13 @@ func (s *Service) walletMonitor() {
 				if !acc.State.ExtraCurrencies.IsEmpty() {
 					val, err := acc.State.ExtraCurrencies.LoadValueByIntKey(big.NewInt(int64(ec)))
 					if err != nil {
-						log.Debug().Err(err).Msg("failed to get ec key")
+						log.Trace().Err(err).Msg("failed to get ec key")
 						continue
 					}
 
 					x, err := val.LoadVarUInt(32)
 					if err != nil {
-						log.Debug().Err(err).Msg("failed to get ec value")
+						log.Trace().Err(err).Msg("failed to get ec value")
 						continue
 					}
 
@@ -67,13 +67,13 @@ func (s *Service) walletMonitor() {
 				jc := jetton.NewJettonMasterClient(s.ton, address.MustParseAddr(jettonAddr))
 				jw, err := jc.GetJettonWallet(ctx, s.wallet.WalletAddress())
 				if err != nil {
-					log.Debug().Err(err).Msg("failed to get jetton wallet")
+					log.Trace().Err(err).Msg("failed to get jetton wallet")
 					continue
 				}
 
 				jb, err := jw.GetBalance(ctx)
 				if err != nil {
-					log.Debug().Err(err).Msg("failed to get jetton balance")
+					log.Trace().Err(err).Msg("failed to get jetton balance")
 					continue
 				}
 
@@ -88,7 +88,7 @@ func (s *Service) walletMonitor() {
 			return nil
 		}()
 		if err != nil {
-			log.Debug().Err(err).Msg("failed to monitor wallet balance")
+			log.Trace().Err(err).Msg("failed to monitor wallet balance")
 		}
 	}
 }
