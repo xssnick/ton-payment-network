@@ -20,6 +20,7 @@ func (s *Service) walletMonitor() {
 	for {
 		select {
 		case <-s.globalCtx.Done():
+			return
 		case <-time.After(5 * time.Second):
 		}
 

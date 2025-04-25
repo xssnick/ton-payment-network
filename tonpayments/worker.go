@@ -45,6 +45,12 @@ func (s *Service) taskExecutor() {
 	tick := time.Tick(1 * time.Second)
 
 	for {
+		select {
+		case <-s.globalCtx.Done():
+			return
+		default:
+		}
+
 		task, err := s.db.AcquireTask(context.Background(), PaymentsTaskPool)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to acquire task from db")
