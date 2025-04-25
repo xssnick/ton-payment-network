@@ -69,7 +69,7 @@ func NewDB(path string, pubKey ed25519.PublicKey) (*DB, error) {
 }
 
 func (d *DB) Close() {
-	d.Close()
+	d._db.Close()
 }
 
 const txKey = "__ldbTx"

@@ -19,7 +19,7 @@ func (v *Scanner) OnChannelUpdate(_ context.Context, ch *db.Channel, statusChang
 	if !statusChanged {
 		return
 	}
-	
+
 	v.mx.Lock()
 	defer v.mx.Unlock()
 
@@ -72,7 +72,7 @@ func (v *Scanner) startForContract(ctx context.Context, addr *address.Address, s
 			}
 		}
 
-		log.Error().Str("address", addr.String()).Msg("SubscribeOnTransactions stopped listening because of LS reported tx not in DB, will retry with another LS...")
+		log.Warn().Str("address", addr.String()).Msg("SubscribeOnTransactions stopped listening because of LS reported tx not in DB, will retry with another LS...")
 
 		var err error
 		ctx, err = v.api.Client().StickyContextNextNode(ctx)

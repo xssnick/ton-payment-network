@@ -70,6 +70,8 @@ type DB interface {
 
 	GetUrgentPeers(ctx context.Context) ([][]byte, error)
 	AddUrgentPeer(ctx context.Context, peerAddress []byte) error
+
+	Close()
 }
 
 type BlockCheckedEvent struct {

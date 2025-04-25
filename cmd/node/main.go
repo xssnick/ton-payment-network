@@ -28,14 +28,18 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
 	"golang.org/x/crypto/ed25519"
+	"io"
 	"math"
 	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	_ "net/http/pprof"
 )
 
 var Verbosity = flag.Int("v", 2, "verbosity")
@@ -48,19 +52,29 @@ var ConfigPath = flag.String("config", "payment-network-config.json", "config pa
 var ForceBlock = flag.Uint64("force-block", 0, "master block seqno to start scan from, ignored if 0, otherwise - overrides db value")
 var UseBlockScanner = flag.Bool("use-block-scanner", false, "use block scanner instead of watching specific contracts")
 
+var LogFilename = flag.String("log-filename", "payment-network.log", "log file name")
+var LogMaxSize = flag.Int("log-max-size", 1024, "maximum log file size in MB before rotation")
+var LogMaxBackups = flag.Int("log-max-backups", 16, "maximum number of old log files to keep")
+var LogMaxAge = flag.Int("log-max-age", 365, "maximum number of days to retain old log files")
+var LogCompress = flag.Bool("log-compress", false, "whether to compress rotated log files")
+var LogDisableFile = flag.Bool("log-disable-file", false, "Disable logging to file")
+
 func main() {
 	flag.Parse()
 
 	// logs rotation
-	logWriter := &lumberjack.Logger{
-		Filename:   "payment-network.log",
-		MaxSize:    1024, // mb
-		MaxBackups: 16,
-		MaxAge:     365, // days
-		Compress:   false,
-	}
+	var logWriters = []io.Writer{zerolog.NewConsoleWriter()}
 
-	multi := zerolog.MultiLevelWriter(zerolog.NewConsoleWriter(), logWriter)
+	if !*LogDisableFile {
+		logWriters = append(logWriters, &lumberjack.Logger{
+			Filename:   *LogFilename,
+			MaxSize:    *LogMaxSize, // mb
+			MaxBackups: *LogMaxBackups,
+			MaxAge:     *LogMaxAge, // days
+			Compress:   *LogCompress,
+		})
+	}
+	multi := zerolog.MultiLevelWriter(logWriters...)
 
 	log.Logger = zerolog.New(multi).With().Timestamp().Logger().Level(zerolog.InfoLevel)
 	scanLog := log.Logger
@@ -88,6 +102,15 @@ func main() {
 	} else {
 		log.Logger = log.Logger.Level(zerolog.FatalLevel).With().Logger()
 	}
+
+	go func() {
+		runtime.SetMutexProfileFraction(1)
+		runtime.SetBlockProfileRate(1)
+		log.Info().Msg("starting pprof server on :6067")
+		if err := http.ListenAndServe(":6067", nil); err != nil {
+			log.Fatal().Err(err).Msg("error starting pprof server")
+		}
+	}()
 
 	adnl.Logger = func(v ...any) {}
 
