@@ -62,6 +62,7 @@ func (v *Scanner) startForContract(ctx context.Context, addr *address.Address, s
 					continue
 				}
 
+				log.Debug().Str("address", addr.String()).Msg("found new transaction, fetching account")
 				v.taskPool <- accFetchTask{
 					master:   m,
 					tx:       transaction,

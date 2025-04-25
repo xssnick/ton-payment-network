@@ -401,6 +401,10 @@ func (s *Server) AddUrgentPeer(channelKey ed25519.PublicKey) {
 	}()
 }
 
+func (s *Server) Stop() {
+	s.closer()
+}
+
 func (s *Server) RemoveUrgentPeer(channelKey ed25519.PublicKey) {
 	s.mx.Lock()
 	defer s.mx.Unlock()

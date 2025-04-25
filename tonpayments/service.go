@@ -96,6 +96,11 @@ type balanceControlConfig struct {
 	DepositUpToAmount         tlb.Coins
 	WithdrawWhenAmountReached tlb.Coins
 
+	channels map[string]*balanceControlChannel
+	mx       sync.Mutex
+}
+
+type balanceControlChannel struct {
 	depositStartedAtBalance  *big.Int
 	withdrawStartedAtBalance *big.Int
 }
@@ -166,6 +171,7 @@ func NewService(api ton.APIClientWrapped, database DB, transport Transport, wall
 			DepositWhenAmountLessThan: tlb.MustFromDecimal(currency.BalanceControl.DepositWhenAmountLessThan, int(currency.Decimals)),
 			DepositUpToAmount:         tlb.MustFromDecimal(currency.BalanceControl.DepositUpToAmount, int(currency.Decimals)),
 			WithdrawWhenAmountReached: tlb.MustFromDecimal(currency.BalanceControl.WithdrawWhenAmountReached, int(currency.Decimals)),
+			channels:                  map[string]*balanceControlChannel{},
 		}
 
 		if conf.WithdrawWhenAmountReached.Nano().Sign() != 0 &&
@@ -301,14 +307,30 @@ func (s *Service) loadUrgentPeers(ctx context.Context) error {
 }
 
 func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ bool) {
-	if ch.Status != db.ChannelStateActive {
-		return
-	}
-
 	bc := s.balanceControllers[ccToKey(ch.JettonAddress, ch.ExtraCurrencyID)]
 	if bc == nil {
 		return
 	}
+
+	if ch.Status != db.ChannelStateActive {
+		bc.mx.Lock()
+		delete(bc.channels, ch.Address)
+		bc.mx.Unlock()
+		return
+	}
+
+	bc.mx.Lock()
+	ctrl := bc.channels[ch.Address]
+	if ctrl == nil {
+		ctrl = &balanceControlChannel{
+			depositStartedAtBalance:  nil,
+			withdrawStartedAtBalance: nil,
+		}
+		bc.channels[ch.Address] = ctrl
+	}
+	bc.mx.Unlock()
+
+	log.Debug().Str("address", ch.Address).Msg("balance control callback triggered")
 
 	balance, err := ch.CalcBalance(false)
 	if err != nil {
@@ -317,22 +339,22 @@ func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ 
 	}
 
 	if balance.Cmp(bc.DepositWhenAmountLessThan.Nano()) < 0 {
-		if bc.depositStartedAtBalance == nil || bc.depositStartedAtBalance.Cmp(ch.OurOnchain.Deposited) < 0 {
+		if ctrl.depositStartedAtBalance == nil || ctrl.depositStartedAtBalance.Cmp(ch.OurOnchain.Deposited) < 0 {
 			amt := tlb.MustFromNano(new(big.Int).Sub(bc.DepositUpToAmount.Nano(), balance), bc.DepositUpToAmount.Decimals())
 			if err = s.TopupChannel(ctx, address.MustParseAddr(ch.Address), amt); err != nil {
 				log.Error().Err(err).Str("address", ch.Address).Str("amount", amt.String()).Msg("failed to topup channel")
 				return
 			}
-			bc.depositStartedAtBalance = new(big.Int).Set(ch.OurOnchain.Deposited)
+			ctrl.depositStartedAtBalance = new(big.Int).Set(ch.OurOnchain.Deposited)
 		}
 	} else if bc.WithdrawWhenAmountReached.Nano().Sign() > 0 && balance.Cmp(bc.WithdrawWhenAmountReached.Nano()) > 0 {
-		if bc.withdrawStartedAtBalance == nil || bc.withdrawStartedAtBalance.Cmp(ch.OurOnchain.Withdrawn) < 0 {
+		if ctrl.withdrawStartedAtBalance == nil || ctrl.withdrawStartedAtBalance.Cmp(ch.OurOnchain.Withdrawn) < 0 {
 			amt := tlb.MustFromNano(new(big.Int).Sub(balance, bc.DepositUpToAmount.Nano()), bc.DepositUpToAmount.Decimals())
 			if err = s.requestWithdraw(ctx, ch, amt); err != nil {
 				log.Error().Err(err).Str("address", ch.Address).Str("amount", amt.String()).Msg("failed to withdraw from channel")
 				return
 			}
-			bc.withdrawStartedAtBalance = new(big.Int).Set(ch.OurOnchain.Withdrawn)
+			ctrl.withdrawStartedAtBalance = new(big.Int).Set(ch.OurOnchain.Withdrawn)
 		}
 	}
 }
@@ -477,7 +499,7 @@ func (s *Service) Start() {
 				continue
 			}
 
-			log.Debug().Any("channel", upd.Channel).Msg("verified")
+			log.Debug().Any("channel", upd.Channel).Msg("verified, processing update")
 
 		retry:
 			var err error

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments"
 	"github.com/xssnick/tonutils-go/address"
@@ -234,6 +235,8 @@ func (v *Scanner) accFetcherWorker(ch chan<- any, threads int) {
 						}
 						return
 					}
+
+					log.Debug().Str("address", task.addr.String()).Msg("account fetched and parsed, reporting channel update event")
 
 					ch <- tonpayments.ChannelUpdatedEvent{
 						Transaction: task.tx,
