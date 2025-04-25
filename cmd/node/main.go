@@ -243,7 +243,7 @@ func main() {
 	}
 
 	inv := make(chan any)
-	sc := chain.NewScanner(apiClient, payments.PaymentChannelCodeHash, seqno, scanLog)
+	sc := chain.NewScanner(apiClient, seqno, scanLog)
 
 	if *UseBlockScanner {
 		if err = sc.Start(context.Background(), inv); err != nil {

@@ -67,7 +67,15 @@ func (c *Client) GetAsyncChannel(ctx context.Context, block *ton.BlockIDExt, add
 
 func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell, verify bool) (*AsyncChannel, error) {
 	if verify {
-		if !bytes.Equal(code.Hash(), PaymentChannelCodeHash) {
+		ok := false
+		for _, h := range PaymentChannelCodeHashes {
+			if bytes.Equal(code.Hash(), h) {
+				ok = true
+				break
+			}
+		}
+
+		if !ok {
 			return nil, ErrVerificationNotPassed
 		}
 	}
@@ -111,7 +119,7 @@ func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell,
 		}
 
 		si, err := tlb.ToCell(tlb.StateInit{
-			Code: PaymentChannelCode,
+			Code: code,
 			Data: data,
 		})
 		if err != nil {
@@ -162,7 +170,7 @@ func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, ourK
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to serialize message: %w", err)
 	}
-	return body, PaymentChannelCode, data, nil
+	return body, PaymentChannelCodes[0], data, nil
 }
 
 func (c *AsyncChannel) Address() *address.Address {

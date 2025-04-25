@@ -21,7 +21,6 @@ import (
 type Scanner struct {
 	api       ton.APIClientWrapped
 	client    *payments.Client
-	codeHash  []byte
 	lastBlock uint32
 
 	taskPool       chan accFetchTask
@@ -37,18 +36,12 @@ type Scanner struct {
 	mx sync.RWMutex
 }
 
-type Contract struct {
-	Name     string
-	CodeHash []byte
-}
-
-func NewScanner(api ton.APIClientWrapped, codeHash []byte, lastBlock uint32, lg zerolog.Logger) *Scanner {
+func NewScanner(api ton.APIClientWrapped, lastBlock uint32, lg zerolog.Logger) *Scanner {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scanner{
 		api:            api,
 		log:            lg,
 		client:         payments.NewPaymentChannelClient(api),
-		codeHash:       codeHash,
 		lastBlock:      lastBlock,
 		taskPool:       make(chan accFetchTask, 1000),
 		shardLastSeqno: map[string]uint32{},
