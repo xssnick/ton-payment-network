@@ -836,7 +836,7 @@ func (s *Service) taskExecutor() {
 			}()
 			if err != nil {
 				lg := log.Warn
-				if errors.Is(err, ErrChannelIsBusy) || errors.Is(err, db.ErrChannelBusy) || errors.Is(err, transport.ErrNotConnected) {
+				if errors.Is(err, ErrChannelIsBusy) || errors.Is(err, db.ErrChannelBusy) || errors.Is(err, transport.ErrNotConnected) || errors.Is(err, db.ErrNotFound) {
 					// for not critical retryable errors we will not flood console in normal mode
 					lg = log.Debug
 				}
