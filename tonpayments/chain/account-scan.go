@@ -73,19 +73,18 @@ func (v *Scanner) startForContract(ctx context.Context, addr *address.Address, s
 			}
 		}
 
-		log.Warn().Str("address", addr.String()).Msg("SubscribeOnTransactions stopped listening because of LS reported tx not in DB, will retry with another LS...")
-
-		var err error
-		ctx, err = v.api.Client().StickyContextNextNode(ctx)
-		if err != nil {
-			log.Error().Err(err).Msg("all nodes failed, will retry all again :(")
-			ctx = originalCtx
-		}
-
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(3 * time.Second):
+			log.Warn().Str("address", addr.String()).Msg("SubscribeOnTransactions stopped listening because of LS reported tx not in DB, will retry with another LS...")
+
+			var err error
+			ctx, err = v.api.Client().StickyContextNextNode(ctx)
+			if err != nil {
+				log.Error().Err(err).Msg("all nodes failed, will retry all again :(")
+				ctx = originalCtx
+			}
 		}
 	}
 }
