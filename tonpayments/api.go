@@ -1,10 +1,10 @@
 package tonpayments
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog/log"
@@ -88,41 +88,9 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 	log.Info().Msg("locating node and proposing channel config...")
 
 	channelId := make([]byte, 16)
-	copy(channelId, nodeKey[:15])
+	copy(channelId, nodeKey)
 
-	channels, err := s.db.GetChannels(ctx, nodeKey, db.ChannelStateAny)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get channels: %w", err)
-	}
-
-	used := make([][]byte, 0, len(channels))
-	for _, ch := range channels {
-		if ch.Status != db.ChannelStateInactive {
-			used = append(used, ch.ID)
-		}
-	}
-
-	// find free channel id
-	found := false
-	for i := 0; i < 256; i++ {
-		exists := false
-		for _, chId := range used {
-			if bytes.Equal(chId, channelId) {
-				exists = true
-				break
-			}
-		}
-
-		if !exists {
-			found = true
-			break
-		}
-		channelId[15]++
-	}
-
-	if !found {
-		return nil, fmt.Errorf("too many channels are already open")
-	}
+	binary.LittleEndian.PutUint32(channelId[12:], uint32(time.Now().Unix()))
 
 	var jettonAddr string
 	if jettonMaster != nil {
