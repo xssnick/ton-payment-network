@@ -384,7 +384,7 @@ func (s *Service) CommitVirtualChannel(ctx context.Context, key []byte) error {
 		return fmt.Errorf("failed to find virtual channel: %w", err)
 	}
 
-	if vch.Prepay.Cmp(resolve.Amount) >= 0 {
+	if vch.Prepay.Cmp(new(big.Int).Add(resolve.Amount, vch.Fee)) >= 0 {
 		// already commited
 		return nil
 	}

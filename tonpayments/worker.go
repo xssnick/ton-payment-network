@@ -256,14 +256,15 @@ func (s *Service) taskExecutor() {
 						return nil
 					}
 
-					if vch.Prepay.Cmp(resolve.Amount) >= 0 {
+					toPrepay := new(big.Int).Add(resolve.Amount, vch.Fee)
+					if vch.Prepay.Cmp(toPrepay) >= 0 {
 						// already commited
 						return nil
 					}
 
 					if err = s.proposeAction(ctx, lockId, data.ChannelAddress, transport.CommitVirtualAction{
 						Key:          data.VirtualKey,
-						PrepayAmount: resolve.Amount.Bytes(),
+						PrepayAmount: toPrepay.Bytes(),
 					}, nil); err != nil {
 						// reversal is not mandatory, because 'sent amount' is atomic with conditional prepay, and no actual balance change
 						return fmt.Errorf("failed to propose action: %w", err)

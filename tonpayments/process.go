@@ -275,6 +275,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			log.Info().Str("key", base64.StdEncoding.EncodeToString(data.Key)).
 				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
 				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
+				Str("prepay", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
 				Msg("virtual channel closed")
 
 			return nil
