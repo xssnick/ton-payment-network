@@ -20,6 +20,11 @@ import (
 func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport.Action, details any) (func(), *cell.Cell, *cell.Cell, error) {
 	var onSuccess func()
 
+	cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, false)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to resolve coin config: %w", err)
+	}
+
 	var idempotency bool
 	dictRoot := cell.CreateProofSkeleton()
 
@@ -34,6 +39,10 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 
 		if vch.Fee.Sign() < 0 {
 			return nil, nil, nil, fmt.Errorf("invalid fee")
+		}
+
+		if vch.Prepay.Sign() < 0 {
+			return nil, nil, nil, fmt.Errorf("invalid prepay")
 		}
 
 		if vch.Deadline < time.Now().Unix() {
@@ -76,8 +85,42 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 			return nil, nil, nil, fmt.Errorf("failed to calc our side balance with target: %w", err)
 		}
 
-		if ourTargetBalance.Sign() == -1 {
+		if ourTargetBalance.Sign() < 0 {
 			return nil, nil, nil, fmt.Errorf("not enough available balance with target")
+		}
+	case transport.CommitVirtualAction:
+		_, vch, err := payments.FindVirtualChannelWithProof(channel.Our.Conditionals, ch.Key, dictRoot)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		prepay := new(big.Int).SetBytes(ch.PrepayAmount)
+		toSend := new(big.Int).Sub(prepay, vch.Prepay)
+
+		if toSend.Sign() < 0 {
+			return nil, nil, nil, fmt.Errorf("prepay amount is less than before")
+		} else if toSend.Sign() == 0 {
+			// same
+			idempotency = true
+			break
+		}
+
+		key := big.NewInt(int64(binary.LittleEndian.Uint32(vch.Key)))
+
+		vch.Prepay = prepay
+		if err := channel.Our.Conditionals.SetIntKey(key, vch.Serialize()); err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to set condition: %w", err)
+		}
+
+		channel.Our.State.Data.Sent = tlb.MustFromNano(new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), toSend), int(cc.Decimals))
+
+		onSuccess = func() {
+			log.Info().Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
+				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
+				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
+				Str("prepaid", vch.Prepay.String()).
+				Str("channel", channel.Address).
+				Msg("virtual channel commit confirmed")
 		}
 	case transport.RemoveVirtualAction:
 		idx, vch, err := payments.FindVirtualChannelWithProof(channel.Our.Conditionals, ch.Key, dictRoot)
@@ -106,7 +149,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 
 		onSuccess = func() {
 			log.Info().Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
-				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
+				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
 				Str("channel", channel.Address).
 				Msg("virtual channel successfully removed")
 		}
@@ -148,15 +191,17 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 			return nil, nil, nil, fmt.Errorf("deleted value is still exists for some reason: %w", err)
 		}
 
-		sent := new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), vState.Amount.Nano())
+		sent := new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), vState.Amount)
+		sent = sent.Sub(sent, vch.Prepay)
 		sent = sent.Add(sent, vch.Fee)
-		channel.Our.State.Data.Sent = tlb.FromNanoTON(sent)
+		channel.Our.State.Data.Sent = tlb.MustFromNano(sent, int(cc.Decimals))
 
 		onSuccess = func() {
 			log.Info().Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
-				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
-				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
-				Str("amount", vState.Amount.String()).
+				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
+				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
+				Str("amount", tlb.MustFromNano(vState.Amount, int(cc.Decimals)).String()).
+				Str("prepaid", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
 				Str("channel", channel.Address).
 				Msg("virtual channel close confirmed")
 		}

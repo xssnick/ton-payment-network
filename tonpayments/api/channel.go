@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/xssnick/ton-payment-network/tonpayments/config"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
@@ -124,7 +125,19 @@ func (s *Server) handleTopup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err = s.svc.TopupChannel(r.Context(), addr, tlb.FromNanoTON(amt)); err != nil {
+	ch, err := s.svc.GetChannel(r.Context(), addr.String())
+	if err != nil {
+		writeErr(w, 500, "failed to get channel: "+err.Error())
+		return
+	}
+
+	cc, err := s.svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, true)
+	if err != nil {
+		writeErr(w, 500, "failed to resolve coin config: "+err.Error())
+		return
+	}
+
+	if err = s.svc.TopupChannel(r.Context(), addr, tlb.MustFromNano(amt, int(cc.Decimals))); err != nil {
 		writeErr(w, 500, "failed to topup channel: "+err.Error())
 		return
 	}
@@ -161,7 +174,24 @@ func (s *Server) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err = s.svc.RequestWithdraw(r.Context(), addr, tlb.FromNanoTON(amt)); err != nil {
+	ch, err := s.svc.GetChannel(r.Context(), addr.String())
+	if err != nil {
+		writeErr(w, 500, "failed to get channel: "+err.Error())
+		return
+	}
+
+	cc, err := s.svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
+	if err != nil {
+		writeErr(w, 500, "failed to resolve coin config: "+err.Error())
+		return
+	}
+
+	amtCoin, err := tlb.FromNano(amt, int(cc.Decimals))
+	if err != nil {
+		writeErr(w, 400, "failed to convert amount: "+err.Error())
+	}
+
+	if err = s.svc.RequestWithdraw(r.Context(), addr, amtCoin); err != nil {
 		writeErr(w, 500, "failed to request withdraw channel: "+err.Error())
 		return
 	}
@@ -248,7 +278,13 @@ func (s *Server) handleChannelsList(w http.ResponseWriter, r *http.Request) {
 
 	res := make([]OnchainChannel, 0, len(list))
 	for i, channel := range list {
-		v, err := convertChannel(channel)
+		cc, err := s.svc.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, false)
+		if err != nil {
+			writeErr(w, 500, "failed to resolve coin config: "+err.Error())
+			return
+		}
+
+		v, err := convertChannel(channel, cc)
 		if err != nil {
 			writeErr(w, 500, "failed to convert channel "+fmt.Sprint(i)+": "+err.Error())
 			return
@@ -284,7 +320,13 @@ func (s *Server) handleChannelGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := convertChannel(ch)
+	cc, err := s.svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
+	if err != nil {
+		writeErr(w, 500, "failed to resolve coin config: "+err.Error())
+		return
+	}
+
+	res, err := convertChannel(ch, cc)
 	if err != nil {
 		writeErr(w, 500, "failed to convert channel: "+err.Error())
 		return
@@ -293,7 +335,7 @@ func (s *Server) handleChannelGet(w http.ResponseWriter, r *http.Request) {
 	writeResp(w, res)
 }
 
-func convertChannel(c *db.Channel) (OnchainChannel, error) {
+func convertChannel(c *db.Channel, cc *config.CoinConfig) (OnchainChannel, error) {
 	var status string
 	switch c.Status {
 	case db.ChannelStateActive:
@@ -323,20 +365,20 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 		WeLeft:           c.WeLeft,
 		Our: Side{
 			Key:              base64.StdEncoding.EncodeToString(c.OurOnchain.Key),
-			AvailableBalance: tlb.FromNanoTON(ourBalance).String(),
+			AvailableBalance: tlb.MustFromNano(ourBalance, int(cc.Decimals)).String(),
 			Onchain: Onchain{
 				CommittedSeqno: c.OurOnchain.CommittedSeqno,
 				WalletAddress:  c.OurOnchain.WalletAddress,
-				Deposited:      tlb.FromNanoTON(c.OurOnchain.Deposited).String(),
+				Deposited:      tlb.MustFromNano(c.OurOnchain.Deposited, int(cc.Decimals)).String(),
 			},
 		},
 		Their: Side{
 			Key:              base64.StdEncoding.EncodeToString(c.TheirOnchain.Key),
-			AvailableBalance: tlb.FromNanoTON(theirBalance).String(),
+			AvailableBalance: tlb.MustFromNano(theirBalance, int(cc.Decimals)).String(),
 			Onchain: Onchain{
 				CommittedSeqno: c.TheirOnchain.CommittedSeqno,
 				WalletAddress:  c.TheirOnchain.WalletAddress,
-				Deposited:      tlb.FromNanoTON(c.TheirOnchain.Deposited).String(),
+				Deposited:      tlb.MustFromNano(c.TheirOnchain.Deposited, int(cc.Decimals)).String(),
 			},
 		},
 		InitAt:          c.InitAt,
@@ -346,7 +388,12 @@ func convertChannel(c *db.Channel) (OnchainChannel, error) {
 }
 
 func (s *Server) PushChannelEvent(ctx context.Context, ch *db.Channel) error {
-	res, err := convertChannel(ch)
+	cc, err := s.svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
+	if err != nil {
+		return fmt.Errorf("failed to resolve coin config: %w", err)
+	}
+
+	res, err := convertChannel(ch, cc)
 	if err != nil {
 		return fmt.Errorf("failed to convert channel: %w", err)
 	}

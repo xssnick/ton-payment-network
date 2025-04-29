@@ -119,7 +119,7 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	addr := s.gate.GetAddressList()
 
 	ctxStore, cancel := context.WithTimeout(ctx, 120*time.Second)
-	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 30*time.Minute, s.key, 0)
+	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 30*time.Minute, s.key, 3)
 	cancel()
 	if err != nil && stored == 0 {
 		return err
@@ -598,16 +598,20 @@ func (s *Server) RequestAction(ctx context.Context, channelAddr *address.Address
 }
 
 func (s *Server) doRLDPQuery(ctx context.Context, theirKey []byte, req, resp tl.Serializable, connect bool) error {
+	maxWait := 7 * time.Second
+	if connect {
+		maxWait = 30 * time.Second
+	}
+
+	if dl, ok := ctx.Deadline(); !ok || dl.After(time.Now().Add(maxWait)) {
+		var cancel func()
+		ctx, cancel = context.WithTimeout(ctx, maxWait)
+		defer cancel()
+	}
+
 	peer, err := s.preparePeer(ctx, theirKey, connect)
 	if err != nil {
 		return fmt.Errorf("failed to prepare peer %s: %w", hex.EncodeToString(theirKey), err)
-	}
-
-	var cancel func()
-	dl, ok := ctx.Deadline()
-	if !ok || dl.After(time.Now().Add(7*time.Second)) {
-		ctx, cancel = context.WithTimeout(ctx, 7*time.Second)
-		defer cancel()
 	}
 
 	tm := time.Now()

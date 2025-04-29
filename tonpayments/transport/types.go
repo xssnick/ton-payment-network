@@ -31,6 +31,7 @@ func init() {
 	tl.Register(RemoveVirtualAction{}, "payments.removeVirtualAction key:int256 = payments.Action")
 	tl.Register(RequestRemoveVirtualAction{}, "payments.requestRemoveVirtualAction key:int256 = payments.Action")
 	tl.Register(OpenVirtualAction{}, "payments.openVirtualAction channel_key:int256 instruction_key:int256 instructions:payments.instructionsToSign signature:bytes = payments.Action")
+	tl.Register(CommitVirtualAction{}, "payments.commitVirtualAction key:int256 prepayAmount:bytes = payments.Action")
 	tl.Register(CloseVirtualAction{}, "payments.closeVirtualAction key:int256 state:bytes = payments.Action")
 	tl.Register(CooperativeCloseAction{}, "payments.cooperativeCloseAction signedCloseRequest:bytes = payments.Action")
 	tl.Register(CooperativeCommitAction{}, "payments.cooperativeCommitAction signedCommitRequest:bytes = payments.Action")
@@ -99,7 +100,7 @@ type AuthenticateToSign struct {
 type ProposeAction struct {
 	LockID      int64      `tl:"long"`
 	ChannelAddr []byte     `tl:"int256"`
-	Action      any        `tl:"struct boxed [payments.openVirtualAction,payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.incrementStatesAction]"`
+	Action      any        `tl:"struct boxed [payments.openVirtualAction,payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.incrementStatesAction,payments.commitVirtualAction]"`
 	SignedState *cell.Cell `tl:"cell"`
 	UpdateProof *cell.Cell `tl:"cell optional"`
 }
@@ -122,6 +123,13 @@ type ProposalDecision struct {
 	Agreed      bool       `tl:"bool"`
 	Reason      string     `tl:"string"`
 	SignedState *cell.Cell `tl:"cell optional"`
+}
+
+// CommitVirtualAction - prepay virtual channel for amount, can be used for graceful shutdown,
+// to not trigger uncooperative close when you offline, by other party virtual closure attempt
+type CommitVirtualAction struct {
+	Key          []byte `tl:"int256"`
+	PrepayAmount []byte `tl:"bytes"`
 }
 
 // OpenVirtualAction - request party to open virtual channel (tunnel) with specified target
@@ -340,6 +348,7 @@ func GenerateTunnel(key ed25519.PrivateKey, chain []TunnelChainPart, stubSize ui
 		Key:      key.Public().(ed25519.PublicKey),
 		Capacity: chain[0].Capacity,
 		Fee:      chain[0].Fee,
+		Prepay:   big.NewInt(0),
 		Deadline: chain[0].Deadline.UTC().Unix(),
 	}
 
@@ -376,7 +385,7 @@ func GenerateTunnel(key ed25519.PrivateKey, chain []TunnelChainPart, stubSize ui
 			inst.NextCapacity = chain[i].Capacity.Bytes()
 			inst.NextDeadline = chain[i].Deadline.UTC().Unix()
 			if withFinalState {
-				state := payments.VirtualChannelState{Amount: tlb.FromNanoTON(chain[i].Capacity)}
+				state := payments.VirtualChannelState{Amount: chain[i].Capacity}
 				state.Sign(key)
 
 				fs, err := tlb.ToCell(state)

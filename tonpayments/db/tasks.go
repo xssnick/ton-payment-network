@@ -70,6 +70,11 @@ type CloseNextVirtualTask struct {
 	IsTransfer bool
 }
 
+type CommitVirtualTask struct {
+	ChannelAddress string
+	VirtualKey     []byte
+}
+
 type OpenVirtualTask struct {
 	FinalDestinationKey ed25519.PublicKey // known only for initiator
 	PrevChannelAddress  string

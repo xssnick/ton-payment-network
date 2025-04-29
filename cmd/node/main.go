@@ -34,7 +34,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -103,14 +102,14 @@ func main() {
 		log.Logger = log.Logger.Level(zerolog.FatalLevel).With().Logger()
 	}
 
-	go func() {
+	/*go func() {
 		runtime.SetMutexProfileFraction(1)
 		runtime.SetBlockProfileRate(1)
 		log.Info().Msg("starting pprof server on :6067")
 		if err := http.ListenAndServe(":6067", nil); err != nil {
 			log.Fatal().Err(err).Msg("error starting pprof server")
 		}
-	}()
+	}()*/
 
 	adnl.Logger = func(v ...any) {}
 
@@ -421,12 +420,16 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 			return fmt.Errorf("incorrect format of amount")
 		}
 
-		state, err := payments.SignState(amt, vcKey, meta.FinalDestination)
+		state, enc, err := payments.SignState(amt, vcKey, meta.FinalDestination)
 		if err != nil {
 			return fmt.Errorf("failed to sign state: %w", err)
 		}
 
-		log.Info().Str("signed_state", base64.StdEncoding.EncodeToString(state)).Msg("state was signed")
+		if err = svc.AddVirtualChannelResolve(context.Background(), vcKey.Public().(ed25519.PublicKey), state); err != nil {
+			return fmt.Errorf("failed to add resolve to channel: %w", err)
+		}
+
+		log.Info().Str("signed_state", base64.StdEncoding.EncodeToString(enc)).Msg("state was signed")
 	case "close":
 		log.Info().Msg("enter the virtual channel final state base64:")
 
@@ -675,15 +678,23 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 		if cmd != "send" {
 			log.Info().
 				Str("private_key", base64.StdEncoding.EncodeToString(vPriv.Seed())).
-				Str("total_amount", tlb.FromNanoTON(fullAmt).String()).
+				Str("total_amount", tlb.MustFromNano(fullAmt, int(cc.Decimals)).String()).
 				Str("capacity", amt.String()).
 				Msg("virtual channel opening requested")
 		} else {
 			log.Info().
-				Str("total_amount", tlb.FromNanoTON(fullAmt).String()).
+				Str("total_amount", tlb.MustFromNano(fullAmt, int(cc.Decimals)).String()).
 				Str("amount", amt.String()).
 				Msg("virtual transfer requested")
 		}
+	case "virtual-commit-all":
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := svc.CommitAllOurVirtualChannelsAndWait(ctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("failed to commit all virtual channels: %w", err)
+		}
+		log.Info().Msg("all virtual channels committed")
 	case "debug-tasks", "debug-tasks-all":
 		log.Info().Msg("input tasks prefix to search:")
 		var pfx string

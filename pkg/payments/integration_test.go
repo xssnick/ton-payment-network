@@ -187,6 +187,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 		Key:      vPubKey,
 		Capacity: tlb.MustFromTON("0.03").Nano(),
 		Fee:      tlb.MustFromTON("0.01").Nano(),
+		Prepay:   tlb.MustFromTON("0.00").Nano(),
 		Deadline: time.Now().Add(5 * time.Minute).Unix(),
 	}
 
@@ -286,7 +287,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 	}
 
 	state := VirtualChannelState{
-		Amount: tlb.MustFromTON("0.03"),
+		Amount: tlb.MustFromTON("0.03").Nano(),
 	}
 	state.Sign(vKey)
 	condInput, _ := state.ToCell()
@@ -537,6 +538,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		Key:      vPubKey,
 		Capacity: tlb.MustFromTON("0.03").Nano(),
 		Fee:      tlb.MustFromTON("0.01").Nano(),
+		Prepay:   tlb.MustFromTON("0.01").Nano(),
 		Deadline: time.Now().Add(5 * time.Minute).Unix(),
 	}
 
@@ -636,7 +638,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 	}
 
 	state := VirtualChannelState{
-		Amount: tlb.MustFromTON("0.03"),
+		Amount: tlb.MustFromTON("0.03").Nano(),
 	}
 	state.Sign(vKey)
 	condInput, _ := state.ToCell()
@@ -677,7 +679,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		}
 		json.NewEncoder(os.Stdout).Encode(ch.Storage)
 
-		if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(tlb.MustFromTON("0.05").Nano()) != 0 ||
+		if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(tlb.MustFromTON("0.04").Nano()) != 0 ||
 			ch.Storage.Quarantine.StateA.Seqno != 3 || ch.Storage.Quarantine.StateB.Seqno != 2 {
 			continue
 		}
@@ -688,7 +690,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		break
 	}
 
-	if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(tlb.MustFromTON("0.05").Nano()) != 0 ||
+	if ch.Storage.Quarantine.StateA.Sent.Nano().Cmp(tlb.MustFromTON("0.04").Nano()) != 0 ||
 		ch.Storage.Quarantine.StateA.Seqno != 3 || ch.Storage.Quarantine.StateB.Seqno != 2 {
 		t.Fatal("channel seqno incorrect")
 	}
@@ -743,10 +745,10 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to init wallet: %w", err))
 	}
-	log.Println("wallet:", w.Address().String())
+	log.Println("wallet:", w.WalletAddress().String())
 
 	body, code, data, err := client.GetDeployAsyncChannelParams(chID, true, aKey, bPubKey, ClosingConfig{
-		QuarantineDuration:       20,
+		QuarantineDuration:       30,
 		MisbehaviorFine:          tlb.MustFromTON("0.00"),
 		ConditionalCloseDuration: 30,
 	}, PaymentConfig{
@@ -878,6 +880,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 		Key:      vPubKey,
 		Capacity: tlb.MustFromTON("0.03").Nano(),
 		Fee:      big.NewInt(1),
+		Prepay:   big.NewInt(0),
 		Deadline: time.Now().Add(5 * time.Minute).Unix(),
 	}
 
@@ -977,7 +980,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 	}
 
 	state := VirtualChannelState{
-		Amount: tlb.FromNanoTON(big.NewInt(300)),
+		Amount: big.NewInt(300),
 	}
 	state.Sign(vKey)
 	condInput, _ := state.ToCell()
@@ -1006,7 +1009,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to settle conditions, exit code: %d", comp.Details.ExitCode))
 	}
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 15; i++ {
 		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))

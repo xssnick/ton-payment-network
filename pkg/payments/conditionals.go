@@ -15,40 +15,41 @@ type VirtualChannel struct {
 	Key      ed25519.PublicKey
 	Capacity *big.Int
 	Fee      *big.Int
+	Prepay   *big.Int
 	Deadline int64
 }
 
 type VirtualChannelState struct {
 	Signature []byte
-	Amount    tlb.Coins
+	Amount    *big.Int
 }
 
-func SignState(amount tlb.Coins, signKey ed25519.PrivateKey, to ed25519.PublicKey) ([]byte, error) {
-	st := &VirtualChannelState{
-		Amount: amount,
+func SignState(amount tlb.Coins, signKey ed25519.PrivateKey, to ed25519.PublicKey) (res VirtualChannelState, encrypted []byte, err error) {
+	st := VirtualChannelState{
+		Amount: amount.Nano(),
 	}
 	st.Sign(signKey)
 
 	cll, err := st.ToCell()
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize cell: %w", err)
+		return VirtualChannelState{}, nil, fmt.Errorf("failed to serialize cell: %w", err)
 	}
 	data := cll.ToBOC()
 
 	sharedKey, err := adnl.SharedKey(signKey, to)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate shared key: %w", err)
+		return VirtualChannelState{}, nil, fmt.Errorf("failed to generate shared key: %w", err)
 	}
 	pub := signKey.Public().(ed25519.PublicKey)
 
 	stream, err := adnl.BuildSharedCipher(sharedKey, pub)
 	if err != nil {
-		return nil, fmt.Errorf("failed to init cipher: %w", err)
+		return VirtualChannelState{}, nil, fmt.Errorf("failed to init cipher: %w", err)
 	}
 	// we encrypt state to be sure no one can hijack it and use in the middle of the chain
 	stream.XORKeyStream(data, data)
 
-	return append(pub, data...), nil
+	return st, append(pub, data...), nil
 }
 
 func ParseState(data []byte, to ed25519.PrivateKey) (ed25519.PublicKey, VirtualChannelState, error) {
@@ -89,40 +90,19 @@ func ParseState(data []byte, to ed25519.PrivateKey) (ed25519.PublicKey, VirtualC
 }
 
 var virtualChannelStaticCode = func() *cell.Cell {
-	// compiled using FunC code:
+	// compiled using code:
 	/*
-		int cond(slice input, int fee, int capacity, int deadline, int key) {
-		    slice sign = input~load_bits(512);
-		    throw_unless(24, check_data_signature(input, sign, key));
-		    throw_unless(25, deadline >= now());
+		fun cond(input: slice, fee: int, capacity: int, prepaid: int, deadline: int, key: int) {
+			var sign: slice = input.loadBits(512);
+			assert(isSliceSignatureValid(input, sign, key) & (deadline >= now()), 24);
 
-		    int amount = input~load_coins();
-		    throw_unless(26, amount <= capacity);
-
-		    return amount + fee;
+			var amount: int = input.loadCoins();
+			assert((amount <= capacity) & (prepaid <= amount), 26);
+			return (amount - prepaid) + fee;
 		}
 	*/
 
-	/*
-		s0 s4 XCHG
-		9 PUSHPOW2
-		LDSLICEX
-		TUCK
-		s0 s6 XCHG
-		CHKSIGNS
-		24 THROWIFNOT
-		NOW
-		GEQ
-		25 THROWIFNOT
-		s0 s2 XCHG
-		LDGRAMS
-		DROP
-		s0 s2 PUXC
-		LEQ
-		26 THROWIFNOT
-		ADD
-	*/
-	data, err := hex.DecodeString("b5ee9c7241010101001c000034048308d7186606f911f298f823bef29902fa00305203bbf29aa0c8677719")
+	data, err := hex.DecodeString("b5ee9c72010101010023000042058308d7186607f91101f823beb0f29803fa00305202bb5331bbb0f29a58a101a0")
 	if err != nil {
 		panic(err.Error())
 	}
@@ -138,6 +118,7 @@ func (c *VirtualChannel) Serialize() *cell.Cell {
 	return cell.BeginCell().
 		MustStoreBuilder(pushIntOP(c.Fee)).
 		MustStoreBuilder(pushIntOP(c.Capacity)).
+		MustStoreBuilder(pushIntOP(c.Prepay)).
 		MustStoreBuilder(pushIntOP(big.NewInt(c.Deadline))).
 		MustStoreBuilder(pushIntOP(new(big.Int).SetBytes(c.Key))).
 		// we pack immutable part of code to ref for better BoC compression and cheaper transactions
@@ -153,6 +134,9 @@ func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 	if fee.BitLen() > 127 {
 		return nil, fmt.Errorf("failed to parse fee: incorrect bits len")
 	}
+	if fee.Sign() < 0 {
+		return nil, fmt.Errorf("failed to parse fee: cannot be negative")
+	}
 
 	capacity, err := readIntOP(s)
 	if err != nil {
@@ -161,6 +145,20 @@ func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 	if capacity.BitLen() > 127 {
 		return nil, fmt.Errorf("failed to parse capacity: incorrect bits len")
 	}
+	if capacity.Sign() < 0 {
+		return nil, fmt.Errorf("failed to parse capacity: cannot be negative")
+	}
+
+	prepay, err := readIntOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse prepay: %w", err)
+	}
+	if prepay.BitLen() > 127 {
+		return nil, fmt.Errorf("failed to parse prepay: incorrect bits len")
+	}
+	if prepay.Sign() < 0 {
+		return nil, fmt.Errorf("failed to parse prepay: cannot be negative")
+	}
 
 	deadline, err := readIntOP(s)
 	if err != nil {
@@ -168,6 +166,9 @@ func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 	}
 	if deadline.BitLen() > 32 {
 		return nil, fmt.Errorf("failed to parse deadline: incorrect bits len")
+	}
+	if deadline.Sign() <= 0 {
+		return nil, fmt.Errorf("failed to parse deadline: cannot be negative or zero")
 	}
 
 	keyInt, err := readIntOP(s)
@@ -202,6 +203,7 @@ func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 		Key:      key,
 		Capacity: capacity,
 		Fee:      fee,
+		Prepay:   prepay,
 		Deadline: int64(deadline.Uint64()),
 	}, nil
 }
@@ -299,7 +301,7 @@ func (c VirtualChannelState) ToCell() (*cell.Cell, error) {
 }
 
 func (c *VirtualChannelState) serializePayload() *cell.Builder {
-	b := cell.BeginCell().MustStoreBigCoins(c.Amount.Nano())
+	b := cell.BeginCell().MustStoreBigCoins(c.Amount)
 	notFullBits := b.BitsUsed() % 8
 	if notFullBits != 0 {
 		b.MustStoreUInt(0, 8-notFullBits)
@@ -328,7 +330,7 @@ func (c *VirtualChannelState) LoadFromCell(loader *cell.Slice) error {
 		}
 	}
 	c.Signature = sign
-	c.Amount = tlb.FromNanoTON(coins)
+	c.Amount = coins
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/tonpayments/config"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
@@ -65,7 +66,29 @@ func (s *Server) handleVirtualGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.getVirtual(r.Context(), meta)
+	var addr string
+	if meta.Outgoing != nil {
+		addr = meta.Outgoing.ChannelAddress
+	} else if meta.Incoming != nil {
+		addr = meta.Incoming.ChannelAddress
+	} else {
+		writeErr(w, 400, "channel address is unknown")
+		return
+	}
+
+	ch, err := s.svc.GetChannel(r.Context(), addr)
+	if err != nil {
+		writeErr(w, 500, "failed to get channel: "+err.Error())
+		return
+	}
+
+	cc, err := s.svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
+	if err != nil {
+		writeErr(w, 400, "failed to resolve coin config"+err.Error())
+		return
+	}
+
+	res, err := s.getVirtual(r.Context(), meta, int(cc.Decimals))
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -99,6 +122,12 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cc, err := s.svc.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
+	if err != nil {
+		writeErr(w, 400, "failed to resolve coin config"+err.Error())
+		return
+	}
+
 	var our, their = make([]*VirtualChannel, 0), make([]*VirtualChannel, 0)
 
 	allTheir, err := ch.Their.Conditionals.LoadAll()
@@ -119,7 +148,7 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		res, err := s.getVirtual(r.Context(), meta)
+		res, err := s.getVirtual(r.Context(), meta, int(cc.Decimals))
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -145,7 +174,7 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		res, err := s.getVirtual(r.Context(), meta)
+		res, err := s.getVirtual(r.Context(), meta, int(cc.Decimals))
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -159,7 +188,7 @@ func (s *Server) handleVirtualList(w http.ResponseWriter, r *http.Request) {
 	}{their, our})
 }
 
-func (s *Server) getVirtual(ctx context.Context, meta *db.VirtualChannelMeta) (*VirtualChannel, error) {
+func (s *Server) getVirtual(ctx context.Context, meta *db.VirtualChannelMeta, decimals int) (*VirtualChannel, error) {
 	var status string
 	switch meta.Status {
 	case db.VirtualChannelStateActive:
@@ -199,7 +228,7 @@ func (s *Server) getVirtual(ctx context.Context, meta *db.VirtualChannelMeta) (*
 			return nil, fmt.Errorf("failed to verify last known resolve state: %w", err)
 		}
 
-		res.Amount = st.Amount.String()
+		res.Amount = tlb.MustFromNano(st.Amount, decimals).String()
 	}
 
 	if meta.Status != db.VirtualChannelStateClosed && meta.Status != db.VirtualChannelStateRemoved {
@@ -354,7 +383,13 @@ func (s *Server) handleVirtualOpen(w http.ResponseWriter, r *http.Request) {
 		deadline = deadline.Add(time.Duration(req.NodesChain[i].DeadlineGapSeconds) * time.Second)
 	}
 
-	capacity, err := tlb.FromTON(req.Capacity)
+	cc, err := s.svc.ResolveCoinConfig(req.JettonMaster, req.ExtraCurrencyID, true)
+	if err != nil {
+		writeErr(w, 400, "failed to resolve coin config"+err.Error())
+		return
+	}
+
+	capacity, err := tlb.FromDecimal(req.Capacity, int(cc.Decimals))
 	if err != nil {
 		writeErr(w, 400, "failed to parse capacity: "+err.Error())
 		return
@@ -369,7 +404,7 @@ func (s *Server) handleVirtualOpen(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		fee, err := tlb.FromTON(node.Fee)
+		fee, err := tlb.FromDecimal(node.Fee, int(cc.Decimals))
 		if err != nil {
 			writeErr(w, 400, "failed to parse node "+fmt.Sprint(i)+" fee: "+err.Error())
 			return
@@ -458,6 +493,12 @@ func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cc, err := s.svc.ResolveCoinConfig(req.JettonMaster, req.ExtraCurrencyID, false)
+	if err != nil {
+		writeErr(w, 400, "failed to resolve coin config"+err.Error())
+		return
+	}
+
 	deadline := time.Now().Add(time.Duration(req.TTLSeconds) * time.Second)
 
 	deadlines := make([]time.Time, len(req.NodesChain))
@@ -466,7 +507,7 @@ func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 		deadline = deadline.Add(time.Duration(req.NodesChain[i].DeadlineGapSeconds) * time.Second)
 	}
 
-	capacity, err := tlb.FromTON(req.Amount)
+	capacity, err := tlb.FromDecimal(req.Amount, int(cc.Decimals))
 	if err != nil {
 		writeErr(w, 400, "failed to parse capacity: "+err.Error())
 		return
@@ -481,7 +522,7 @@ func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		fee, err := tlb.FromTON(node.Fee)
+		fee, err := tlb.FromDecimal(node.Fee, int(cc.Decimals))
 		if err != nil {
 			writeErr(w, 400, "failed to parse node "+fmt.Sprint(i)+" fee: "+err.Error())
 			return
@@ -526,8 +567,8 @@ func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) PushVirtualChannelEvent(ctx context.Context, event db.VirtualChannelEventType, meta *db.VirtualChannelMeta) error {
-	vc, err := s.getVirtual(ctx, meta)
+func (s *Server) PushVirtualChannelEvent(ctx context.Context, event db.VirtualChannelEventType, meta *db.VirtualChannelMeta, cc *config.CoinConfig) error {
+	vc, err := s.getVirtual(ctx, meta, int(cc.Decimals))
 	if err != nil {
 		return fmt.Errorf("failed to get virtual channel: %w", err)
 	}

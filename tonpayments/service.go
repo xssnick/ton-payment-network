@@ -43,7 +43,7 @@ type Transport interface {
 
 type Webhook interface {
 	PushChannelEvent(ctx context.Context, ch *db.Channel) error
-	PushVirtualChannelEvent(ctx context.Context, event db.VirtualChannelEventType, meta *db.VirtualChannelMeta) error
+	PushVirtualChannelEvent(ctx context.Context, event db.VirtualChannelEventType, meta *db.VirtualChannelMeta, cc *config.CoinConfig) error
 }
 
 type DB interface {
@@ -756,25 +756,31 @@ func (s *Service) DebugPrintVirtualChannels() {
 	}
 
 	for _, ch := range chs {
+		cc, err := s.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to resolve coin config")
+			continue
+		}
+
 		inBalance, outBalance := "?", "?"
 		val, err := ch.CalcBalance(false)
 		if err == nil {
-			outBalance = tlb.FromNanoTON(val).String()
+			outBalance = tlb.MustFromNano(val, int(cc.Decimals)).String()
 		}
 
 		val, err = ch.CalcBalance(true)
 		if err == nil {
-			inBalance = tlb.FromNanoTON(val).String()
+			inBalance = tlb.MustFromNano(val, int(cc.Decimals)).String()
 		}
 
 		log.Info().Str("address", ch.Address).
 			Str("with", base64.StdEncoding.EncodeToString(ch.TheirOnchain.Key)).
-			Str("out_deposit", tlb.FromNanoTON(ch.OurOnchain.Deposited).String()).
-			Str("out_withdrawn", tlb.FromNanoTON(ch.OurOnchain.Withdrawn).String()).
+			Str("out_deposit", tlb.MustFromNano(ch.OurOnchain.Deposited, int(cc.Decimals)).String()).
+			Str("out_withdrawn", tlb.MustFromNano(ch.OurOnchain.Withdrawn, int(cc.Decimals)).String()).
 			Str("sent_out", ch.Our.State.Data.Sent.String()).
 			Str("balance_out", outBalance).
-			Str("in_deposit", tlb.FromNanoTON(ch.TheirOnchain.Deposited).String()).
-			Str("in_withdrawn", tlb.FromNanoTON(ch.TheirOnchain.Withdrawn).String()).
+			Str("in_deposit", tlb.MustFromNano(ch.TheirOnchain.Deposited, int(cc.Decimals)).String()).
+			Str("in_withdrawn", tlb.MustFromNano(ch.TheirOnchain.Withdrawn, int(cc.Decimals)).String()).
 			Str("sent_in", ch.Their.State.Data.Sent.String()).
 			Str("balance_in", inBalance).
 			Uint64("seqno_their", ch.Their.State.Data.Seqno).
@@ -788,10 +794,11 @@ func (s *Service) DebugPrintVirtualChannels() {
 			vch, _ := payments.ParseVirtualChannelCond(kv.Value.BeginParse())
 			till := time.Unix(vch.Deadline, 0).Sub(time.Now())
 			log.Info().
-				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
+				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
 				Str("till_deadline", till.String()).
 				Str("till_safe_deadline", (till-time.Duration(ch.SafeOnchainClosePeriod)*time.Second).String()).
-				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
+				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
+				Str("prepaid", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
 				Hex("key", vch.Key).
 				Msg("virtual from us")
 		}
@@ -799,9 +806,10 @@ func (s *Service) DebugPrintVirtualChannels() {
 			vch, _ := payments.ParseVirtualChannelCond(kv.Value.BeginParse())
 
 			log.Info().
-				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
+				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
 				Str("till_deadline", time.Unix(vch.Deadline, 0).Sub(time.Now()).String()).
-				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
+				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
+				Str("prepaid", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
 				Hex("key", vch.Key).
 				Msg("virtual to us")
 		}

@@ -96,6 +96,11 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		}
 	}
 
+	cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve coin config: %w", err)
+	}
+
 	var toExecute func(ctx context.Context) error
 	if signedState.State.Data.Seqno == channel.Their.State.Data.Seqno {
 		// idempotency check
@@ -176,7 +181,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			}
 
 			if s.webhook != nil {
-				if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeRemove, meta); err != nil {
+				if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeRemove, meta, cc); err != nil {
 					return fmt.Errorf("failed to push virtual channel close event: %w", err)
 				}
 			}
@@ -213,13 +218,24 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("incorrect channel state signature")
 		}
 
-		if vState.Amount.Nano().Cmp(vch.Capacity) == 1 {
+		if vState.Amount.Cmp(vch.Capacity) > 0 {
 			return nil, fmt.Errorf("amount cannot be > capacity")
 		}
 
-		gotAmt := new(big.Int).Add(vState.Amount.Nano(), vch.Fee)
-		if gotAmt.Cmp(balanceDiff) == -1 {
-			return nil, fmt.Errorf("incorrect amount unlocked: %s instead of %s", balanceDiff.String(), vState.Amount.Nano().String())
+		if vState.Amount.Cmp(vch.Prepay) < 0 {
+			return nil, fmt.Errorf("amount cannot be > capacity")
+		}
+
+		gotAmt := new(big.Int).Add(vState.Amount, vch.Fee)
+		gotAmt = gotAmt.Sub(gotAmt, vch.Prepay)
+
+		if gotAmt.Sign() < 0 {
+			// prepaid more than actual, we consider diff as our earning because of user's strange behave
+			gotAmt.SetInt64(0)
+		}
+
+		if gotAmt.Cmp(balanceDiff) < 0 {
+			return nil, fmt.Errorf("incorrect amount unlocked: %s instead of %s", balanceDiff.String(), vState.Amount.String())
 		}
 
 		meta, err := s.db.GetVirtualChannelMeta(context.Background(), vch.Key)
@@ -231,8 +247,8 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("virtual channel close was not requested")
 		}
 
-		if res := meta.GetKnownResolve(vch.Key); res != nil {
-			if res.Amount.Nano().Cmp(vState.Amount.Nano()) == 1 {
+		if res := meta.GetKnownResolve(); res != nil {
+			if res.Amount.Cmp(vState.Amount) > 0 {
 				return nil, fmt.Errorf("outdated virtual channel state")
 			}
 		} else {
@@ -251,15 +267,58 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			}
 
 			if s.webhook != nil {
-				if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeClose, meta); err != nil {
+				if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeClose, meta, cc); err != nil {
 					return fmt.Errorf("failed to push virtual channel close event: %w", err)
 				}
 			}
 
 			log.Info().Str("key", base64.StdEncoding.EncodeToString(data.Key)).
-				Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
-				Str("fee", tlb.FromNanoTON(vch.Fee).String()).
+				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
+				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
 				Msg("virtual channel closed")
+
+			return nil
+		}
+	case transport.CommitVirtualAction:
+		_, vchNew, err := payments.FindVirtualChannel(condProposal, data.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find virtual channel in their new state: %w", err)
+		}
+
+		index, vchOld, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find virtual channel in their old state: %w", err)
+		}
+
+		prepayAmt := new(big.Int).Sub(vchNew.Prepay, vchOld.Prepay)
+		if prepayAmt.Sign() < 0 {
+			return nil, fmt.Errorf("prepay cannot be decreased")
+		}
+
+		sentDiff := new(big.Int).Sub(signedState.State.Data.Sent.Nano(), channel.Their.State.Data.Sent.Nano())
+		if sentDiff.Cmp(prepayAmt) < 0 {
+			return nil, fmt.Errorf("sent is less than prepay")
+		}
+
+		// we put our serialized condition to make sure that party is not cheated,
+		// if something diff will be in state, final signature will not match
+		vchOld.Prepay = vchNew.Prepay // only prepay can change
+		if err = channel.Their.Conditionals.SetIntKey(index, vchOld.Serialize()); err != nil {
+			return nil, fmt.Errorf("failed to set condition with index %s: %w", index.String(), err)
+		}
+
+		toExecute = func(ctx context.Context) error {
+			if prepayAmt.Sign() == 0 {
+				return nil
+			}
+
+			log.Info().Str("key", base64.StdEncoding.EncodeToString(data.Key)).
+				Str("capacity", tlb.MustFromNano(vchOld.Capacity, int(cc.Decimals)).String()).
+				Str("fee", tlb.MustFromNano(vchOld.Fee, int(cc.Decimals)).String()).
+				Str("prepaid", tlb.MustFromNano(vchNew.Prepay, int(cc.Decimals)).String()).
+				Str("prepay_diff", tlb.MustFromNano(prepayAmt, int(cc.Decimals)).String()).
+				Str("sent_diff", tlb.MustFromNano(sentDiff, int(cc.Decimals)).String()).
+				Msg("virtual channel prepaid")
 
 			return nil
 		}
@@ -281,12 +340,12 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("safe virtual channel deadline is less than acceptable: %d, %d", safe, s.cfg.MinSafeVirtualChannelTimeoutSec)
 		}
 
-		_, oldVC, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.ChannelKey)
+		_, vchOld, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.ChannelKey)
 		if err != nil && !errors.Is(err, payments.ErrNotFound) {
 			return nil, fmt.Errorf("failed to find virtual channel in their prev state: %w", err)
 		}
 		if err == nil {
-			if oldVC.Deadline == vch.Deadline && oldVC.Fee.Cmp(vch.Fee) == 0 && oldVC.Capacity.Cmp(vch.Capacity) == 0 {
+			if vchOld.Deadline == vch.Deadline && vchOld.Fee.Cmp(vch.Fee) == 0 && vchOld.Capacity.Cmp(vch.Capacity) == 0 {
 				// idempotency
 				return &channel.Our.SignedSemiChannel, nil
 			}
@@ -355,11 +414,6 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 			if nextCap.Cmp(vch.Capacity) > 0 {
 				return nil, fmt.Errorf("capacity cannot increase")
-			}
-
-			cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, true)
-			if err != nil {
-				return nil, fmt.Errorf("failed to resolve coin config: %w", err)
 			}
 
 			if !cc.VirtualTunnelConfig.AllowTunneling {
@@ -454,8 +508,8 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				}
 
 				log.Info().Str("key", base64.StdEncoding.EncodeToString(data.ChannelKey)).
-					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
-					Str("fee", tlb.FromNanoTON(vch.Fee).String()).
+					Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
+					Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
 					Str("target", target.Address).
 					Msg("channel tunnelling through us requested")
 
@@ -468,8 +522,8 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 					Status: db.VirtualChannelStateActive,
 					Incoming: &db.VirtualChannelMetaSide{
 						ChannelAddress:        channel.Address,
-						Capacity:              tlb.FromNanoTON(vch.Capacity).String(),
-						Fee:                   tlb.FromNanoTON(vch.Fee).String(),
+						Capacity:              tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String(),
+						Fee:                   tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String(),
 						UncooperativeDeadline: time.Unix(vch.Deadline, 0),
 						SafeDeadline:          time.Unix(vch.Deadline, 0).Add(-time.Duration(channel.SafeOnchainClosePeriod+int64(s.cfg.MinSafeVirtualChannelTimeoutSec)) * time.Second),
 					},
@@ -487,11 +541,11 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 						return fmt.Errorf("final state is incorrect")
 					}
 
-					if state.Amount.Nano().Cmp(vch.Capacity) != 0 {
+					if state.Amount.Cmp(vch.Capacity) != 0 {
 						return fmt.Errorf("final state should use full capacity")
 					}
 
-					if err = meta.AddKnownResolve(meta.Key, &state); err != nil {
+					if err = meta.AddKnownResolve(&state); err != nil {
 						return fmt.Errorf("failed to add channel condition resolve: %w", err)
 					}
 
@@ -517,13 +571,13 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				}
 
 				if currentInstruction.FinalState == nil && s.webhook != nil {
-					if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeOpen, meta); err != nil {
+					if err = s.webhook.PushVirtualChannelEvent(ctx, db.VirtualChannelEventTypeOpen, meta, cc); err != nil {
 						return fmt.Errorf("failed to push virtual channel close event: %w", err)
 					}
 				}
 
 				log.Info().Str("key", base64.StdEncoding.EncodeToString(data.ChannelKey)).
-					Str("capacity", tlb.FromNanoTON(vch.Capacity).String()).
+					Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
 					Msg("virtual channel opened with us")
 
 				return nil
@@ -659,7 +713,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return nil, fmt.Errorf("incorrect channel state signature")
 		}
 
-		if vState.Amount.Nano().Cmp(vch.Capacity) == 1 {
+		if vState.Amount.Cmp(vch.Capacity) > 0 {
 			return nil, fmt.Errorf("amount cannot be > capacity")
 		}
 

@@ -149,7 +149,7 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 		ExtraCurrencyID:          ecID,
 		ExcessFee:                excessFee.Nano().Bytes(),
 		QuarantineDuration:       s.cfg.QuarantineDurationSec,
-		MisbehaviorFine:          tlb.MustFromTON(cc.MisbehaviorFine).Nano().Bytes(),
+		MisbehaviorFine:          tlb.MustFromDecimal(cc.MisbehaviorFine, int(cc.Decimals)).Nano().Bytes(),
 		ConditionalCloseDuration: s.cfg.ConditionalCloseDurationSec,
 	})
 	if err != nil {
@@ -296,6 +296,115 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, 
 	return nil
 }
 
+func (s *Service) CommitAllOurVirtualChannelsAndWait(ctx context.Context) error {
+	list, err := s.ListChannels(ctx, nil, db.ChannelStateActive)
+	if err != nil {
+		return fmt.Errorf("failed to list channels: %w", err)
+	}
+
+	for _, channel := range list {
+		dictKV, err := channel.Our.Conditionals.LoadAll()
+		if err != nil {
+			log.Error().Err(err).Str("address", channel.Address).Msg("failed to load our conditionals")
+			continue
+		}
+
+		for _, kv := range dictKV {
+			vch, err := payments.ParseVirtualChannelCond(kv.Value)
+			if err != nil {
+				log.Error().Err(err).Str("address", channel.Address).Uint64("index", kv.Key.MustLoadUInt(32)).Msg("failed to parse conditional")
+				continue
+			}
+
+			if err = s.CommitVirtualChannel(ctx, vch.Key); err != nil {
+				log.Error().Err(err).Str("address", channel.Address).Uint64("index", kv.Key.MustLoadUInt(32)).Msg("failed to commit virtual channel")
+				continue
+			}
+		}
+	}
+
+	for {
+		// TODO: optimize
+		tasks, err := s.db.ListActiveTasks(ctx, PaymentsTaskPool)
+		if err != nil {
+			return fmt.Errorf("failed to list tasks: %w", err)
+		}
+
+		has := false
+		for _, task := range tasks {
+			if task.Type == "commit-virtual" {
+				has = true
+				break
+			}
+		}
+
+		if !has {
+			// all commits completed
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func (s *Service) CommitVirtualChannel(ctx context.Context, key []byte) error {
+	meta, err := s.db.GetVirtualChannelMeta(ctx, key)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return fmt.Errorf("virtual channel is not exists")
+		}
+		return fmt.Errorf("failed to load virtual channel meta: %w", err)
+	}
+
+	if meta.Outgoing == nil {
+		return fmt.Errorf("virtual channel is not outgoing")
+	}
+
+	resolve := meta.GetKnownResolve()
+	if resolve == nil {
+		// nothing to commit
+		return nil
+	}
+
+	ch, err := s.db.GetChannel(ctx, meta.Outgoing.ChannelAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get outgoing channel: %w", err)
+	}
+
+	_, vch, err := payments.FindVirtualChannel(ch.Our.Conditionals, key)
+	if err != nil {
+		if errors.Is(err, payments.ErrNotFound) {
+			// no need
+			return nil
+		}
+		return fmt.Errorf("failed to find virtual channel: %w", err)
+	}
+
+	if vch.Prepay.Cmp(resolve.Amount) >= 0 {
+		// already commited
+		return nil
+	}
+
+	tryTill := time.Unix(vch.Deadline-ch.SafeOnchainClosePeriod, 0)
+	err = s.db.CreateTask(ctx, PaymentsTaskPool, "commit-virtual", ch.Address,
+		"commit-virtual-"+base64.StdEncoding.EncodeToString(vch.Key)+"-"+resolve.Amount.String(),
+		db.CommitVirtualTask{
+			ChannelAddress: ch.Address,
+			VirtualKey:     vch.Key,
+		}, nil, &tryTill,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create virtual commit task: %w", err)
+	}
+	s.touchWorker()
+
+	return nil
+}
+
 func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error {
 	meta, err := s.db.GetVirtualChannelMeta(ctx, virtualKey)
 	if err != nil {
@@ -329,11 +438,11 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 			return fmt.Errorf("virtual channel has expired")
 		}
 
-		if state.Amount.Nano().Cmp(vch.Capacity) == 1 {
+		if state.Amount.Cmp(vch.Capacity) > 0 {
 			return fmt.Errorf("amount cannot be > capacity")
 		}
 	} else {
-		// in case we are the final point, check against our channel
+		// in case we are the first point, check against our channel
 		ch, err := s.db.GetChannel(ctx, meta.Outgoing.ChannelAddress)
 		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
@@ -357,7 +466,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 			return fmt.Errorf("virtual channel has expired")
 		}
 
-		if state.Amount.Nano().Cmp(vch.Capacity) == 1 {
+		if state.Amount.Cmp(vch.Capacity) > 0 {
 			return fmt.Errorf("amount cannot be > capacity")
 		}
 	}
@@ -367,7 +476,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 		return fmt.Errorf("virtual channel is inactive")
 	}
 
-	if err = meta.AddKnownResolve(meta.Key, &state); err != nil {
+	if err = meta.AddKnownResolve(&state); err != nil {
 		return fmt.Errorf("failed to add channel condition resolve: %w", err)
 	}
 
@@ -497,7 +606,7 @@ func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, am
 }
 
 func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amount tlb.Coins) error {
-	if _, _, _, err := s.getCommitRequest(amount, tlb.MustFromTON("0"), channel); err != nil {
+	if _, _, _, err := s.getCommitRequest(amount, tlb.ZeroCoins, channel); err != nil {
 		return fmt.Errorf("failed to prepare channel commit request: %w", err)
 	}
 
@@ -556,8 +665,8 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		return fmt.Errorf("failed to find virtual channel: %w", err)
 	}
 
-	state := meta.GetKnownResolve(vch.Key)
-	if state == nil {
+	resolve := meta.GetKnownResolve()
+	if resolve == nil {
 		return ErrNoResolveExists
 	}
 
@@ -567,25 +676,31 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		return fmt.Errorf("failed to update channel in db: %w", err)
 	}
 
-	// We start uncooperative close at specific moment to have time
-	// to commit resolve onchain in case partner is irresponsible.
-	// But in the same time we give our partner time to
-	uncooperativeAfter := time.Unix(vch.Deadline-ch.SafeOnchainClosePeriod, 0)
-	minDelay := time.Now().Add(1 * time.Minute)
-	if !uncooperativeAfter.After(minDelay) {
-		uncooperativeAfter = minDelay
-	}
+	till := time.Unix(vch.Deadline, 0)
 
-	// Creating aggressive onchain close task, for the future,
-	// in case we will not be able to communicate with party
-	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", ch.Address+"-uncoop",
-		"uncooperative-close-"+ch.Address+"-vc-"+base64.StdEncoding.EncodeToString(vch.Key),
-		db.ChannelUncooperativeCloseTask{
-			Address:                 ch.Address,
-			CheckVirtualStillExists: vch.Key,
-		}, &uncooperativeAfter, nil,
-	); err != nil {
-		log.Warn().Err(err).Str("channel", ch.Address).Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("failed to create uncooperative close task")
+	// if it was prepaid for resolve amount, no need do onchain close when not succeed
+	prepaid := vch.Prepay.Cmp(new(big.Int).Add(resolve.Amount, vch.Fee)) >= 0
+	if !prepaid {
+		// We start uncooperative close at specific moment to have time
+		// to commit resolve onchain in case partner is irresponsible.
+		// But in the same time we give our partner time to
+		till = time.Unix(vch.Deadline-ch.SafeOnchainClosePeriod, 0)
+		minDelay := time.Now().Add(1 * time.Minute)
+		if !till.After(minDelay) {
+			till = minDelay
+		}
+
+		// Creating aggressive onchain close task, for the future,
+		// in case we will not be able to communicate with party
+		if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", ch.Address+"-uncoop",
+			"uncooperative-close-"+ch.Address+"-vc-"+base64.StdEncoding.EncodeToString(vch.Key),
+			db.ChannelUncooperativeCloseTask{
+				Address:                 ch.Address,
+				CheckVirtualStillExists: vch.Key,
+			}, &till, nil,
+		); err != nil {
+			log.Warn().Err(err).Str("channel", ch.Address).Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("failed to create uncooperative close task")
+		}
 	}
 
 	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "ask-close-virtual", ch.Address+"-coop",
@@ -593,12 +708,13 @@ func (s *Service) CloseVirtualChannel(ctx context.Context, virtualKey ed25519.Pu
 		db.AskCloseVirtualTask{
 			Key:            vch.Key,
 			ChannelAddress: ch.Address,
-		}, nil, &uncooperativeAfter,
+		}, nil, &till,
 	); err != nil {
 		log.Warn().Err(err).Str("channel", ch.Address).Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("failed to create cooperative close task")
 	}
+	s.touchWorker()
 
-	log.Info().Err(err).Str("channel", ch.Address).Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("virtual channel close task created and will be executed soon")
+	log.Info().Err(err).Bool("prepaid", prepaid).Str("channel", ch.Address).Str("key", base64.StdEncoding.EncodeToString(vch.Key)).Msg("virtual channel close task created and will be executed soon")
 
 	return nil
 }
@@ -709,10 +825,15 @@ func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel
 		return nil, nil, nil, fmt.Errorf("their withdraw is greater than balance")
 	}
 
+	cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, false)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to resolve coin config: %w", err)
+	}
+
 	var ourReq payments.CooperativeCommit
 	ourReq.Signed.ChannelID = channel.ID
-	ourReq.Signed.BalanceA = tlb.FromNanoTON(ourBalance)
-	ourReq.Signed.BalanceB = tlb.FromNanoTON(theirBalance)
+	ourReq.Signed.BalanceA = tlb.MustFromNano(ourBalance, int(cc.Decimals))
+	ourReq.Signed.BalanceB = tlb.MustFromNano(theirBalance, int(cc.Decimals))
 	ourReq.Signed.SeqnoA = channel.Our.State.Data.Seqno + 1
 	ourReq.Signed.SeqnoB = channel.Their.State.Data.Seqno + 1
 	ourReq.Signed.WithdrawA = ourWithdraw
@@ -783,10 +904,15 @@ func (s *Service) getCooperativeCloseRequest(channel *db.Channel) (*payments.Coo
 		return nil, nil, nil, fmt.Errorf("failed to calc their balance: %w", err)
 	}
 
+	cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, false)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to resolve coin config: %w", err)
+	}
+
 	var ourReq payments.CooperativeClose
 	ourReq.Signed.ChannelID = channel.ID
-	ourReq.Signed.BalanceA = tlb.FromNanoTON(ourBalance)
-	ourReq.Signed.BalanceB = tlb.FromNanoTON(theirBalance)
+	ourReq.Signed.BalanceA = tlb.MustFromNano(ourBalance, int(cc.Decimals))
+	ourReq.Signed.BalanceB = tlb.MustFromNano(theirBalance, int(cc.Decimals))
 	ourReq.Signed.SeqnoA = channel.Our.State.Data.Seqno + 1
 	ourReq.Signed.SeqnoB = channel.Their.State.Data.Seqno + 1
 	if !channel.WeLeft {
@@ -1060,7 +1186,7 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 			continue
 		}
 
-		if resolve := meta.GetKnownResolve(vch.Key); resolve != nil {
+		if resolve := meta.GetKnownResolve(); resolve != nil {
 			rc, err := tlb.ToCell(resolve)
 			if err != nil {
 				log.Warn().Err(err).Msg("failed to serialize known virtual channel state")

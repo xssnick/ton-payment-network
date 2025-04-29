@@ -248,12 +248,14 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse condition %d: %w", kv.Key.MustLoadUInt(32), err)
 		}
-		balance = balance.Sub(balance, new(big.Int).Add(vch.Capacity, vch.Fee))
+		balance = balance.Sub(balance, vch.Capacity)
+		balance = balance.Sub(balance, vch.Fee)
+		balance = balance.Add(balance, vch.Prepay)
 	}
 	return balance, nil
 }
 
-func (ch *VirtualChannelMeta) GetKnownResolve(key ed25519.PublicKey) *payments.VirtualChannelState {
+func (ch *VirtualChannelMeta) GetKnownResolve() *payments.VirtualChannelState {
 	if ch.LastKnownResolve == nil {
 		return nil
 	}
@@ -268,14 +270,14 @@ func (ch *VirtualChannelMeta) GetKnownResolve(key ed25519.PublicKey) *payments.V
 		return nil
 	}
 
-	if !st.Verify(key) {
+	if !st.Verify(ch.Key) {
 		return nil
 	}
 	return &st
 }
 
-func (ch *VirtualChannelMeta) AddKnownResolve(key ed25519.PublicKey, state *payments.VirtualChannelState) error {
-	if !state.Verify(key) {
+func (ch *VirtualChannelMeta) AddKnownResolve(state *payments.VirtualChannelState) error {
+	if !state.Verify(ch.Key) {
 		return fmt.Errorf("incorrect signature")
 	}
 
@@ -290,7 +292,7 @@ func (ch *VirtualChannelMeta) AddKnownResolve(key ed25519.PublicKey, state *paym
 			return fmt.Errorf("failed to parse old start: %w", err)
 		}
 
-		if oldState.Amount.Nano().Cmp(state.Amount.Nano()) > 0 {
+		if oldState.Amount.Cmp(state.Amount) > 0 {
 			return ErrNewerStateIsKnown
 		}
 	}

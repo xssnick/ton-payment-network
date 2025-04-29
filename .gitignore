@@ -3,3 +3,4 @@
 payment-node-db*
 payment-network-config*.json
 payment-node
+*.log
