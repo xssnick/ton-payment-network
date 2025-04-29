@@ -222,20 +222,16 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("amount cannot be > capacity")
 		}
 
-		if vState.Amount.Cmp(vch.Prepay) < 0 {
-			return nil, fmt.Errorf("amount cannot be > capacity")
-		}
+		needAmt := new(big.Int).Add(vState.Amount, vch.Fee)
+		needAmt = needAmt.Sub(needAmt, vch.Prepay)
 
-		gotAmt := new(big.Int).Add(vState.Amount, vch.Fee)
-		gotAmt = gotAmt.Sub(gotAmt, vch.Prepay)
-
-		if gotAmt.Sign() < 0 {
+		if needAmt.Sign() < 0 {
 			// prepaid more than actual, we consider diff as our earning because of user's strange behave
-			gotAmt.SetInt64(0)
+			needAmt.SetInt64(0)
 		}
 
-		if gotAmt.Cmp(balanceDiff) < 0 {
-			return nil, fmt.Errorf("incorrect amount unlocked: %s instead of %s", balanceDiff.String(), vState.Amount.String())
+		if needAmt.Cmp(balanceDiff) > 0 {
+			return nil, fmt.Errorf("incorrect amount unlocked: %s instead of %s", balanceDiff.String(), needAmt.String())
 		}
 
 		meta, err := s.db.GetVirtualChannelMeta(context.Background(), vch.Key)

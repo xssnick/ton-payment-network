@@ -314,6 +314,7 @@ func (s *Server) handleRLDPQuery(peer *PeerConnection) func(transfer []byte, que
 			if err != nil {
 				reason = err.Error()
 				ok = false
+				log.Debug().Str("reason", reason).Msg("failed to process action")
 			} else {
 				if updCell, err = tlb.ToCell(updateProof); err != nil {
 					return fmt.Errorf("failed to serialize state cell: %w", err)
