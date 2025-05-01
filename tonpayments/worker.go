@@ -107,6 +107,11 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
 					}
 
+					if meta.Status != db.VirtualChannelStateActive {
+						log.Debug().Str("key", base64.StdEncoding.EncodeToString(data.VirtualKey)).Msg("is not active, skip closing")
+						return nil
+					}
+
 					var state *cell.Cell
 					if data.State == nil {
 						// reverse compatibility: get latest known state
