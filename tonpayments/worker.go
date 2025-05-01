@@ -107,14 +107,23 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to load virtual channel meta: %w", err)
 					}
 
-					resolve := meta.GetKnownResolve()
-					if resolve == nil {
-						return fmt.Errorf("failed to load virtual channel resolve: %w", err)
-					}
+					var state *cell.Cell
+					if data.State == nil {
+						// reverse compatibility: get latest known state
+						resolve := meta.GetKnownResolve()
+						if resolve == nil {
+							return fmt.Errorf("failed to load virtual channel resolve: %w", err)
+						}
 
-					state, err := tlb.ToCell(resolve)
-					if err != nil {
-						return fmt.Errorf("failed to serialize virtual channel resolve: %w", err)
+						state, err = tlb.ToCell(resolve)
+						if err != nil {
+							return fmt.Errorf("failed to serialize virtual channel resolve: %w", err)
+						}
+					} else {
+						state, err = cell.FromBOC(data.State)
+						if err != nil {
+							return fmt.Errorf("failed to parse state boc: %w", err)
+						}
 					}
 
 					toChannel, lockId, unlock, err := s.AcquireChannel(ctx, meta.Outgoing.ChannelAddress)

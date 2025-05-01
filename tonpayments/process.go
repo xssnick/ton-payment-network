@@ -720,7 +720,16 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 
 		if err = s.db.Transaction(context.Background(), func(ctx context.Context) error {
 			if err = s.AddVirtualChannelResolve(ctx, vch.Key, vState); err != nil {
-				return fmt.Errorf("failed to add virtual channel resolve: %w", err)
+				// we don't care if it is older, since party wants to close with this amount
+				if !errors.Is(err, db.ErrNewerStateIsKnown) {
+					return fmt.Errorf("failed to add virtual channel resolve: %w", err)
+				}
+			}
+
+			// serialize by ourselves for safety
+			stateCell, err := vState.ToCell()
+			if err != nil {
+				return fmt.Errorf("failed to serialize virtual channel state: %w", err)
 			}
 
 			tryTill := time.Unix(vch.Deadline+(channel.SafeOnchainClosePeriod/2), 0)
@@ -728,6 +737,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 				"confirm-close-virtual-"+base64.StdEncoding.EncodeToString(vch.Key),
 				db.ConfirmCloseVirtualTask{
 					VirtualKey: data.Key,
+					State:      stateCell.ToBOC(),
 				}, nil, &tryTill,
 			); err != nil {
 				return fmt.Errorf("failed to create confirm-close-virtual task: %w", err)
