@@ -41,6 +41,8 @@ import (
 	_ "net/http/pprof"
 )
 
+var GitCommit = "dev"
+
 var Verbosity = flag.Int("v", 2, "verbosity")
 var DaemonMode = flag.Bool("daemon", false, "daemon mode (disables command reader)")
 var Webhook = flag.String("webhook", "", "HTTP webhook address")
@@ -101,6 +103,8 @@ func main() {
 	} else {
 		log.Logger = log.Logger.Level(zerolog.FatalLevel).With().Logger()
 	}
+
+	log.Info().Str("version", GitCommit).Msg("starting payment node...")
 
 	/*go func() {
 		runtime.SetMutexProfileFraction(1)
