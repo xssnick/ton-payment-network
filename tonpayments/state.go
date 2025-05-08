@@ -45,7 +45,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 			return nil, nil, nil, fmt.Errorf("invalid prepay")
 		}
 
-		if vch.Deadline < time.Now().Unix() {
+		if vch.Deadline < time.Now().UTC().Unix() {
 			return nil, nil, nil, fmt.Errorf("deadline expired")
 		}
 
@@ -175,7 +175,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		// new skeleton to reset prev path
 		dictRoot = cell.CreateProofSkeleton()
 
-		if vch.Deadline < time.Now().Unix() {
+		if vch.Deadline < time.Now().UTC().Unix() {
 			return nil, nil, nil, fmt.Errorf("virtual channel has expired")
 		}
 
@@ -191,10 +191,14 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 			return nil, nil, nil, fmt.Errorf("deleted value is still exists for some reason: %w", err)
 		}
 
-		sent := new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), vState.Amount)
-		sent = sent.Sub(sent, vch.Prepay)
-		sent = sent.Add(sent, vch.Fee)
-		channel.Our.State.Data.Sent = tlb.MustFromNano(sent, int(cc.Decimals))
+		toSend := new(big.Int).Set(vState.Amount)
+		toSend = toSend.Sub(toSend, vch.Prepay)
+		toSend = toSend.Add(toSend, vch.Fee)
+
+		if toSend.Sign() > 0 {
+			// we cannot decrease sent, even when we prepaid more than actual
+			channel.Our.State.Data.Sent = tlb.MustFromNano(toSend.Add(toSend, channel.Our.State.Data.Sent.Nano()), int(cc.Decimals))
+		}
 
 		onSuccess = func() {
 			log.Info().Str("key", base64.StdEncoding.EncodeToString(vch.Key)).

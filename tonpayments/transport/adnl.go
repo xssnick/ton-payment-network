@@ -193,7 +193,7 @@ func (s *Server) handleADNLQuery(peer *PeerConnection) func(query *adnl.MessageQ
 				return err
 			}
 		case Authenticate:
-			if q.Timestamp < time.Now().Add(-30*time.Second).Unix() || q.Timestamp > time.Now().Unix() {
+			if q.Timestamp < time.Now().Add(-30*time.Second).Unix() || q.Timestamp > time.Now().UTC().Unix() {
 				return fmt.Errorf("outdated auth data")
 			}
 
@@ -456,7 +456,7 @@ func (s *Server) connect(ctx context.Context, channelKey ed25519.PublicKey) (*Pe
 }
 
 func (s *Server) auth(ctx context.Context, peer *PeerConnection) error {
-	ts := time.Now().Unix()
+	ts := time.Now().UTC().Unix()
 	authData, err := tl.Hash(AuthenticateToSign{
 		A:         s.gate.GetID(),
 		B:         peer.adnl.GetID(),

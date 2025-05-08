@@ -165,7 +165,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("failed to load virtual channel meta: %w", err)
 		}
 
-		if vch.Deadline >= time.Now().Unix() && meta.Status != db.VirtualChannelStateWantRemove {
+		if vch.Deadline >= time.Now().UTC().Unix() && meta.Status != db.VirtualChannelStateWantRemove {
 			return nil, fmt.Errorf("virtual channel is not expired")
 		}
 
@@ -333,7 +333,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("invalid fee")
 		}
 
-		if safe := vch.Deadline - (time.Now().Unix() + channel.SafeOnchainClosePeriod); safe < int64(s.cfg.MinSafeVirtualChannelTimeoutSec) {
+		if safe := vch.Deadline - (time.Now().UTC().Unix() + channel.SafeOnchainClosePeriod); safe < int64(s.cfg.MinSafeVirtualChannelTimeoutSec) {
 			return nil, fmt.Errorf("safe virtual channel deadline is less than acceptable: %d, %d", safe, s.cfg.MinSafeVirtualChannelTimeoutSec)
 		}
 
@@ -405,8 +405,9 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			nextFee := new(big.Int).SetBytes(currentInstruction.NextFee)
 			nextCap := new(big.Int).SetBytes(currentInstruction.NextCapacity)
 
-			if currentInstruction.NextDeadline > vch.Deadline-(channel.SafeOnchainClosePeriod+int64(s.cfg.MinSafeVirtualChannelTimeoutSec)) {
-				return nil, fmt.Errorf("too short next deadline")
+			maxNextDeadline := vch.Deadline - (channel.SafeOnchainClosePeriod + int64(s.cfg.MinSafeVirtualChannelTimeoutSec))
+			if currentInstruction.NextDeadline > maxNextDeadline {
+				return nil, fmt.Errorf("next deadline too late (not enough safety gap)")
 			}
 
 			if nextCap.Cmp(vch.Capacity) > 0 {
@@ -623,6 +624,15 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		return nil, fmt.Errorf("state looks tampered: %w", err)
 	}
 
+	bal, err := channel.CalcBalance(true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calc balance: %w", err)
+	}
+
+	if bal.Sign() < 0 {
+		return nil, fmt.Errorf("balance cannot be negative")
+	}
+
 	cp, err := channel.Their.State.Data.Copy()
 	if err != nil {
 		return nil, err
@@ -714,7 +724,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return nil, fmt.Errorf("amount cannot be > capacity")
 		}
 
-		if vch.Deadline < time.Now().Unix() {
+		if vch.Deadline < time.Now().UTC().Unix() {
 			return nil, fmt.Errorf("virtual channel is expired")
 		}
 

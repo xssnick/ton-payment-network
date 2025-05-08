@@ -90,7 +90,7 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 	channelId := make([]byte, 16)
 	copy(channelId, nodeKey)
 
-	binary.LittleEndian.PutUint32(channelId[12:], uint32(time.Now().Unix()))
+	binary.LittleEndian.PutUint32(channelId[12:], uint32(time.Now().UTC().Unix()))
 
 	var jettonAddr string
 	if jettonMaster != nil {
@@ -230,7 +230,7 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, 
 		return fmt.Errorf("failed to open virtual channel, %w: no active channel with enough balance exists", ErrNotPossible)
 	}
 
-	if safe := vch.Deadline - (time.Now().Unix() + channel.SafeOnchainClosePeriod); safe < int64(s.cfg.MinSafeVirtualChannelTimeoutSec) {
+	if safe := vch.Deadline - (time.Now().UTC().Unix() + channel.SafeOnchainClosePeriod); safe < int64(s.cfg.MinSafeVirtualChannelTimeoutSec) {
 		return fmt.Errorf("safe deadline is less than acceptable: %d, %d", safe, s.cfg.MinSafeVirtualChannelTimeoutSec)
 	}
 
@@ -402,7 +402,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 			return fmt.Errorf("failed to find virtual channel: %w", err)
 		}
 
-		if vch.Deadline < time.Now().Unix() {
+		if vch.Deadline < time.Now().UTC().Unix() {
 			return fmt.Errorf("virtual channel has expired")
 		}
 
@@ -430,7 +430,7 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 			return fmt.Errorf("failed to find virtual channel: %w", err)
 		}
 
-		if vch.Deadline < time.Now().Unix() {
+		if vch.Deadline < time.Now().UTC().Unix() {
 			return fmt.Errorf("virtual channel has expired")
 		}
 
@@ -552,7 +552,7 @@ func (s *Service) TopupChannel(ctx context.Context, addr *address.Address, amoun
 	}
 
 	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "topup", channel.Address+"-topup",
-		"topup-"+channel.Address+"-"+fmt.Sprint(time.Now().Unix()),
+		"topup-"+channel.Address+"-"+fmt.Sprint(time.Now().UTC().Unix()),
 		db.TopupTask{
 			Address:            channel.Address,
 			AmountNano:         amount.Nano().String(),
@@ -800,8 +800,8 @@ func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel
 
 	var ourReq payments.CooperativeCommit
 	ourReq.Signed.ChannelID = channel.ID
-	ourReq.Signed.BalanceA = tlb.MustFromNano(ourBalance, int(cc.Decimals))
-	ourReq.Signed.BalanceB = tlb.MustFromNano(theirBalance, int(cc.Decimals))
+	ourReq.Signed.BalanceA = tlb.MustFromNano(channel.OurOnchain.CommittedBalance, int(cc.Decimals))
+	ourReq.Signed.BalanceB = tlb.MustFromNano(channel.TheirOnchain.CommittedBalance, int(cc.Decimals))
 	ourReq.Signed.SeqnoA = channel.Our.State.Data.Seqno + 1
 	ourReq.Signed.SeqnoB = channel.Their.State.Data.Seqno + 1
 	ourReq.Signed.WithdrawA = ourWithdraw
@@ -840,7 +840,7 @@ func (s *Service) getCooperativeCloseRequest(channel *db.Channel) (*payments.Coo
 		}
 
 		// if condition is not expired we cannot close onchain channel
-		if vch.Deadline >= time.Now().Unix() {
+		if vch.Deadline >= time.Now().UTC().Unix() {
 			return nil, nil, nil, fmt.Errorf("conditionals should be resolved before cooperative close")
 		}
 	}
@@ -857,7 +857,7 @@ func (s *Service) getCooperativeCloseRequest(channel *db.Channel) (*payments.Coo
 		}
 
 		// if condition is not expired we cannot close onchain channel
-		if vch.Deadline >= time.Now().Unix() {
+		if vch.Deadline >= time.Now().UTC().Unix() {
 			return nil, nil, nil, fmt.Errorf("conditionals should be resolved before cooperative close")
 		}
 	}

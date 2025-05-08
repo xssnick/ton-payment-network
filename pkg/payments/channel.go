@@ -187,7 +187,7 @@ func (c *AsyncChannel) calcState() ChannelStatus {
 	if c.Storage.Quarantine == nil {
 		return ChannelStatusOpen
 	}
-	now := time.Now().Unix()
+	now := time.Now().UTC().Unix()
 	quarantineEnds := int64(c.Storage.Quarantine.QuarantineStarts) + int64(c.Storage.ClosingConfig.QuarantineDuration)
 	if quarantineEnds > now {
 		return ChannelStatusClosureStarted
