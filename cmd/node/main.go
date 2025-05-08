@@ -27,6 +27,7 @@ import (
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
+	"github.com/xssnick/tonutils-go/ton/wallet"
 	"golang.org/x/crypto/ed25519"
 	"io"
 	"math"
@@ -296,7 +297,7 @@ func main() {
 	if !*DaemonMode {
 		go func() {
 			for {
-				if err := commandReader(svc, cfg, fdb); err != nil {
+				if err := commandReader(svc, cfg, fdb, w, apiClient); err != nil {
 					log.Error().Err(err).Msg("command failed")
 				}
 			}
@@ -334,7 +335,7 @@ func main() {
 	svc.Start()
 }
 
-func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB) error {
+func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB, wlt *wallet.Wallet, apiClient ton.APIClientWrapped) error {
 	var cmd string
 	_, _ = fmt.Scanln(&cmd)
 
@@ -346,12 +347,10 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 		var addr string
 		_, _ = fmt.Scanln(&addr)
 
-		for i := 0; i < 30; i++ {
-			if err := svc.IncrementStates(context.Background(), addr, true); err != nil {
-				return fmt.Errorf("failed to increment states with channel: %w", err)
-			}
+		if err := svc.IncrementStates(context.Background(), addr, true); err != nil {
+			return fmt.Errorf("failed to increment states with channel: %w", err)
 		}
-		log.Info().Msg("tasks created")
+		log.Info().Msg("increment task created")
 	case "inc-hard":
 		log.Info().Msg("input channel address to run increment state test:")
 		var addr string
@@ -579,6 +578,54 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 			return fmt.Errorf("failed to deploy channel with node: %w", err)
 		}
 		log.Info().Str("address", addr.String()).Msg("onchain channel deployed")
+	case "wallet-ton-transfer":
+		log.Info().Msg("enter address to transfer to:")
+
+		var addrStr string
+		_, _ = fmt.Scanln(&addrStr)
+
+		addr, err := address.ParseAddr(addrStr)
+		if err != nil {
+			return fmt.Errorf("incorrect format of address: %w", err)
+		}
+
+		log.Info().Msg("input amount:")
+		var strAmt string
+		_, _ = fmt.Scanln(&strAmt)
+
+		amt, err := tlb.FromTON(strAmt)
+		if err != nil {
+			return fmt.Errorf("incorrect format of amount")
+		}
+
+		log.Info().Msg("input comment:")
+		var comment string
+		_, _ = fmt.Scanln(&comment)
+
+		log.Info().
+			Str("to_address", addr.String()).
+			Str("amount", amt.String()).
+			Msg("transferring...")
+
+		time.Sleep(3 * time.Second) // give user some time to cancel
+
+		tx, _, err := wlt.TransferWaitTransaction(context.Background(), addr, amt, comment)
+		if err != nil {
+			return fmt.Errorf("failed to transfer: %w", err)
+		}
+		log.Info().Str("hash", base64.URLEncoding.EncodeToString(tx.Hash)).Msg("transfer transaction committed")
+	case "wallet-ton-balance":
+		blk, err := apiClient.CurrentMasterchainInfo(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to get current masterchain info: %w", err)
+		}
+
+		balance, err := wlt.GetBalance(context.Background(), blk)
+		if err != nil {
+			return fmt.Errorf("failed to get balance: %w", err)
+		}
+
+		log.Info().Msgf("wallet balance: %s TON", balance.String())
 	case "open", "send":
 		log.Info().Msg("enter nodes to tunnel virtual channel through, including receiver (',' separated):")
 		var strKeys string

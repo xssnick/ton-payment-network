@@ -319,6 +319,11 @@ func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ 
 		return
 	}
 
+	if !ch.Our.IsReady() || !ch.Their.IsReady() {
+		log.Debug().Str("address", ch.Address).Msg("not ready, skipping balance control callback")
+		return
+	}
+
 	bc.mx.Lock()
 	ctrl := bc.channels[ch.Address]
 	if ctrl == nil {
