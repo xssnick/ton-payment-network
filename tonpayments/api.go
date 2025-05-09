@@ -574,6 +574,14 @@ func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, am
 }
 
 func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amount tlb.Coins) error {
+	var err error
+	fullAmount := new(big.Int).Add(amount.Nano(), channel.OurOnchain.Withdrawn)
+	
+	amount, err = tlb.FromNano(fullAmount, amount.Decimals())
+	if err != nil {
+		return fmt.Errorf("failed to convert amount to nano: %w", err)
+	}
+
 	if _, _, _, err := s.getCommitRequest(amount, tlb.ZeroCoins, channel); err != nil {
 		return fmt.Errorf("failed to prepare channel commit request: %w", err)
 	}
@@ -768,12 +776,25 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 }
 
 func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel *db.Channel) (*payments.CooperativeCommit, *cell.Cell, []byte, error) {
-	if channel.Our.PendingWithdraw.Sign() != 0 {
-		return nil, nil, nil, fmt.Errorf("our withdraw is not zero")
+	if channel.Our.PendingWithdraw.Cmp(ourWithdraw.Nano()) > 0 || channel.OurOnchain.Withdrawn.Cmp(ourWithdraw.Nano()) > 0 {
+		return nil, nil, nil, fmt.Errorf("our withdraw cannot decrease")
 	}
-	if channel.Their.PendingWithdraw.Sign() != 0 {
-		return nil, nil, nil, fmt.Errorf("their withdraw is not zero")
+	if channel.Their.PendingWithdraw.Cmp(theirWithdraw.Nano()) > 0 || channel.TheirOnchain.Withdrawn.Cmp(theirWithdraw.Nano()) > 0 {
+		return nil, nil, nil, fmt.Errorf("their withdraw cannot decrease")
 	}
+
+	maxOurWithdraw := new(big.Int).Set(channel.Our.PendingWithdraw)
+	if channel.OurOnchain.Withdrawn.Cmp(maxOurWithdraw) > 0 {
+		maxOurWithdraw.Set(channel.OurOnchain.Withdrawn)
+	}
+
+	maxTheirWithdraw := new(big.Int).Set(channel.Their.PendingWithdraw)
+	if channel.TheirOnchain.Withdrawn.Cmp(maxTheirWithdraw) > 0 {
+		maxTheirWithdraw.Set(channel.TheirOnchain.Withdrawn)
+	}
+
+	ourToWithdraw := new(big.Int).Sub(ourWithdraw.Nano(), maxOurWithdraw)
+	theirToWithdraw := new(big.Int).Sub(theirWithdraw.Nano(), maxTheirWithdraw)
 
 	// this is not locked balance
 	ourBalance, err := channel.CalcBalance(false)
@@ -786,29 +807,24 @@ func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel
 		return nil, nil, nil, fmt.Errorf("failed to calc their balance: %w", err)
 	}
 
-	if ourWithdraw.Nano().Cmp(ourBalance) > 0 {
+	if ourToWithdraw.Cmp(ourBalance) > 0 {
 		return nil, nil, nil, fmt.Errorf("our withdraw is greater than balance")
 	}
-	if theirWithdraw.Nano().Cmp(theirBalance) > 0 {
+	if theirToWithdraw.Cmp(theirBalance) > 0 {
 		return nil, nil, nil, fmt.Errorf("their withdraw is greater than balance")
-	}
-
-	cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, false)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to resolve coin config: %w", err)
 	}
 
 	var ourReq payments.CooperativeCommit
 	ourReq.Signed.ChannelID = channel.ID
-	ourReq.Signed.BalanceA = tlb.MustFromNano(channel.OurOnchain.CommittedBalance, int(cc.Decimals))
-	ourReq.Signed.BalanceB = tlb.MustFromNano(channel.TheirOnchain.CommittedBalance, int(cc.Decimals))
+	ourReq.Signed.SentA = channel.Our.State.Data.Sent
+	ourReq.Signed.SentB = channel.Their.State.Data.Sent
 	ourReq.Signed.SeqnoA = channel.Our.State.Data.Seqno + 1
 	ourReq.Signed.SeqnoB = channel.Their.State.Data.Seqno + 1
 	ourReq.Signed.WithdrawA = ourWithdraw
 	ourReq.Signed.WithdrawB = theirWithdraw
 	if !channel.WeLeft {
 		ourReq.Signed.WithdrawA, ourReq.Signed.WithdrawB = ourReq.Signed.WithdrawB, ourReq.Signed.WithdrawA
-		ourReq.Signed.BalanceA, ourReq.Signed.BalanceB = ourReq.Signed.BalanceB, ourReq.Signed.BalanceA
+		ourReq.Signed.SentA, ourReq.Signed.SentB = ourReq.Signed.SentB, ourReq.Signed.SentA
 		ourReq.Signed.SeqnoA, ourReq.Signed.SeqnoB = ourReq.Signed.SeqnoB, ourReq.Signed.SeqnoA
 	}
 	dataCell, err := tlb.ToCell(ourReq.Signed)
@@ -831,6 +847,10 @@ func (s *Service) getCooperativeCloseRequest(channel *db.Channel) (*payments.Coo
 	allOur, err := channel.Our.Conditionals.LoadAll()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to load our cond dict: %w", err)
+	}
+
+	if channel.Our.PendingWithdraw.Cmp(new(big.Int).SetUint64(0)) > 0 || channel.Their.PendingWithdraw.Cmp(new(big.Int).SetUint64(0)) > 0 {
+		return nil, nil, nil, fmt.Errorf("pending withdraw is not zero")
 	}
 
 	for _, kv := range allOur {
@@ -862,29 +882,14 @@ func (s *Service) getCooperativeCloseRequest(channel *db.Channel) (*payments.Coo
 		}
 	}
 
-	ourBalance, err := channel.CalcBalance(false)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to calc our balance: %w", err)
-	}
-
-	theirBalance, err := channel.CalcBalance(true)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to calc their balance: %w", err)
-	}
-
-	cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, false)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to resolve coin config: %w", err)
-	}
-
 	var ourReq payments.CooperativeClose
 	ourReq.Signed.ChannelID = channel.ID
-	ourReq.Signed.BalanceA = tlb.MustFromNano(ourBalance, int(cc.Decimals))
-	ourReq.Signed.BalanceB = tlb.MustFromNano(theirBalance, int(cc.Decimals))
+	ourReq.Signed.SentA = channel.Our.State.Data.Sent
+	ourReq.Signed.SentB = channel.Their.State.Data.Sent
 	ourReq.Signed.SeqnoA = channel.Our.State.Data.Seqno + 1
 	ourReq.Signed.SeqnoB = channel.Their.State.Data.Seqno + 1
 	if !channel.WeLeft {
-		ourReq.Signed.BalanceA, ourReq.Signed.BalanceB = ourReq.Signed.BalanceB, ourReq.Signed.BalanceA
+		ourReq.Signed.SentA, ourReq.Signed.SentB = ourReq.Signed.SentB, ourReq.Signed.SentA
 		ourReq.Signed.SeqnoA, ourReq.Signed.SeqnoB = ourReq.Signed.SeqnoB, ourReq.Signed.SeqnoA
 	}
 	dataCell, err := tlb.ToCell(ourReq.Signed)

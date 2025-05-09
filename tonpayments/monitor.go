@@ -187,13 +187,13 @@ func (s *Service) channelsMonitor() {
 					sideStats.virtual[outdated] = v
 				}
 
-				for _, category := range []string{"deposited", "balance", "balance_committed", "withdrawn"} {
+				for _, category := range []string{"deposited", "balance", "sent", "withdrawn"} {
 					var value *big.Int
 					switch category {
 					case "deposited":
 						value = onchainState.Deposited
-					case "balance_committed":
-						value = onchainState.CommittedBalance
+					case "sent":
+						value = onchainState.Sent
 					case "withdrawn":
 						value = onchainState.Withdrawn
 					case "balance":

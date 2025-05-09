@@ -99,12 +99,12 @@ type Channel struct {
 }
 
 type OnchainState struct {
-	Key              ed25519.PublicKey
-	CommittedSeqno   uint32
-	WalletAddress    string
-	Deposited        *big.Int
-	Withdrawn        *big.Int
-	CommittedBalance *big.Int
+	Key            ed25519.PublicKey
+	CommittedSeqno uint32
+	WalletAddress  string
+	Deposited      *big.Int
+	Withdrawn      *big.Int
+	Sent           *big.Int
 }
 
 type Side struct {
@@ -230,9 +230,13 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 		s1chain, s2chain = s2chain, s1chain
 	}
 
-	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), new(big.Int).Sub(s1chain.Deposited, s1chain.Withdrawn))
+	maxWithdraw := s1chain.Withdrawn
+	if maxWithdraw.Cmp(s1.PendingWithdraw) < 0 {
+		maxWithdraw = s1.PendingWithdraw
+	}
+
+	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), new(big.Int).Sub(s1chain.Deposited, maxWithdraw))
 	balance = balance.Sub(balance, s1.State.Data.Sent.Nano())
-	balance = balance.Sub(balance, s1.PendingWithdraw)
 
 	if s1.Conditionals.IsEmpty() {
 		return balance, nil

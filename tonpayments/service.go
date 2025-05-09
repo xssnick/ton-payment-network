@@ -541,20 +541,20 @@ func (s *Service) Start() {
 			}
 
 			our := db.OnchainState{
-				Key:              upd.Channel.Storage.KeyB,
-				CommittedSeqno:   upd.Channel.Storage.CommittedSeqnoB,
-				WalletAddress:    upd.Channel.Storage.PaymentConfig.DestB.String(),
-				Deposited:        upd.Channel.Storage.Balance.DepositB.Nano(),
-				Withdrawn:        upd.Channel.Storage.Balance.WithdrawB.Nano(),
-				CommittedBalance: upd.Channel.Storage.Balance.BalanceB.Nano(),
+				Key:            upd.Channel.Storage.KeyB,
+				CommittedSeqno: upd.Channel.Storage.CommittedSeqnoB,
+				WalletAddress:  upd.Channel.Storage.PaymentConfig.DestB.String(),
+				Deposited:      upd.Channel.Storage.Balance.DepositB.Nano(),
+				Withdrawn:      upd.Channel.Storage.Balance.WithdrawB.Nano(),
+				Sent:           upd.Channel.Storage.Balance.SentB.Nano(),
 			}
 			their := db.OnchainState{
-				Key:              upd.Channel.Storage.KeyA,
-				CommittedSeqno:   upd.Channel.Storage.CommittedSeqnoA,
-				WalletAddress:    upd.Channel.Storage.PaymentConfig.DestA.String(),
-				Deposited:        upd.Channel.Storage.Balance.DepositA.Nano(),
-				Withdrawn:        upd.Channel.Storage.Balance.WithdrawA.Nano(),
-				CommittedBalance: upd.Channel.Storage.Balance.BalanceA.Nano(),
+				Key:            upd.Channel.Storage.KeyA,
+				CommittedSeqno: upd.Channel.Storage.CommittedSeqnoA,
+				WalletAddress:  upd.Channel.Storage.PaymentConfig.DestA.String(),
+				Deposited:      upd.Channel.Storage.Balance.DepositA.Nano(),
+				Withdrawn:      upd.Channel.Storage.Balance.WithdrawA.Nano(),
+				Sent:           upd.Channel.Storage.Balance.SentA.Nano(),
 			}
 
 			if isLeft {
