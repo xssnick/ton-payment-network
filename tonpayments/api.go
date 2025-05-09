@@ -555,7 +555,7 @@ func (s *Service) TopupChannel(ctx context.Context, addr *address.Address, amoun
 		"topup-"+channel.Address+"-"+fmt.Sprint(time.Now().UTC().Unix()),
 		db.TopupTask{
 			Address:            channel.Address,
-			AmountNano:         amount.Nano().String(),
+			Amount:             amount.String(),
 			ChannelInitiatedAt: channel.InitAt,
 		}, nil, nil,
 	); err != nil {
@@ -576,13 +576,23 @@ func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, am
 func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amount tlb.Coins) error {
 	var err error
 	fullAmount := new(big.Int).Add(amount.Nano(), channel.OurOnchain.Withdrawn)
-	
+
 	amount, err = tlb.FromNano(fullAmount, amount.Decimals())
 	if err != nil {
 		return fmt.Errorf("failed to convert amount to nano: %w", err)
 	}
 
-	if _, _, _, err := s.getCommitRequest(amount, tlb.ZeroCoins, channel); err != nil {
+	maxTheirWithdraw := new(big.Int).Set(channel.Their.PendingWithdraw)
+	if channel.TheirOnchain.Withdrawn.Cmp(maxTheirWithdraw) > 0 {
+		maxTheirWithdraw.Set(channel.TheirOnchain.Withdrawn)
+	}
+	amountTheir, err := tlb.FromNano(maxTheirWithdraw, amount.Decimals())
+	if err != nil {
+		return fmt.Errorf("failed to convert amount to nano: %w", err)
+	}
+	// 4.2 - 1.3
+
+	if _, _, _, err := s.getCommitRequest(amount, amountTheir, channel); err != nil {
 		return fmt.Errorf("failed to prepare channel commit request: %w", err)
 	}
 
@@ -594,7 +604,7 @@ func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amou
 		"withdraw-"+channel.Address+"-"+fmt.Sprint(channel.InitAt.Unix())+fmt.Sprintf("-%d-%d", channel.Their.State.Data.Seqno, channel.Our.State.Data.Seqno),
 		db.WithdrawTask{
 			Address:            channel.Address,
-			AmountNano:         amount.Nano().String(),
+			Amount:             amount.String(),
 			ChannelInitiatedAt: channel.InitAt,
 		}, nil, nil,
 	); err != nil {
@@ -777,10 +787,10 @@ func (s *Service) RequestCooperativeClose(ctx context.Context, channelAddr strin
 
 func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel *db.Channel) (*payments.CooperativeCommit, *cell.Cell, []byte, error) {
 	if channel.Our.PendingWithdraw.Cmp(ourWithdraw.Nano()) > 0 || channel.OurOnchain.Withdrawn.Cmp(ourWithdraw.Nano()) > 0 {
-		return nil, nil, nil, fmt.Errorf("our withdraw cannot decrease")
+		return nil, nil, nil, fmt.Errorf("our withdraw %s cannot decrease %s %s", ourWithdraw.String(), channel.Our.PendingWithdraw.String(), channel.OurOnchain.Withdrawn.String())
 	}
 	if channel.Their.PendingWithdraw.Cmp(theirWithdraw.Nano()) > 0 || channel.TheirOnchain.Withdrawn.Cmp(theirWithdraw.Nano()) > 0 {
-		return nil, nil, nil, fmt.Errorf("their withdraw cannot decrease")
+		return nil, nil, nil, fmt.Errorf("their withdraw %s cannot decrease %s", theirWithdraw.String(), channel.TheirOnchain.Withdrawn.String())
 	}
 
 	maxOurWithdraw := new(big.Int).Set(channel.Our.PendingWithdraw)
@@ -808,10 +818,10 @@ func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel
 	}
 
 	if ourToWithdraw.Cmp(ourBalance) > 0 {
-		return nil, nil, nil, fmt.Errorf("our withdraw is greater than balance")
+		return nil, nil, nil, fmt.Errorf("our withdraw %s is greater than balance %s ", ourToWithdraw.String(), ourBalance.String())
 	}
 	if theirToWithdraw.Cmp(theirBalance) > 0 {
-		return nil, nil, nil, fmt.Errorf("their withdraw is greater than balance")
+		return nil, nil, nil, fmt.Errorf("their withdraw %s is greater than balance %s", theirToWithdraw.String(), theirBalance.String())
 	}
 
 	var ourReq payments.CooperativeCommit

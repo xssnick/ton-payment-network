@@ -38,13 +38,13 @@ type ChannelUncooperativeCloseTask struct {
 
 type TopupTask struct {
 	Address            string
-	AmountNano         string
+	Amount             string
 	ChannelInitiatedAt time.Time
 }
 
 type WithdrawTask struct {
 	Address            string
-	AmountNano         string
+	Amount             string
 	ChannelInitiatedAt time.Time
 }
 

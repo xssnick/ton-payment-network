@@ -43,7 +43,25 @@ type DB interface {
 
 type Migration func(ctx context.Context, db DB) error
 
-var Migrations = []Migration{}
+var Migrations = []Migration{migrationDeprecateChannels}
+
+func migrationDeprecateChannels(ctx context.Context, db DB) error {
+	list, err := db.GetChannels(ctx, nil, ChannelStateAny)
+	if err != nil {
+		return fmt.Errorf("failed to get channels: %w", err)
+	}
+
+	for _, ch := range list {
+		ch.AcceptingActions = false
+		ch.Status = ChannelStateInactive
+		log.Warn().Msgf("[migration] deprecating channel %s (marked inactive)", ch.Address)
+
+		if err := db.UpdateChannel(ctx, ch); err != nil {
+			return fmt.Errorf("failed to update channel: %w", err)
+		}
+	}
+	return nil
+}
 
 func RunMigrations(db DB) error {
 	version, err := db.GetMigrationVersion(context.Background())
