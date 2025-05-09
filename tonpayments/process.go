@@ -819,11 +819,6 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return nil, fmt.Errorf("failed to serialize their commit channel request: %w", err)
 		}
 
-		// TODO: idempotency
-		if channel.Our.PendingWithdraw.Sign() != 0 || channel.Their.PendingWithdraw.Sign() != 0 {
-			return nil, fmt.Errorf("have pending withdraw")
-		}
-
 		log.Info().Str("address", channel.Address).Msg("received cooperative commit request")
 
 		wOur, wTheir := req.Signed.WithdrawA, req.Signed.WithdrawB

@@ -764,7 +764,12 @@ func (s *Service) taskExecutor() {
 						return nil
 					}
 
-					if err = s.executeTopup(ctx, data.Address, tlb.MustFromDecimal(data.AmountNano, 0)); err != nil {
+					cc, err := s.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
+					if err != nil {
+						return fmt.Errorf("failed to resolve coin config: %w", err)
+					}
+
+					if err = s.executeTopup(ctx, data.Address, tlb.MustFromDecimal(data.Amount, int(cc.Decimals))); err != nil {
 						return fmt.Errorf("failed to execute topup: %w", err)
 					}
 				case "withdraw":
@@ -785,8 +790,22 @@ func (s *Service) taskExecutor() {
 						return nil
 					}
 
-					amount := tlb.MustFromDecimal(data.AmountNano, 0)
-					req, dataCell, _, err := s.getCommitRequest(amount, tlb.ZeroCoins, ch)
+					cc, err := s.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
+					if err != nil {
+						return fmt.Errorf("failed to resolve coin config: %w", err)
+					}
+
+					maxTheirWithdraw := new(big.Int).Set(ch.Their.PendingWithdraw)
+					if ch.TheirOnchain.Withdrawn.Cmp(maxTheirWithdraw) > 0 {
+						maxTheirWithdraw.Set(ch.TheirOnchain.Withdrawn)
+					}
+					amountTheir, err := tlb.FromNano(maxTheirWithdraw, int(cc.Decimals))
+					if err != nil {
+						return fmt.Errorf("failed to convert amount to nano: %w", err)
+					}
+
+					amount := tlb.MustFromDecimal(data.Amount, int(cc.Decimals))
+					req, dataCell, _, err := s.getCommitRequest(amount, amountTheir, ch)
 					if err != nil {
 						if errors.Is(err, ErrNotActive) {
 							// expected channel already closed

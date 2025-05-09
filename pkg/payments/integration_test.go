@@ -61,7 +61,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 	log.Println("wallet:", w.Address().String())
 
 	body, code, data, err := client.GetDeployAsyncChannelParams(chID, true, aKey, bPubKey, ClosingConfig{
-		QuarantineDuration:       20,
+		QuarantineDuration:       30,
 		MisbehaviorFine:          tlb.MustFromTON("0.00"),
 		ConditionalCloseDuration: 30,
 	}, PaymentConfig{
@@ -118,16 +118,16 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
 
-	if ch.Storage.Balance.BalanceA.Nano().Cmp(tlb.MustFromTON("0.17").Nano()) != 0 {
-		t.Fatal("balance incorrect ", ch.Storage.Balance.BalanceA.String(), ch.Storage.Balance.BalanceB.String())
+	if ch.Storage.Balance.DepositA.Nano().Cmp(tlb.MustFromTON("0.17").Nano()) != 0 {
+		t.Fatal("balance incorrect ", ch.Storage.Balance.DepositA.String(), ch.Storage.Balance.DepositB.String())
 	}
 
 	json.NewEncoder(os.Stdout).Encode(ch.Storage)
 	log.Println("balance verified, starting withdraw")
 
 	coc := CooperativeCommit{}
-	coc.Signed.BalanceA = ch.Storage.Balance.BalanceA
-	coc.Signed.BalanceB = ch.Storage.Balance.BalanceB
+	coc.Signed.SentA = ch.Storage.Balance.SentA
+	coc.Signed.SentB = ch.Storage.Balance.SentB
 	coc.Signed.ChannelID = chID
 	coc.Signed.SeqnoA = 1
 	coc.Signed.SeqnoB = 1
@@ -159,8 +159,8 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
 
-	if ch.Storage.Balance.BalanceA.Nano().Cmp(tlb.MustFromTON("0.15").Nano()) != 0 {
-		t.Fatal("balance incorrect after withdraw", ch.Storage.Balance.BalanceA.String(), ch.Storage.Balance.BalanceB.String())
+	if ch.Storage.Balance.WithdrawA.Nano().Cmp(tlb.MustFromTON("0.02").Nano()) != 0 {
+		t.Fatal("withdrawal incorrect after withdraw", ch.Storage.Balance.WithdrawA.String(), ch.Storage.Balance.WithdrawB.String())
 	}
 
 	log.Println("withdraw done, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
@@ -398,7 +398,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 	log.Println("wallet:", w.Address().String())
 
 	body, code, data, err := client.GetDeployAsyncChannelParams(chID, true, aKey, bPubKey, ClosingConfig{
-		QuarantineDuration:       20,
+		QuarantineDuration:       30,
 		MisbehaviorFine:          tlb.MustFromTON("0.00"),
 		ConditionalCloseDuration: 30,
 	}, PaymentConfig{
@@ -469,16 +469,16 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
 
-	if ch.Storage.Balance.BalanceA.Nano().Cmp(tlb.MustFromTON("0.17").Nano()) != 0 {
-		t.Fatal("balance incorrect ", ch.Storage.Balance.BalanceA.String(), ch.Storage.Balance.BalanceB.String())
+	if ch.Storage.Balance.DepositA.Nano().Cmp(tlb.MustFromTON("0.17").Nano()) != 0 {
+		t.Fatal("deposit incorrect ", ch.Storage.Balance.DepositA.String(), ch.Storage.Balance.DepositB.String())
 	}
 
 	json.NewEncoder(os.Stdout).Encode(ch.Storage)
 	log.Println("balance verified, starting withdraw")
 
 	coc := CooperativeCommit{}
-	coc.Signed.BalanceA = ch.Storage.Balance.BalanceA
-	coc.Signed.BalanceB = ch.Storage.Balance.BalanceB
+	coc.Signed.SentA = ch.Storage.Balance.SentA
+	coc.Signed.SentB = ch.Storage.Balance.SentB
 	coc.Signed.ChannelID = chID
 	coc.Signed.SeqnoA = 1
 	coc.Signed.SeqnoB = 1
@@ -510,8 +510,8 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
 
-	if ch.Storage.Balance.BalanceA.Nano().Cmp(tlb.MustFromTON("0.15").Nano()) != 0 {
-		t.Fatal("balance incorrect after withdraw", ch.Storage.Balance.BalanceA.String(), ch.Storage.Balance.BalanceB.String())
+	if ch.Storage.Balance.WithdrawA.Nano().Cmp(tlb.MustFromTON("0.02").Nano()) != 0 {
+		t.Fatal("withdrawal incorrect after withdraw", ch.Storage.Balance.WithdrawA.String(), ch.Storage.Balance.WithdrawB.String())
 	}
 
 	log.Println("withdraw done, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
@@ -811,16 +811,16 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
 
-	if ch.Storage.Balance.BalanceA.Nano().Cmp(big.NewInt(1000)) != 0 {
-		t.Fatal("balance incorrect ", ch.Storage.Balance.BalanceA.String(), ch.Storage.Balance.BalanceB.String())
+	if ch.Storage.Balance.DepositA.Nano().Cmp(big.NewInt(1000)) != 0 {
+		t.Fatal("deposit incorrect ", ch.Storage.Balance.DepositA.String(), ch.Storage.Balance.DepositB.String())
 	}
 
 	json.NewEncoder(os.Stdout).Encode(ch.Storage)
 	log.Println("balance verified, starting withdraw")
 
 	coc := CooperativeCommit{}
-	coc.Signed.BalanceA = ch.Storage.Balance.BalanceA
-	coc.Signed.BalanceB = ch.Storage.Balance.BalanceB
+	coc.Signed.SentA = ch.Storage.Balance.SentA
+	coc.Signed.SentB = ch.Storage.Balance.SentB
 	coc.Signed.ChannelID = chID
 	coc.Signed.SeqnoA = 1
 	coc.Signed.SeqnoB = 1
@@ -852,8 +852,8 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
 
-	if ch.Storage.Balance.BalanceA.Nano().Cmp(big.NewInt(700)) != 0 {
-		t.Fatal("balance incorrect after withdraw", ch.Storage.Balance.BalanceA.String(), ch.Storage.Balance.BalanceB.String())
+	if ch.Storage.Balance.WithdrawA.Nano().Cmp(big.NewInt(300)) != 0 {
+		t.Fatal("balance incorrect after withdraw", ch.Storage.Balance.WithdrawA.String(), ch.Storage.Balance.WithdrawB.String())
 	}
 
 	log.Println("withdraw done, tx:", base64.StdEncoding.EncodeToString(tx.Hash))

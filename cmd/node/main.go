@@ -221,10 +221,20 @@ func main() {
 		}
 	}
 
-	fdb, err := leveldb.NewDB(cfg.DBPath, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey).Public().(ed25519.PublicKey))
+	fdb, freshDb, err := leveldb.NewDB(cfg.DBPath, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey).Public().(ed25519.PublicKey))
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init leveldb")
 		return
+	}
+
+	if freshDb {
+		if err = fdb.SetMigrationVersion(context.Background(), len(db.Migrations)); err != nil {
+			log.Fatal().Err(err).Msg("failed to set initial migration version")
+		}
+	} else {
+		if err = db.RunMigrations(fdb); err != nil {
+			log.Fatal().Err(err).Msg("failed to run migrations")
+		}
 	}
 
 	tr := transport.NewServer(dhtClient, gate, ed25519.NewKeyFromSeed(cfg.ADNLServerKey), ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), cfg.ExternalIP != "")
