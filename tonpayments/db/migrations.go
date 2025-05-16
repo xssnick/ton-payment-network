@@ -93,7 +93,7 @@ func RunMigrations(db DB) error {
 		if err != nil {
 			return err
 		}
-		log.Info().Msgf("migration %d done", i)
+		log.Info().Msgf("migration %d done", i+1)
 	}
 
 	return nil
