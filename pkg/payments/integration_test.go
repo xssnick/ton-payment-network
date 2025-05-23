@@ -229,18 +229,28 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 	}
 	log.Println("uncooperative close started, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
 
-	block, err = api.WaitForBlock(block.SeqNo + 4).GetMasterchainInfo(context.Background())
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+	ok := false
+	for i := 0; i < 10; i++ {
+		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+		}
+
+		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		}
+
+		if ch.Status != ChannelStatusClosureStarted {
+			log.Println("channel status not yet updated, waiting", ch.Status)
+			continue
+		}
+		ok = true
+		break
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
-	}
-
-	if ch.Status != ChannelStatusClosureStarted {
-		t.Fatal("channel status incorrect")
+	if !ok {
+		t.Fatal("channel status not updated")
 	}
 
 	challenge := ChallengeQuarantinedState{
@@ -268,18 +278,28 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 	}
 	log.Println("challenge started, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
 
-	block, err = api.WaitForBlock(block.SeqNo + 4).GetMasterchainInfo(context.Background())
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+	ok = false
+	for i := 0; i < 10; i++ {
+		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+		}
+
+		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		}
+
+		if ch.Status != ChannelStatusSettlingConditionals {
+			log.Println("channel status not yet updated, waiting", ch.Status)
+			continue
+		}
+		ok = true
+		break
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
-	}
-
-	if ch.Status != ChannelStatusSettlingConditionals {
-		t.Fatal("channel status incorrect")
+	if !ok {
+		t.Fatal("channel status not updated")
 	}
 
 	cond := SettleConditionals{
@@ -580,18 +600,28 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 	}
 	log.Println("uncooperative close started, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
 
-	block, err = api.WaitForBlock(block.SeqNo + 4).GetMasterchainInfo(context.Background())
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+	ok := false
+	for i := 0; i < 10; i++ {
+		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+		}
+
+		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		}
+
+		if ch.Status != ChannelStatusClosureStarted {
+			log.Println("channel status not yet updated, waiting", ch.Status)
+			continue
+		}
+		ok = true
+		break
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
-	}
-
-	if ch.Status != ChannelStatusClosureStarted {
-		t.Fatal("channel status incorrect")
+	if !ok {
+		t.Fatal("channel status not updated")
 	}
 
 	challenge := ChallengeQuarantinedState{
@@ -619,18 +649,28 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 	}
 	log.Println("challenge started, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
 
-	block, err = api.WaitForBlock(block.SeqNo + 4).GetMasterchainInfo(context.Background())
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+	ok = false
+	for i := 0; i < 10; i++ {
+		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+		}
+
+		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		}
+
+		if ch.Status != ChannelStatusSettlingConditionals {
+			log.Println("channel status not yet updated, waiting", ch.Status)
+			continue
+		}
+		ok = true
+		break
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
-	}
-
-	if ch.Status != ChannelStatusSettlingConditionals {
-		t.Fatal("channel status incorrect")
+	if !ok {
+		t.Fatal("channel status incorrect", ch.Status)
 	}
 
 	cond := SettleConditionals{
@@ -922,18 +962,28 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 	}
 	log.Println("uncooperative close started, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
 
-	block, err = api.WaitForBlock(block.SeqNo + 4).GetMasterchainInfo(context.Background())
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+	ok := false
+	for i := 0; i < 10; i++ {
+		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+		}
+
+		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		}
+
+		if ch.Status != ChannelStatusClosureStarted {
+			log.Println("channel status not yet updated, waiting", ch.Status)
+			continue
+		}
+		ok = true
+		break
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
-	}
-
-	if ch.Status != ChannelStatusClosureStarted {
-		t.Fatal("channel status incorrect")
+	if !ok {
+		t.Fatal("channel status not updated")
 	}
 
 	challenge := ChallengeQuarantinedState{
@@ -961,18 +1011,28 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 	}
 	log.Println("challenge started, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
 
-	block, err = api.WaitForBlock(block.SeqNo + 4).GetMasterchainInfo(context.Background())
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+	ok = false
+	for i := 0; i < 10; i++ {
+		block, err = api.WaitForBlock(block.SeqNo + 1).GetMasterchainInfo(context.Background())
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
+		}
+
+		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		if err != nil {
+			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
+		}
+
+		if ch.Status != ChannelStatusSettlingConditionals {
+			log.Println("channel status not yet updated, waiting", ch.Status)
+			continue
+		}
+		ok = true
+		break
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
-	if err != nil {
-		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
-	}
-
-	if ch.Status != ChannelStatusSettlingConditionals {
-		t.Fatal("channel status incorrect")
+	if !ok {
+		t.Fatal("channel status not updated")
 	}
 
 	cond := SettleConditionals{
