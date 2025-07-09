@@ -414,7 +414,7 @@ Basic webhook body structure:
 ##### Onchain event structure (type = `onchain-channel-event`)
 ```go
 type Onchain struct {
-	CommittedSeqno uint32 `json:"committed_seqno"`
+	CommittedSeqno uint64 `json:"committed_seqno"`
 	WalletAddress  string `json:"wallet_address"`
 	Deposited      string `json:"deposited"`
 	Withdrawn      string `json:"withdrawn"`

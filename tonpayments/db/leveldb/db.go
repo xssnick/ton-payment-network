@@ -2,7 +2,6 @@ package leveldb
 
 import (
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -18,12 +17,9 @@ import (
 	"time"
 )
 
-type DB struct {
-	path   string
-	_db    *leveldb.DB
-	pubKey ed25519.PublicKey
-
-	onChannelStateChange func(ctx context.Context, ch *db.Channel, statusChanged bool)
+type LevelDB struct {
+	path string
+	_db  *leveldb.DB
 
 	mx sync.Mutex
 }
@@ -55,15 +51,7 @@ func (b batchWrap) Delete(key []byte, wo *opt.WriteOptions) error {
 	return nil
 }
 
-type executor interface {
-	Put(key, value []byte, wo *opt.WriteOptions) error
-	Delete(key []byte, wo *opt.WriteOptions) error
-	Get(key []byte, ro *opt.ReadOptions) (value []byte, err error)
-	Has(key []byte, ro *opt.ReadOptions) (ret bool, err error)
-	NewIterator(slice *util.Range, ro *opt.ReadOptions) iterator.Iterator
-}
-
-func NewDB(path string, pubKey ed25519.PublicKey) (*DB, bool, error) {
+func NewLevelDB(path string) (*LevelDB, bool, error) {
 	isNew := false
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		isNew = true
@@ -74,21 +62,20 @@ func NewDB(path string, pubKey ed25519.PublicKey) (*DB, bool, error) {
 		return nil, false, err
 	}
 
-	return &DB{
-		path:   path,
-		_db:    db,
-		pubKey: pubKey,
+	return &LevelDB{
+		path: path,
+		_db:  db,
 	}, isNew, nil
 }
 
-func (d *DB) Close() {
+func (d *LevelDB) Close() {
 	d._db.Close()
 }
 
 const txKey = "__ldbTx"
 
 // Transaction - kinda ACID achievement using leveldb
-func (d *DB) Transaction(ctx context.Context, f func(ctx context.Context) error) error {
+func (d *LevelDB) Transaction(ctx context.Context, f func(ctx context.Context) error) error {
 	tx, ok := ctx.Value(txKey).(*Tx)
 	if ok {
 		// already inside tx
@@ -124,43 +111,74 @@ func (d *DB) Transaction(ctx context.Context, f func(ctx context.Context) error)
 	return nil
 }
 
-func (d *DB) getExecutor(ctx context.Context) executor {
+type executor interface {
+	Put(key, value []byte, wo *opt.WriteOptions) error
+	Delete(key []byte, wo *opt.WriteOptions) error
+	Get(key []byte, ro *opt.ReadOptions) (value []byte, err error)
+	Has(key []byte, ro *opt.ReadOptions) (ret bool, err error)
+	NewIterator(slice *util.Range, ro *opt.ReadOptions) iterator.Iterator
+}
+
+type reverseIterator struct {
+	iterator.Iterator
+	first bool
+}
+
+func (r *reverseIterator) Next() bool {
+	if r.first {
+		r.first = false
+		return r.Valid()
+	}
+	return r.Iterator.Prev()
+}
+
+type Executor struct {
+	e executor
+}
+
+func (e Executor) Put(key, value []byte) error {
+	return e.e.Put(key, value, &opt.WriteOptions{
+		Sync: true,
+	})
+}
+
+func (e Executor) Delete(key []byte) error {
+	return e.e.Delete(key, &opt.WriteOptions{
+		Sync: true,
+	})
+}
+
+func (e Executor) Get(key []byte) (value []byte, err error) {
+	value, err = e.e.Get(key, nil)
+	if err != nil && errors.Is(err, leveldb.ErrNotFound) {
+		return nil, db.ErrNotFound
+	}
+	return
+}
+
+func (e Executor) Has(key []byte) (ret bool, err error) {
+	return e.e.Has(key, nil)
+}
+
+func (e Executor) NewIterator(p []byte, forward bool) db.Iterator {
+	it := e.e.NewIterator(util.BytesPrefix(p), nil)
+
+	if !forward {
+		it.Last()
+		return &reverseIterator{Iterator: it, first: true}
+	}
+
+	return it
+}
+
+func (d *LevelDB) GetExecutor(ctx context.Context) db.Executor {
 	if tx, ok := ctx.Value(txKey).(*Tx); ok {
-		return tx
+		return &Executor{tx}
 	}
-	return d._db
+	return &Executor{d._db}
 }
 
-// GetMigrationVersion retrieves the current migration version from the DB.
-func (d *DB) GetMigrationVersion(ctx context.Context) (int, error) {
-	exec := d.getExecutor(ctx)
-	value, err := exec.Get([]byte("__migration_version"), nil)
-	if errors.Is(err, leveldb.ErrNotFound) {
-		return 0, nil // Default to version 0 if no version is stored
-	}
-	if err != nil {
-		return 0, fmt.Errorf("failed to get migration version: %w", err)
-	}
-
-	var version int
-	if _, err := fmt.Sscanf(string(value), "%d", &version); err != nil {
-		return 0, fmt.Errorf("failed to parse migration version: %w", err)
-	}
-
-	return version, nil
-}
-
-// SetMigrationVersion sets the migration version in the DB.
-func (d *DB) SetMigrationVersion(ctx context.Context, version int) error {
-	exec := d.getExecutor(ctx)
-	err := exec.Put([]byte("__migration_version"), []byte(fmt.Sprintf("%d", version)), &opt.WriteOptions{Sync: true})
-	if err != nil {
-		return fmt.Errorf("failed to set migration version: %w", err)
-	}
-	return nil
-}
-
-func (d *DB) Backup() error {
+func (d *LevelDB) Backup() error {
 	d.mx.Lock()
 	defer d.mx.Unlock()
 

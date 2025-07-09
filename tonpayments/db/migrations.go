@@ -2,56 +2,45 @@ package db
 
 import (
 	"context"
-	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"github.com/rs/zerolog/log"
-	"time"
 )
 
-type DB interface {
-	Transaction(ctx context.Context, f func(ctx context.Context) error) error
-	CreateTask(ctx context.Context, poolName, typ, queue, id string, data any, executeAfter, executeTill *time.Time) error
-	AcquireTask(ctx context.Context, poolName string) (*Task, error)
-	RetryTask(ctx context.Context, task *Task, reason string, retryAt time.Time) error
-	CompleteTask(ctx context.Context, poolName string, task *Task) error
-	ListActiveTasks(ctx context.Context, poolName string) ([]*Task, error)
+type Migration func(ctx context.Context, db *DB) error
 
-	GetVirtualChannelMeta(ctx context.Context, key []byte) (*VirtualChannelMeta, error)
-	UpdateVirtualChannelMeta(ctx context.Context, meta *VirtualChannelMeta) error
-	CreateVirtualChannelMeta(ctx context.Context, meta *VirtualChannelMeta) error
+var Migrations = []Migration{migrationDeprecateChannels, migrationChangeUrgentPeerKey, migrationDeprecateChannels}
 
-	SetBlockOffset(ctx context.Context, seqno uint32) error
-	GetBlockOffset(ctx context.Context) (*BlockOffset, error)
+func migrationChangeUrgentPeerKey(ctx context.Context, db *DB) error {
+	peers, err := db.GetUrgentPeers(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get urgent peers: %w", err)
+	}
 
-	GetChannels(ctx context.Context, key ed25519.PublicKey, status ChannelStatus) ([]*Channel, error)
-	CreateChannel(ctx context.Context, channel *Channel) error
-	GetChannel(ctx context.Context, addr string) (*Channel, error)
-	UpdateChannel(ctx context.Context, channel *Channel) error
-	SetOnChannelUpdated(f func(ctx context.Context, ch *Channel, statusChanged bool))
-	GetOnChannelUpdated() func(ctx context.Context, ch *Channel, statusChanged bool)
+	for _, peer := range peers {
+		if err = db.RemoveUrgentPeer(ctx, peer); err != nil {
+			return fmt.Errorf("failed to remove urgent peer: %w", err)
+		}
 
-	GetUrgentPeers(ctx context.Context) ([][]byte, error)
-	AddUrgentPeer(ctx context.Context, peerAddress []byte) error
-
-	Close()
-
-	SetMigrationVersion(ctx context.Context, version int) error
-	GetMigrationVersion(ctx context.Context) (int, error)
-
-	Backup() error
+		if err = db.AddUrgentPeer(ctx, peer); err != nil {
+			return fmt.Errorf("failed to add urgent peer: %w", err)
+		}
+		log.Warn().Msgf("[migration] migrated urgent peer %s", base64.StdEncoding.EncodeToString(peer))
+	}
+	return nil
 }
 
-type Migration func(ctx context.Context, db DB) error
-
-var Migrations = []Migration{migrationDeprecateChannels}
-
-func migrationDeprecateChannels(ctx context.Context, db DB) error {
+func migrationDeprecateChannels(ctx context.Context, db *DB) error {
 	list, err := db.GetChannels(ctx, nil, ChannelStateAny)
 	if err != nil {
 		return fmt.Errorf("failed to get channels: %w", err)
 	}
 
 	for _, ch := range list {
+		if ch.Status == ChannelStateInactive && ch.AcceptingActions == false {
+			continue
+		}
+
 		ch.AcceptingActions = false
 		ch.Status = ChannelStateInactive
 		log.Warn().Msgf("[migration] deprecating channel %s (marked inactive)", ch.Address)
@@ -63,7 +52,7 @@ func migrationDeprecateChannels(ctx context.Context, db DB) error {
 	return nil
 }
 
-func RunMigrations(db DB) error {
+func RunMigrations(db *DB) error {
 	version, err := db.GetMigrationVersion(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to get migration version: %w", err)
@@ -71,7 +60,7 @@ func RunMigrations(db DB) error {
 
 	if version < len(Migrations) {
 		log.Info().Msgf("required migrations from %d to %d, backuping database...", version, len(Migrations))
-		if err = db.Backup(); err != nil {
+		if err = db.storage.Backup(); err != nil {
 			return fmt.Errorf("failed to backup db: %w", err)
 		}
 		log.Info().Msg("backup completed, starting migrations")

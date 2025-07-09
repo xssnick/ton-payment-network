@@ -1,4 +1,4 @@
-package leveldb
+package db
 
 import (
 	"context"
@@ -6,23 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/syndtr/goleveldb/leveldb/opt"
-	"github.com/xssnick/ton-payment-network/tonpayments/db"
 )
 
-func (d *DB) CreateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChannelMeta) error {
+func (d *DB) CreateVirtualChannelMeta(ctx context.Context, meta *VirtualChannelMeta) error {
 	key := []byte("vch:" + base64.StdEncoding.EncodeToString(meta.Key))
 
 	return d.Transaction(ctx, func(ctx context.Context) error {
-		tx := d.getExecutor(ctx)
+		tx := d.storage.GetExecutor(ctx)
 
-		has, err := tx.Has(key, nil)
+		has, err := tx.Has(key)
 		if err != nil {
 			return fmt.Errorf("failed to check existance: %w", err)
 		}
 		if has {
-			return db.ErrAlreadyExists
+			return ErrAlreadyExists
 		}
 
 		data, err := json.Marshal(meta)
@@ -30,27 +27,25 @@ func (d *DB) CreateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChann
 			return fmt.Errorf("failed to encode json: %w", err)
 		}
 
-		if err = tx.Put(key, data, &opt.WriteOptions{
-			Sync: true,
-		}); err != nil {
+		if err = tx.Put(key, data); err != nil {
 			return fmt.Errorf("failed to put: %w", err)
 		}
 		return nil
 	})
 }
 
-func (d *DB) UpdateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChannelMeta) error {
+func (d *DB) UpdateVirtualChannelMeta(ctx context.Context, meta *VirtualChannelMeta) error {
 	key := []byte("vch:" + base64.StdEncoding.EncodeToString(meta.Key))
 
 	return d.Transaction(ctx, func(ctx context.Context) error {
-		tx := d.getExecutor(ctx)
+		tx := d.storage.GetExecutor(ctx)
 
-		has, err := tx.Has(key, nil)
+		has, err := tx.Has(key)
 		if err != nil {
 			return fmt.Errorf("failed to check existance: %w", err)
 		}
 		if !has {
-			return db.ErrNotFound
+			return ErrNotFound
 		}
 
 		data, err := json.Marshal(meta)
@@ -58,27 +53,25 @@ func (d *DB) UpdateVirtualChannelMeta(ctx context.Context, meta *db.VirtualChann
 			return fmt.Errorf("failed to encode json: %w", err)
 		}
 
-		if err = tx.Put(key, data, &opt.WriteOptions{
-			Sync: true,
-		}); err != nil {
+		if err = tx.Put(key, data); err != nil {
 			return fmt.Errorf("failed to put: %w", err)
 		}
 		return nil
 	})
 }
 
-func (d *DB) GetVirtualChannelMeta(ctx context.Context, key []byte) (*db.VirtualChannelMeta, error) {
-	tx := d.getExecutor(ctx)
+func (d *DB) GetVirtualChannelMeta(ctx context.Context, key []byte) (*VirtualChannelMeta, error) {
+	tx := d.storage.GetExecutor(ctx)
 
-	data, err := tx.Get([]byte("vch:"+base64.StdEncoding.EncodeToString(key)), nil)
+	data, err := tx.Get([]byte("vch:" + base64.StdEncoding.EncodeToString(key)))
 	if err != nil {
-		if errors.Is(err, leveldb.ErrNotFound) {
-			return nil, db.ErrNotFound
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("failed to get from db: %w", err)
 	}
 
-	var vc *db.VirtualChannelMeta
+	var vc *VirtualChannelMeta
 	if err = json.Unmarshal(data, &vc); err != nil {
 		return nil, fmt.Errorf("failed to decode json data: %w", err)
 	}

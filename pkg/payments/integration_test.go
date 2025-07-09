@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	client2 "github.com/xssnick/ton-payment-network/tonpayments/chain/client"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-go/tlb"
@@ -38,7 +39,7 @@ var api = func() ton.APIClientWrapped {
 var _seed = strings.Split(os.Getenv("WALLET_SEED"), " ")
 
 func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
-	client := NewPaymentChannelClient(api)
+	client := NewPaymentChannelClient(client2.NewTON(api))
 
 	chID, err := RandomChannelID()
 	if err != nil {
@@ -85,7 +86,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 	}
 
-	ch, err := client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err := client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -113,7 +114,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 	}
 	log.Println("top up done, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -154,7 +155,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -236,7 +237,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 		}
 
-		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 		}
@@ -285,7 +286,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 		}
 
-		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 		}
@@ -342,7 +343,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 		}
 
-		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 		}
@@ -380,7 +381,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -395,7 +396,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 	master := address.MustParseAddr("EQBo66DB8ylazO91EErTqbKJervBx_DFjQdP8jqKLYmuDrY6")
 	jettonClient := jetton.NewJettonMasterClient(api, master)
 
-	client := NewPaymentChannelClient(api)
+	client := NewPaymentChannelClient(client2.NewTON(api))
 
 	chID, err := RandomChannelID()
 	if err != nil {
@@ -446,7 +447,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 	}
 
-	ch, err := client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err := client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -484,7 +485,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 	}
 	log.Println("jetton top up done, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -525,7 +526,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -607,7 +608,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 		}
 
-		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 		}
@@ -656,7 +657,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 		}
 
-		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 		}
@@ -713,7 +714,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 		}
 
-		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 		}
@@ -751,7 +752,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -765,7 +766,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 	const ecID = 100
 
-	client := NewPaymentChannelClient(api)
+	client := NewPaymentChannelClient(client2.NewTON(api))
 
 	chID, err := RandomChannelID()
 	if err != nil {
@@ -814,7 +815,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 	}
 
-	ch, err := client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err := client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -846,7 +847,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 	}
 	log.Println("ec top up done, tx:", base64.StdEncoding.EncodeToString(tx.Hash))
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -887,7 +888,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}
@@ -969,7 +970,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 		}
 
-		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 		}
@@ -1018,7 +1019,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 		}
 
-		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 		}
@@ -1075,7 +1076,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 			t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 		}
 
-		ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+		ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 		if err != nil {
 			t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 		}
@@ -1113,7 +1114,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 		t.Fatal(fmt.Errorf("failed to wait for block: %w", err))
 	}
 
-	ch, err = client.GetAsyncChannel(context.Background(), block, channelAddr, true)
+	ch, err = client.GetAsyncChannel(context.Background(), channelAddr, true)
 	if err != nil {
 		t.Fatal(fmt.Errorf("failed to get channel: %w", err))
 	}

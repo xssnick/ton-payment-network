@@ -5,7 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
-	"github.com/xssnick/tonutils-go/adnl"
+	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
@@ -36,13 +36,13 @@ func SignState(amount tlb.Coins, signKey ed25519.PrivateKey, to ed25519.PublicKe
 	}
 	data := cll.ToBOC()
 
-	sharedKey, err := adnl.SharedKey(signKey, to)
+	sharedKey, err := keys.SharedKey(signKey, to)
 	if err != nil {
 		return VirtualChannelState{}, nil, fmt.Errorf("failed to generate shared key: %w", err)
 	}
 	pub := signKey.Public().(ed25519.PublicKey)
 
-	stream, err := adnl.BuildSharedCipher(sharedKey, pub)
+	stream, err := keys.BuildSharedCipher(sharedKey, pub)
 	if err != nil {
 		return VirtualChannelState{}, nil, fmt.Errorf("failed to init cipher: %w", err)
 	}
@@ -57,13 +57,13 @@ func ParseState(data []byte, to ed25519.PrivateKey) (ed25519.PublicKey, VirtualC
 		return nil, VirtualChannelState{}, fmt.Errorf("incorrect len of state")
 	}
 
-	sharedKey, err := adnl.SharedKey(to, data[:32])
+	sharedKey, err := keys.SharedKey(to, data[:32])
 	if err != nil {
 		return nil, VirtualChannelState{}, fmt.Errorf("failed to generate shared key: %w", err)
 	}
 
 	var payload = data[32:]
-	stream, err := adnl.BuildSharedCipher(sharedKey, data[:32])
+	stream, err := keys.BuildSharedCipher(sharedKey, data[:32])
 	if err != nil {
 		return nil, VirtualChannelState{}, fmt.Errorf("failed to init cipher: %w", err)
 	}

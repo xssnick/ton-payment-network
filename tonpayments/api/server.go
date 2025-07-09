@@ -39,6 +39,7 @@ type Service interface {
 	TopupChannel(ctx context.Context, addr *address.Address, amount tlb.Coins) error
 	RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins) error
 	ResolveCoinConfig(jetton string, ecID uint32, onlyEnabled bool) (*config.CoinConfig, error)
+	GetPrivateKey() ed25519.PrivateKey
 }
 
 type Success struct {

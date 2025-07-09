@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
@@ -29,14 +30,40 @@ type VirtualChannelEvent struct {
 	VirtualChannel any                     `json:"virtual_channel"`
 }
 
+type ChannelHistoryActionTransferInData struct {
+	Amount string
+	From   []byte
+}
+
+type ChannelHistoryActionTransferOutData struct {
+	Amount string
+	To     []byte
+}
+
+type ChannelHistoryActionAmountData struct {
+	Amount string
+}
+
 type ChannelStatus uint8
 type VirtualChannelStatus uint8
+type ChannelHistoryEventType uint8
 
 const (
 	ChannelStateInactive ChannelStatus = iota
 	ChannelStateActive
 	ChannelStateClosing
 	ChannelStateAny ChannelStatus = 100
+)
+
+const (
+	ChannelHistoryActionTopup ChannelHistoryEventType = iota + 1
+	ChannelHistoryActionTopupCapacity
+	ChannelHistoryActionWithdraw
+	ChannelHistoryActionWithdrawCapacity
+	ChannelHistoryActionTransferIn
+	ChannelHistoryActionTransferOut
+	ChannelHistoryActionUncooperativeCloseStarted
+	ChannelHistoryActionClosed
 )
 
 const (
@@ -58,6 +85,7 @@ type VirtualChannelMetaSide struct {
 	Fee                   string
 	UncooperativeDeadline time.Time
 	SafeDeadline          time.Time
+	SenderKey             []byte
 }
 
 type VirtualChannelMeta struct {
@@ -72,6 +100,12 @@ type VirtualChannelMeta struct {
 	UpdatedAt time.Time
 }
 
+type ChannelHistoryItem struct {
+	At     time.Time `json:"-"`
+	Action ChannelHistoryEventType
+	Data   json.RawMessage
+}
+
 type Channel struct {
 	ID                     []byte
 	Address                string
@@ -84,6 +118,7 @@ type Channel struct {
 	SafeOnchainClosePeriod int64
 
 	AcceptingActions bool
+	WebPeer          bool
 
 	Our   Side
 	Their Side
@@ -100,7 +135,7 @@ type Channel struct {
 
 type OnchainState struct {
 	Key            ed25519.PublicKey
-	CommittedSeqno uint32
+	CommittedSeqno uint64
 	WalletAddress  string
 	Deposited      *big.Int
 	Withdrawn      *big.Int
@@ -308,4 +343,27 @@ func (ch *VirtualChannelMeta) AddKnownResolve(state *payments.VirtualChannelStat
 
 	ch.LastKnownResolve = cl.ToBOC()
 	return nil
+}
+
+func (h *ChannelHistoryItem) ParseData() any {
+	var dst any
+
+	switch h.Action {
+	case ChannelHistoryActionTopup,
+		ChannelHistoryActionTopupCapacity,
+		ChannelHistoryActionWithdraw,
+		ChannelHistoryActionWithdrawCapacity:
+		dst = &ChannelHistoryActionAmountData{}
+	case ChannelHistoryActionTransferIn:
+		dst = &ChannelHistoryActionTransferInData{}
+	case ChannelHistoryActionTransferOut:
+		dst = &ChannelHistoryActionTransferOutData{}
+	default:
+		return nil
+	}
+
+	if err := json.Unmarshal(h.Data, dst); err != nil {
+		return nil
+	}
+	return dst
 }
