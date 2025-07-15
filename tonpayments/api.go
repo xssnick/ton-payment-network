@@ -553,7 +553,7 @@ func (s *Service) TopupChannel(ctx context.Context, addr *address.Address, amoun
 	}
 
 	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "topup", channel.Address+"-topup",
-		"topup-"+channel.Address+"-"+fmt.Sprint(time.Now().UTC().Unix()),
+		"topup-"+channel.Address+"-"+channel.OurOnchain.Deposited.String()+"-"+fmt.Sprint(channel.InitAt.Unix()),
 		db.TopupTask{
 			Address:            channel.Address,
 			Amount:             amount.String(),
