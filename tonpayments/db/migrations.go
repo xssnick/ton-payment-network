@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 )
 
 type Migration func(ctx context.Context, db *DB) error

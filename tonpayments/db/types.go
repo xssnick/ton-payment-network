@@ -253,7 +253,7 @@ func (s *Side) MarshalJSON() ([]byte, error) {
 	return []byte(strconv.Quote(base64.StdEncoding.EncodeToString(c.ToBOC()))), nil
 }
 
-func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
+func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, *big.Int, error) {
 	// TODO: cache calculated
 
 	ch.mx.RLock()
@@ -272,26 +272,35 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 
 	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), new(big.Int).Sub(s1chain.Deposited, maxWithdraw))
 	balance = balance.Sub(balance, s1.State.Data.Sent.Nano())
+	
+	locked := big.NewInt(0)
+	if s1.PendingWithdraw.Sign() > 0 {
+		locked = locked.Sub(s1.PendingWithdraw, s1chain.Withdrawn)
+	}
 
 	if s1.Conditionals.IsEmpty() {
-		return balance, nil
+		return balance, locked, nil
 	}
 
 	all, err := s1.Conditionals.LoadAll()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load conditions: %w", err)
+		return nil, nil, fmt.Errorf("failed to load conditions: %w", err)
 	}
 
 	for _, kv := range all {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse condition %d: %w", kv.Key.MustLoadUInt(32), err)
+			return nil, nil, fmt.Errorf("failed to parse condition %d: %w", kv.Key.MustLoadUInt(32), err)
 		}
 		balance = balance.Sub(balance, vch.Capacity)
 		balance = balance.Sub(balance, vch.Fee)
 		balance = balance.Add(balance, vch.Prepay)
+
+		locked = locked.Add(locked, vch.Capacity)
+		locked = locked.Add(locked, vch.Fee)
+		locked = locked.Sub(locked, vch.Prepay)
 	}
-	return balance, nil
+	return balance, locked, nil
 }
 
 func (ch *VirtualChannelMeta) GetKnownResolve() *payments.VirtualChannelState {

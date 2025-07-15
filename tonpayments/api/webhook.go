@@ -8,7 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"net/http"
 	"time"
 )

@@ -5,7 +5,7 @@ package chain
 import (
 	"context"
 	"errors"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments"
 	"github.com/xssnick/ton-payment-network/tonpayments/chain/client"

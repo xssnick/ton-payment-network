@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
@@ -632,6 +632,10 @@ func (s *Service) taskExecutor() {
 					}
 					defer unlock()
 
+					if ch.Status != db.ChannelStateActive {
+						return nil
+					}
+
 					if ch.InitAt.Before(data.ChannelInitiatedAt) {
 						// expected channel already closed
 						return nil
@@ -790,6 +794,10 @@ func (s *Service) taskExecutor() {
 					ch, err := s.GetChannel(ctx, data.Address)
 					if err != nil {
 						return fmt.Errorf("failed to get channel: %w", err)
+					}
+
+					if ch.Status != db.ChannelStateActive {
+						return nil
 					}
 
 					if ch.InitAt.Before(data.ChannelInitiatedAt) {

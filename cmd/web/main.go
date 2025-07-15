@@ -7,7 +7,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/tonpayments"
 	"github.com/xssnick/ton-payment-network/tonpayments/chain"
 	"github.com/xssnick/ton-payment-network/tonpayments/chain/client"
@@ -89,7 +89,8 @@ func main() {
 
 		amt, err := tlb.FromDecimal(args[0].String(), 9)
 		if err != nil {
-			return js.ValueOf("failed to parse amount: " + err.Error())
+			return js.ValueOf("")
+			// return js.ValueOf("failed to parse amount: " + err.Error())
 		}
 
 		feeAmt := new(big.Int).Div(amt.Nano(), big.NewInt(100*100))
@@ -100,7 +101,12 @@ func main() {
 
 		addr, err := base64.StdEncoding.DecodeString(args[1].String())
 		if err != nil {
-			return js.ValueOf(err.Error())
+			return js.ValueOf("")
+			//return js.ValueOf(err.Error())
+		}
+
+		if len(addr) != 32 {
+			return js.ValueOf("")
 		}
 
 		fullAmt, err := sendTransfer(amt, tlb.MustFromNano(feeAmt, 9), [][]byte{sPub, addr}, true)
@@ -296,6 +302,7 @@ func main() {
 				arr := js.Global().Get("Array").New(len(events))
 				for i, e := range events {
 					obj := js.Global().Get("Object").New()
+					obj.Set("id", fmt.Sprint(e.At.UnixNano()))
 					obj.Set("action", int(e.Action))
 					obj.Set("timestamp", e.At.Format("2006-01-02 15:04"))
 
@@ -399,10 +406,10 @@ func start(peerKey, channelKey []byte) {
 	}
 	Config = cfg
 
-	cfg.ChannelConfig.BufferTimeToCommit = 60
-	cfg.ChannelConfig.QuarantineDurationSec = 60
-	cfg.ChannelConfig.ConditionalCloseDurationSec = 90
-	cfg.ChannelConfig.MinSafeVirtualChannelTimeoutSec = 60
+	// cfg.ChannelConfig.BufferTimeToCommit = 60
+	// cfg.ChannelConfig.QuarantineDurationSec = 60
+	// cfg.ChannelConfig.ConditionalCloseDurationSec = 90
+	// cfg.ChannelConfig.MinSafeVirtualChannelTimeoutSec = 60
 	cfg.ChannelConfig.SupportedCoins.Ton.BalanceControl = nil
 
 	if err = config.SaveConfig(cfg, "payments-config"); err != nil {
@@ -451,13 +458,13 @@ func start(peerKey, channelKey []byte) {
 			return
 		}
 
-		balance, err := ch.CalcBalance(false)
+		balance, locked, err := ch.CalcBalance(false)
 		if err != nil {
 			println("failed to calc balance: " + err.Error())
 			return
 		}
 
-		capacity, err := ch.CalcBalance(true)
+		capacity, _, err := ch.CalcBalance(true)
 		if err != nil {
 			println("failed to calc capacity: " + err.Error())
 			return
@@ -467,6 +474,7 @@ func start(peerKey, channelKey []byte) {
 			"active":   ch.Status == db.ChannelStateActive,
 			"balance":  tlb.MustFromNano(balance, int(cc.Decimals)).String(),
 			"capacity": tlb.MustFromNano(capacity, int(cc.Decimals)).String(),
+			"locked":   tlb.MustFromNano(locked, int(cc.Decimals)).String(),
 			"address":  ch.Address,
 		}
 

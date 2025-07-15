@@ -9,10 +9,12 @@ interface PaymentChannelEvent {
     active: boolean;
     balance: string;
     capacity: string;
+    locked: string;
     address: string;
 }
 
 export interface PaymentChannelHistoryItem {
+    id: string;
     action: number;
     timestamp: string;
     amount: string | undefined;
@@ -27,6 +29,7 @@ declare global {
         onPaymentChannelUpdated: (ev: PaymentChannelEvent) => void;
         topupChannel: (amount: string) => void;
         sendTransfer: (amount: string, to: string) => string;
+        estimateTransfer: (amount: string, to: string) => string;
         getChannelHistory: (limit: number) => Promise<PaymentChannelHistoryItem[] | null>;
         deployChannel: () => void;
         withdrawChannel: (amount: string) => void;
@@ -40,7 +43,7 @@ const root = ReactDOM.createRoot(
 
 root.render(
   <React.StrictMode>
-      <TonConnectUIProvider uiPreferences={{ theme: THEME.LIGHT }} manifestUrl="https://bags.tonutils.com/tc-local.json">
+      <TonConnectUIProvider uiPreferences={{ theme: THEME.LIGHT }} manifestUrl={window.location.origin+ "/tonconnect-manifest.json"}>
         <App />
       </TonConnectUIProvider>
   </React.StrictMode>

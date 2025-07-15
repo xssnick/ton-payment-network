@@ -9,8 +9,8 @@ require (
 	github.com/prometheus/client_golang v1.22.0
 	github.com/rs/zerolog v1.34.0
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/xssnick/tonutils-go v1.13.1-0.20250708224150-51c7f15f0827
-	golang.org/x/crypto v0.39.0
+	github.com/xssnick/tonutils-go v1.14.0
+	golang.org/x/crypto v0.40.0
 )
 
 require (
@@ -27,7 +27,7 @@ require (
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/sigurn/crc16 v0.0.0-20240131213347-83fcde1e29d1 // indirect
 	github.com/xssnick/raptorq v1.0.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/sys v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.5 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )

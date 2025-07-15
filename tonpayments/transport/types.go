@@ -26,7 +26,7 @@ func init() {
 
 	tl.Register(Decision{}, "payments.decision agreed:Bool reason:string signature:bytes = payments.Decision")
 	tl.Register(ProposalDecision{}, "payments.proposalDecision agreed:Bool reason:string signedState:bytes = payments.ProposalDecision")
-	tl.Register(ChannelConfigDecision{}, "payments.channelConfig ok:Bool walletAddr:int256 reason:string proxyFee:bytes = payments.ChannelConfigDecision")
+	tl.Register(ChannelConfigDecision{}, "payments.channelConfig ok:Bool walletAddr:int256 reason:string proxyAllowed:bool proxyMinFee:bytes proxyMaxCap:bytes proxyPercentFeeFloat:long = payments.ChannelConfigDecision")
 	tl.Register(AuthenticateToSign{}, "payments.authenticateToSign a:int256 b:int256 timestamp:long = payments.AuthenticateToSign")
 	tl.Register(NodeAddress{}, "payments.nodeAddress adnl_addr:int256 = payments.NodeAddress")
 

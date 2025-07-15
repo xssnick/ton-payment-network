@@ -211,7 +211,9 @@ type executor interface {
 	NewIterator(p []byte, forward bool) Iterator
 }
 
-type snapshotExec struct{ tx js.Value }
+type snapshotExec struct {
+	tx js.Value
+}
 
 func (e snapshotExec) Get(k []byte) ([]byte, error) {
 	req := e.tx.Call("get", bytesToJS(k))
@@ -345,8 +347,12 @@ func (e snapshotExec) NewIterator(prefix []byte, forward bool) Iterator {
 	req.Set("onerror", onErr)
 
 	return &sliceIter{
-		onOk:  onOk,
-		onErr: onErr,
+		release: func() {
+			req.Set("onsuccess", js.Undefined())
+			req.Set("onerror", js.Undefined())
+			onOk.Release()
+			onErr.Release()
+		},
 		chRes: chRes,
 		chErr: chErr,
 	}
@@ -365,11 +371,9 @@ func (b *batchWrap) Delete(key []byte) error {
 }
 
 type sliceIter struct {
-	prefix       []byte
 	currentKey   []byte
 	currentValue []byte
-	onOk         js.Func
-	onErr        js.Func
+	release      func()
 	chRes        chan js.Value
 	chErr        chan error
 }
@@ -400,8 +404,7 @@ func (it *sliceIter) Value() []byte {
 }
 
 func (it *sliceIter) Release() {
-	it.onOk.Release()
-	it.onErr.Release()
+	it.release()
 }
 
 func (it *sliceIter) Error() error { return nil }

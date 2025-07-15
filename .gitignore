@@ -7,3 +7,4 @@ payment-node
 build
 *.wasm
 *.gz
+*.br

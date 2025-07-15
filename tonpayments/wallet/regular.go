@@ -19,6 +19,8 @@ import (
 type Wallet struct {
 	apiClient wallet.TonAPI
 	wallet    *wallet.Wallet
+
+	firstTxDone bool
 }
 
 func InitWallet(apiClient wallet.TonAPI, key ed25519.PrivateKey) (*Wallet, error) {
@@ -110,7 +112,7 @@ func (w *Wallet) DeployContractWaitTransaction(ctx context.Context, amt tlb.Coin
 }
 
 func (w *Wallet) doTransactions(ctx context.Context, msgList []*wallet.Message, _ string) ([]byte, error) {
-	msg, err := w.wallet.PrepareExternalMessageForMany(ctx, false, msgList)
+	msg, err := w.wallet.PrepareExternalMessageForMany(ctx, !w.firstTxDone, msgList)
 	if err != nil {
 		return nil, fmt.Errorf("failed to preapre tx: %w", err)
 	}
@@ -120,5 +122,6 @@ func (w *Wallet) doTransactions(ctx context.Context, msgList []*wallet.Message, 
 		return nil, fmt.Errorf("failed to send tx: %w", err)
 	}
 
+	w.firstTxDone = true
 	return msg.NormalizedHash(), nil
 }

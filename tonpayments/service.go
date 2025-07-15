@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/chain/client"
 	"github.com/xssnick/ton-payment-network/tonpayments/config"
@@ -368,7 +368,7 @@ func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ 
 
 	log.Debug().Str("address", ch.Address).Msg("balance control callback triggered")
 
-	balance, err := ch.CalcBalance(false)
+	balance, _, err := ch.CalcBalance(false)
 	if err != nil {
 		log.Error().Str("address", ch.Address).Err(err).Msg("failed to calc our balance in balance controller")
 		return
@@ -439,7 +439,7 @@ func (s *Service) ReviewChannelConfig(prop transport.ProposeChannelConfig) (*add
 	if prop.QuarantineDuration != s.cfg.QuarantineDurationSec ||
 		prop.ConditionalCloseDuration != s.cfg.ConditionalCloseDurationSec ||
 		new(big.Int).SetBytes(prop.MisbehaviorFine).Cmp(ourFine.Nano()) != 0 {
-		return nil, config.CoinConfig{}, fmt.Errorf("node wants different channel config: quarantine %d, cond close %d, fine %s; if you wnat to deploy", s.cfg.QuarantineDurationSec, s.cfg.ConditionalCloseDurationSec, ourFine.String())
+		return nil, config.CoinConfig{}, fmt.Errorf("node wants different channel config: quarantine %d, cond close %d, fine %s; if you want to deploy", s.cfg.QuarantineDurationSec, s.cfg.ConditionalCloseDurationSec, ourFine.String())
 	}
 
 	return s.wallet.WalletAddress(), cfg, nil
@@ -529,13 +529,14 @@ func (s *Service) Start() {
 				continue
 			}
 		case ChannelUpdatedEvent:
+			channelJson, _ := json.Marshal(upd.Channel)
 			ok, isLeft := s.verifyChannel(upd.Channel)
 			if !ok {
-				log.Debug().Any("channel", upd.Channel).Msg("not verified")
+				log.Debug().Str("channel", string(channelJson)).Msg("not verified")
 				continue
 			}
 
-			log.Debug().Any("channel", upd.Channel).Msg("verified, processing update")
+			log.Debug().Str("channel", string(channelJson)).Msg("verified, processing update")
 
 		retry:
 			var err error
@@ -867,12 +868,12 @@ func (s *Service) DebugPrintVirtualChannels() {
 		}
 
 		inBalance, outBalance := "?", "?"
-		val, err := ch.CalcBalance(false)
+		val, _, err := ch.CalcBalance(false)
 		if err == nil {
 			outBalance = tlb.MustFromNano(val, int(cc.Decimals)).String()
 		}
 
-		val, err = ch.CalcBalance(true)
+		val, _, err = ch.CalcBalance(true)
 		if err == nil {
 			inBalance = tlb.MustFromNano(val, int(cc.Decimals)).String()
 		}
@@ -903,7 +904,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 				Str("till_safe_deadline", (till-time.Duration(ch.SafeOnchainClosePeriod)*time.Second).String()).
 				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
 				Str("prepaid", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
-				Hex("key", vch.Key).
+				Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
 				Msg("virtual from us")
 		}
 		for _, kv := range ch.Their.Conditionals.All() {
@@ -914,7 +915,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 				Str("till_deadline", time.Unix(vch.Deadline, 0).Sub(time.Now()).String()).
 				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
 				Str("prepaid", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
-				Hex("key", vch.Key).
+				Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
 				Msg("virtual to us")
 		}
 	}
@@ -1226,7 +1227,7 @@ func (s *Service) ProcessExternalChannelLock(ctx context.Context, key ed25519.Pu
 		if unlockFunc != nil {
 			s.externalLock = nil
 			unlockFunc()
-			log.Debug().Type("channel", addr.String()).Int64("id", id).Msg("external lock unlocked")
+			log.Debug().Str("channel", addr.String()).Int64("id", id).Msg("external lock unlocked")
 		}
 		// already unlocked (idempotency)
 		return nil
@@ -1234,7 +1235,7 @@ func (s *Service) ProcessExternalChannelLock(ctx context.Context, key ed25519.Pu
 
 	if unlockFunc != nil {
 		// already locked by other party (idempotency)
-		log.Debug().Type("channel", addr.String()).Int64("id", id).Msg("external lock already locked")
+		log.Debug().Str("channel", addr.String()).Int64("id", id).Msg("external lock already locked")
 
 		return ErrChannelIsBusy
 	}
@@ -1268,7 +1269,7 @@ func (s *Service) ProcessExternalChannelLock(ctx context.Context, key ed25519.Pu
 			}
 
 			if !res.Agreed {
-				log.Warn().Type("channel", addr.String()).Int64("id", id).Str("reason", res.Reason).Msg("external lock seems still locked")
+				log.Warn().Str("channel", addr.String()).Int64("id", id).Str("reason", res.Reason).Msg("external lock seems still locked")
 
 				continue
 			}
@@ -1285,7 +1286,7 @@ func (s *Service) ProcessExternalChannelLock(ctx context.Context, key ed25519.Pu
 		}
 	}()
 
-	log.Debug().Type("channel", addr.String()).Int64("id", id).Msg("external lock accepted")
+	log.Debug().Str("channel", addr.String()).Int64("id", id).Msg("external lock accepted")
 
 	return nil
 }

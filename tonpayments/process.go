@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
@@ -115,7 +115,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		return nil, fmt.Errorf("incorrect state seqno %d, want %d", signedState.State.Data.Seqno, channel.Their.State.Data.Seqno+1)
 	}
 
-	log.Debug().Type("action", action).Msg("action process")
+	log.Debug().Str("action", reflect.TypeOf(action).String()).Msg("action process")
 
 	switch data := action.(type) {
 	case transport.IncrementStatesAction:
@@ -384,7 +384,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("failed to settle condition with index %s: %w", index.String(), err)
 		}
 
-		theirBalance, err := channel.CalcBalance(true)
+		theirBalance, _, err := channel.CalcBalance(true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to calc other side balance: %w", err)
 		}
@@ -486,7 +486,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 					continue
 				}
 
-				balance, err := targetChannel.CalcBalance(false)
+				balance, _, err := targetChannel.CalcBalance(false)
 				if err != nil {
 					return nil, fmt.Errorf("failed to calc our channel %s balance: %w", targetChannel.Address, err)
 				}
@@ -649,7 +649,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		return nil, fmt.Errorf("state looks tampered: %w", err)
 	}
 
-	bal, err := channel.CalcBalance(true)
+	bal, _, err := channel.CalcBalance(true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calc balance: %w", err)
 	}
@@ -702,7 +702,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		return nil, fmt.Errorf("unauthorized channel")
 	}
 
-	log.Debug().Type("action", action).Msg("action request process")
+	log.Debug().Str("action", reflect.TypeOf(action).String()).Msg("action request process")
 
 	switch data := action.(type) {
 	case transport.RequestRemoveVirtualAction:

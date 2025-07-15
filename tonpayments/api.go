@@ -8,7 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/config"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
@@ -218,7 +218,7 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, 
 			continue
 		}
 
-		balance, err := ch.CalcBalance(false)
+		balance, _, err := ch.CalcBalance(false)
 		if err != nil {
 			return fmt.Errorf("failed to calc channel balance: %w", err)
 		}
@@ -808,12 +808,12 @@ func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel
 	theirToWithdraw := new(big.Int).Sub(theirWithdraw.Nano(), maxTheirWithdraw)
 
 	// this is not locked balance
-	ourBalance, err := channel.CalcBalance(false)
+	ourBalance, _, err := channel.CalcBalance(false)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to calc our balance: %w", err)
 	}
 
-	theirBalance, err := channel.CalcBalance(true)
+	theirBalance, _, err := channel.CalcBalance(true)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to calc their balance: %w", err)
 	}

@@ -6,7 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/metrics"
@@ -115,6 +115,7 @@ func (s *Service) channelsMonitor() {
 			coinConfig, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, false)
 			if err != nil {
 				log.Error().Err(err).Msg("failed to resolve coin config")
+				continue next
 			}
 
 			channelName := "other"
@@ -186,7 +187,7 @@ func (s *Service) channelsMonitor() {
 					case "withdrawn":
 						value = onchainState.Withdrawn
 					case "balance":
-						value, err = channel.CalcBalance(isOurSide)
+						value, _, err = channel.CalcBalance(isOurSide)
 						if err != nil {
 							log.Error().Err(err).Msg("failed to calc balance")
 							continue next

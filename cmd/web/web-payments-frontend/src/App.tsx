@@ -16,6 +16,7 @@ function App() {
   let [paymentAddr, setPaymentAddr] = useState("Loading...");
   let [balance, setBalance] = useState("...");
   let [capacity, setCapacity] = useState("...");
+  let [lockedBalance, setLockedBalance] = useState("");
   let [history, setHistory] = useState<PaymentChannelHistoryItem[] | null>(null);
 
   window.onPaymentNetworkLoaded = function(addr) {
@@ -25,6 +26,7 @@ function App() {
   window.onPaymentChannelUpdated = function(ev) {
     setBalance(ev.balance);
     setCapacity(ev.capacity);
+    setLockedBalance(ev.locked);
     window.getChannelHistory(5).then(history => {
       setHistory(history);
     })
@@ -88,7 +90,7 @@ function App() {
 
       try {
         await waitForStartPaymentNetwork();
-        window.startPaymentNetwork("FnfzUIFAsZcxWj5h/8aYP25Zx0MjH+LuRue41LRPGAs=", "3zGuH6bJAPE+4H4I3G5zniPJm4Pjz08H8hOAfdmgcBo=");
+        window.startPaymentNetwork("n33iPuz0ft6jMJdVAyn/DWD2WHDJ8NgZH2SoYpZxF3o=", "NusLG6W7hVzVpkNY4VQIvFZN7Mj2L626JiLTH3E/LwA=");
       } catch (e) {
         console.error(e);
       }
@@ -109,7 +111,7 @@ function App() {
   }
 
   return (
-      <WalletUI paymentAddr={paymentAddr} balance={balance} capacity={capacity} transactions={history}/>
+      <WalletUI paymentAddr={paymentAddr} balance={balance} locked={lockedBalance} capacity={capacity} transactions={history}/>
   );
 }
 
@@ -117,13 +119,15 @@ type WalletUIProps = {
   paymentAddr: string;
   balance: string;
   capacity: string;
+  locked: string;
   transactions: PaymentChannelHistoryItem[] | null;
 };
 
-const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, capacity, transactions }) => {
+const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capacity, transactions }) => {
   const [connected, setConnected] = useState(false);
   const [sendTo, setSendTo] = useState("");
   const [sendAmount, setSendAmount] = useState("");
+  const [sendFeeAmount, setSendFeeAmount] = useState("");
   const [copied, setCopied] = useState(false);
   const [modalType, setModalType] = useState<"topup" | "withdraw" | null>(null);
   const [modalAmount, setModalAmount] = useState("");
@@ -173,8 +177,15 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, capacity, tra
                       )}
                 </div>
               </div>
-              <div className="flex items-center justify-between mt-2">
-                <span className="text-sm text-gray-500">Capacity</span>
+
+              {locked !== "0" ?
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-sm text-gray-500">Locked Balance</span>
+                <span className="text-sm font-medium">{locked} TON</span>
+              </div> : ""}
+
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-sm text-gray-500">Receive Capacity</span>
                 <span className="text-sm font-medium">{capacity} TON</span>
               </div>
 
@@ -204,18 +215,39 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, capacity, tra
           <Card className="bg-[#f9fcff] shadow-md rounded-2xl">
             <CardContent className="p-6 space-y-4">
               <h2 className="text-xl font-semibold">Send</h2>
-              <Input placeholder="Recipient address" value={sendTo} onChange={(e) => setSendTo(e.target.value)} />
-              <Input placeholder="Amount in TON" value={sendAmount} onChange={(e) => setSendAmount(e.target.value)} />
-              <Button className="bg-[#0098ea] text-white px-4 py-2 rounded-xl flex items-center gap-2" onClick={()=>{
-                let res = window.sendTransfer(sendAmount, sendTo);
-                if (res !== "") {
-                  console.log("failed to transfer: "+res);
-                  return;
+              <Input placeholder="Recipient address" value={sendTo} onChange={(e) => {
+                setSendTo(e.target.value)
+
+                let val = parseFloat(sendAmount);
+                if (!isNaN(val)) {
+                  setSendFeeAmount(window.estimateTransfer(sendAmount, e.target.value))
+                } else {
+                  setSendFeeAmount("");
                 }
-                console.log("transferred: "+sendAmount+" to "+sendTo);
-              }}>
-                <Send size={16} /> Send
-              </Button>
+              }} />
+              <Input placeholder="Amount in TON" value={sendAmount} onChange={(e) => {
+                setSendAmount(e.target.value);
+
+                let val = parseFloat(e.target.value);
+                if (!isNaN(val)) {
+                  setSendFeeAmount(window.estimateTransfer(e.target.value, sendTo))
+                } else {
+                  setSendFeeAmount("");
+                }
+              }} />
+              <div className="flex items-center justify-between mt-2">
+                <Button disabled={sendFeeAmount === ""} className="bg-[#0098ea] text-white px-4 py-2 rounded-xl flex items-center gap-2 disabled:bg-gray-300" onClick={()=>{
+                  let res = window.sendTransfer(sendAmount, sendTo);
+                  if (res !== "") {
+                    console.log("failed to transfer: "+res);
+                    return;
+                  }
+                  console.log("transferred: "+sendAmount+" to "+sendTo);
+                }}>
+                  <Send size={16} /> Send
+                </Button>
+                {sendFeeAmount ? <span className="text-sm text-gray-500">Fee: {sendFeeAmount} TON</span> : ""}
+              </div>
             </CardContent>
           </Card>
 
@@ -227,9 +259,9 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, capacity, tra
                   <div className="space-y-2">
                     {transactions.map((tx) => (
                         <div
+                            key={tx.id}
                             className="flex justify-between items-center border-b border-gray-100 pb-2"
                         >
-                          {/* левая часть: иконка + время */}
                           <div className="flex items-center gap-2">
                             {(() => {
                               const p = { size: 16 };
@@ -258,7 +290,6 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, capacity, tra
                             <span className="text-sm text-gray-600">{tx.timestamp}</span>
                           </div>
 
-                          {/* правая часть: сумма + кнопка-адрес */}
                           <div className="flex flex-col items-end">
                             {tx.amount && (
                                 <div className="text-sm font-medium">{tx.amount} TON</div>

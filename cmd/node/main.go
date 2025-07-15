@@ -9,7 +9,7 @@ import (
 	"github.com/natefinch/lumberjack"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments"
 	"github.com/xssnick/ton-payment-network/tonpayments/api"
@@ -82,31 +82,31 @@ func main() {
 	}
 	multi := zerolog.MultiLevelWriter(logWriters...)
 
-	log.Logger = zerolog.New(multi).With().Timestamp().Logger().Level(zerolog.InfoLevel)
-	scanLog := log.Logger
+	log.SetLogger(zerolog.New(multi).With().Timestamp().Logger().Level(zerolog.InfoLevel))
+	scanLog := log.GetLogger()
 	if *Verbosity >= 4 {
 		scanLog = scanLog.Level(zerolog.DebugLevel).With().Logger()
 	}
 
 	if *Verbosity >= 5 {
 		rldp.Logger = func(v ...any) {
-			log.Logger.Debug().Msg(fmt.Sprintln(v...))
+			log.Debug().Msg(fmt.Sprintln(v...))
 		}
 		dht.Logger = func(v ...any) {
-			log.Logger.Debug().Msg(fmt.Sprintln(v...))
+			log.Debug().Msg(fmt.Sprintln(v...))
 		}
 	}
 
 	if *Verbosity >= 3 {
-		log.Logger = log.Logger.Level(zerolog.DebugLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.DebugLevel).With().Logger())
 	} else if *Verbosity == 2 {
-		log.Logger = log.Logger.Level(zerolog.InfoLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.InfoLevel).With().Logger())
 	} else if *Verbosity == 1 {
-		log.Logger = log.Logger.Level(zerolog.WarnLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.WarnLevel).With().Logger())
 	} else if *Verbosity == 0 {
-		log.Logger = log.Logger.Level(zerolog.ErrorLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.ErrorLevel).With().Logger())
 	} else {
-		log.Logger = log.Logger.Level(zerolog.FatalLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.FatalLevel).With().Logger())
 	}
 
 	log.Info().Str("version", GitCommit).Msg("starting payment node...")
