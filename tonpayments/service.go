@@ -6,18 +6,17 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/tonpayments/chain/client"
 	"github.com/xssnick/ton-payment-network/tonpayments/config"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
-	"github.com/xssnick/ton-payment-network/tonpayments/metrics"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
-	"github.com/xssnick/tonutils-go/ton"
-	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
 	"sync"
@@ -34,7 +33,7 @@ const PaymentsTaskPool = "pn"
 type Transport interface {
 	AddUrgentPeer(channelKey ed25519.PublicKey)
 	RemoveUrgentPeer(channelKey ed25519.PublicKey)
-	ProposeChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey, prop transport.ProposeChannelConfig) (*address.Address, error)
+	ProposeChannelConfig(ctx context.Context, theirChannelKey ed25519.PublicKey, prop transport.ProposeChannelConfig) (*address.Address, transport.VirtualConfigResponse, error)
 	RequestAction(ctx context.Context, channelAddr *address.Address, theirChannelKey []byte, action transport.Action) (*transport.Decision, error)
 	ProposeAction(ctx context.Context, lockId int64, channelAddr *address.Address, theirChannelKey []byte, state, updateProof *cell.Cell, action transport.Action) (*transport.ProposalDecision, error)
 	RequestChannelLock(ctx context.Context, theirChannelKey ed25519.PublicKey, channel *address.Address, id int64, lock bool) (*transport.Decision, error)
@@ -67,11 +66,28 @@ type DB interface {
 	UpdateChannel(ctx context.Context, channel *db.Channel) error
 	SetOnChannelUpdated(f func(ctx context.Context, ch *db.Channel, statusChanged bool))
 	GetOnChannelUpdated() func(ctx context.Context, ch *db.Channel, statusChanged bool)
+	CreateChannelEvent(ctx context.Context, channel *db.Channel, at time.Time, item db.ChannelHistoryItem) error
 
 	GetUrgentPeers(ctx context.Context) ([][]byte, error)
 	AddUrgentPeer(ctx context.Context, peerAddress []byte) error
 
+	GetChannelsHistoryByPeriod(ctx context.Context, addr string, limit int, before, after *time.Time) ([]db.ChannelHistoryItem, error)
+
 	Close()
+}
+
+type WalletMessage struct {
+	To     *address.Address
+	Amount tlb.Coins
+	Body   *cell.Cell
+}
+
+type Wallet interface {
+	WalletAddress() *address.Address
+	DoTransactionMany(ctx context.Context, reason string, messages []WalletMessage) ([]byte, error)
+	DeployContractWaitTransaction(ctx context.Context, amt tlb.Coins, body, code, data *cell.Cell) (*address.Address, []byte, error)
+	DoTransaction(ctx context.Context, reason string, to *address.Address, amt tlb.Coins, body *cell.Cell) ([]byte, error)
+	DoTransactionEC(ctx context.Context, reason string, to *address.Address, amtTon tlb.Coins, body *cell.Cell, ecID uint32, ecAmt tlb.Coins) ([]byte, error)
 }
 
 type BlockCheckedEvent struct {
@@ -79,7 +95,7 @@ type BlockCheckedEvent struct {
 }
 
 type ChannelUpdatedEvent struct {
-	Transaction *tlb.Transaction
+	Transaction *client.Transaction
 	Channel     *payments.AsyncChannel
 }
 
@@ -105,17 +121,25 @@ type balanceControlChannel struct {
 	withdrawStartedAtBalance *big.Int
 }
 
+type ChainAPI interface {
+	GetAccount(ctx context.Context, addr *address.Address) (*client.Account, error)
+	GetJettonWalletAddress(ctx context.Context, root, addr *address.Address) (*address.Address, error)
+	GetJettonBalance(ctx context.Context, root, addr *address.Address) (*big.Int, error)
+	GetLastTransaction(ctx context.Context, addr *address.Address) (*client.Transaction, *client.Account, error)
+}
+
 type Service struct {
-	ton       ton.APIClientWrapped
-	transport Transport
-	updates   chan any
-	db        DB
-	webhook   Webhook
+	ton              ChainAPI
+	regularTransport Transport
+	webTransport     Transport
+	updates          chan any
+	db               DB
+	webhook          Webhook
 
 	key ed25519.PrivateKey
 
-	wallet                         *wallet.Wallet
-	contractMaker                  *payments.Client
+	wallet                         Wallet
+	channelClient                  *payments.Client
 	virtualChannelsLimitPerChannel int
 	workerSignal                   chan bool
 
@@ -135,6 +159,7 @@ type Service struct {
 	supportedTon       bool
 	balanceControllers map[string]*balanceControlConfig
 	urgentPeers        map[string]bool
+	useMetrics         bool
 
 	globalCtx    context.Context
 	globalCancel context.CancelFunc
@@ -143,16 +168,17 @@ type Service struct {
 	discoveryMx   sync.Mutex
 }
 
-func NewService(api ton.APIClientWrapped, database DB, transport Transport, wallet *wallet.Wallet, updates chan any, key ed25519.PrivateKey, cfg config.ChannelsConfig) (*Service, error) {
+func NewService(api ChainAPI, database DB, transport, webTransport Transport, wallet Wallet, updates chan any, key ed25519.PrivateKey, cfg config.ChannelsConfig, useMetrics bool) (*Service, error) {
 	globalCtx, globalCancel := context.WithCancel(context.Background())
 	s := &Service{
 		ton:                            api,
-		transport:                      transport,
+		regularTransport:               transport,
+		webTransport:                   webTransport,
 		updates:                        updates,
 		db:                             database,
 		key:                            key,
 		wallet:                         wallet,
-		contractMaker:                  payments.NewPaymentChannelClient(api),
+		channelClient:                  payments.NewPaymentChannelClient(api),
 		cfg:                            cfg,
 		virtualChannelsLimitPerChannel: 30000,
 		workerSignal:                   make(chan bool, 1),
@@ -164,6 +190,7 @@ func NewService(api ton.APIClientWrapped, database DB, transport Transport, wall
 		urgentPeers:                    map[string]bool{},
 		globalCtx:                      globalCtx,
 		globalCancel:                   globalCancel,
+		useMetrics:                     useMetrics,
 	}
 
 	addBalanceControl := func(jetton string, ecID uint32, currency config.CoinConfig) error {
@@ -277,6 +304,10 @@ func (s *Service) Stop() {
 	s.globalCancel()
 }
 
+func (s *Service) GetChannelsHistoryByPeriod(ctx context.Context, addr string, limit int, before, after *time.Time) ([]db.ChannelHistoryItem, error) {
+	return s.db.GetChannelsHistoryByPeriod(ctx, addr, limit, before, after)
+}
+
 func (s *Service) AddUrgentPeer(ctx context.Context, peer []byte) error {
 	if err := s.db.AddUrgentPeer(ctx, peer); err != nil {
 		return err
@@ -286,7 +317,7 @@ func (s *Service) AddUrgentPeer(ctx context.Context, peer []byte) error {
 	s.urgentPeers[hex.EncodeToString(peer)] = true
 	s.urgentPeersMx.Unlock()
 
-	s.transport.AddUrgentPeer(peer)
+	s.regularTransport.AddUrgentPeer(peer)
 	return nil
 }
 
@@ -301,7 +332,7 @@ func (s *Service) loadUrgentPeers(ctx context.Context) error {
 		s.urgentPeers[hex.EncodeToString(peer)] = true
 		s.urgentPeersMx.Unlock()
 
-		s.transport.AddUrgentPeer(peer)
+		s.regularTransport.AddUrgentPeer(peer)
 	}
 	return nil
 }
@@ -337,7 +368,7 @@ func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ 
 
 	log.Debug().Str("address", ch.Address).Msg("balance control callback triggered")
 
-	balance, err := ch.CalcBalance(false)
+	balance, _, err := ch.CalcBalance(false)
 	if err != nil {
 		log.Error().Str("address", ch.Address).Err(err).Msg("failed to calc our balance in balance controller")
 		return
@@ -376,20 +407,20 @@ func (s *Service) GetMinSafeTTL() time.Duration {
 	return time.Duration(s.cfg.MinSafeVirtualChannelTimeoutSec+s.cfg.BufferTimeToCommit+s.cfg.ConditionalCloseDurationSec+s.cfg.QuarantineDurationSec) * time.Second
 }
 
-func (s *Service) ReviewChannelConfig(prop transport.ProposeChannelConfig) (*address.Address, error) {
+func (s *Service) ReviewChannelConfig(prop transport.ProposeChannelConfig) (*address.Address, config.CoinConfig, error) {
 	var jetton *address.Address
 	if !bytes.Equal(prop.JettonAddr, make([]byte, 32)) {
 		jetton = address.NewAddress(0, 0, prop.JettonAddr)
 	}
 
 	if jetton != nil && prop.ExtraCurrencyID != 0 {
-		return nil, fmt.Errorf("both extra currency and jetton are set")
+		return nil, config.CoinConfig{}, fmt.Errorf("both extra currency and jetton are set")
 	}
 
 	var cfg = s.cfg.SupportedCoins.Ton
 	if prop.ExtraCurrencyID != 0 {
 		if c, ok := s.supportedEC[prop.ExtraCurrencyID]; !ok {
-			return nil, fmt.Errorf("extra currency is not whitelisted")
+			return nil, config.CoinConfig{}, fmt.Errorf("extra currency is not whitelisted")
 		} else {
 			cfg = c
 		}
@@ -397,7 +428,7 @@ func (s *Service) ReviewChannelConfig(prop transport.ProposeChannelConfig) (*add
 
 	if jetton != nil {
 		if c, ok := s.supportedJettons[jetton.Bounce(true).String()]; !ok {
-			return nil, fmt.Errorf("jetton currency is not whitelisted")
+			return nil, config.CoinConfig{}, fmt.Errorf("jetton currency is not whitelisted")
 		} else {
 			cfg = c
 		}
@@ -408,13 +439,13 @@ func (s *Service) ReviewChannelConfig(prop transport.ProposeChannelConfig) (*add
 	if prop.QuarantineDuration != s.cfg.QuarantineDurationSec ||
 		prop.ConditionalCloseDuration != s.cfg.ConditionalCloseDurationSec ||
 		new(big.Int).SetBytes(prop.MisbehaviorFine).Cmp(ourFine.Nano()) != 0 {
-		return nil, fmt.Errorf("node wants different channel config: quarantine %d, cond close %d, fine %s; if you wnat to deploy", s.cfg.QuarantineDurationSec, s.cfg.ConditionalCloseDurationSec, ourFine.String())
+		return nil, config.CoinConfig{}, fmt.Errorf("node wants different channel config: quarantine %d, cond close %d, fine %s; if you want to deploy", s.cfg.QuarantineDurationSec, s.cfg.ConditionalCloseDurationSec, ourFine.String())
 	}
 
-	return s.wallet.WalletAddress(), nil
+	return s.wallet.WalletAddress(), cfg, nil
 }
 
-func (s *Service) scanSettledConditionals(channelAddr string, tx *tlb.Transaction, settle payments.SettleConditionals) {
+func (s *Service) scanSettledConditionals(channelAddr string, tx *client.Transaction, settle payments.SettleConditionals) {
 	kvs, err := settle.Signed.ConditionalsToSettle.LoadAll()
 	if err != nil {
 		log.Warn().Err(err).Str("address", channelAddr).Msg("failed to load settled conditionals")
@@ -478,7 +509,7 @@ func (s *Service) Start() {
 	}
 
 	go s.taskExecutor()
-	if metrics.Registered {
+	if s.useMetrics {
 		go s.channelsMonitor()
 		go s.walletMonitor()
 	}
@@ -498,13 +529,14 @@ func (s *Service) Start() {
 				continue
 			}
 		case ChannelUpdatedEvent:
+			channelJson, _ := json.Marshal(upd.Channel)
 			ok, isLeft := s.verifyChannel(upd.Channel)
 			if !ok {
-				log.Debug().Any("channel", upd.Channel).Msg("not verified")
+				log.Debug().Str("channel", string(channelJson)).Msg("not verified")
 				continue
 			}
 
-			log.Debug().Any("channel", upd.Channel).Msg("verified, processing update")
+			log.Debug().Str("channel", string(channelJson)).Msg("verified, processing update")
 
 		retry:
 			var err error
@@ -526,16 +558,12 @@ func (s *Service) Start() {
 				break
 			}
 
-			if desc, ok := upd.Transaction.Description.(tlb.TransactionDescriptionOrdinary); ok {
-				if comp, ok := desc.ComputePhase.Phase.(tlb.ComputePhaseVM); ok && comp.Success && upd.Transaction.IO.In.MsgType == tlb.MsgTypeInternal {
-					msg := upd.Transaction.IO.In.AsInternal()
-
-					var settle payments.SettleConditionals
-					if err = tlb.LoadFromCell(&settle, msg.Body.BeginParse()); err == nil {
-						if settle.IsFromA != isLeft {
-							// we need to check their conditional resolves and add missing if any, to resolve our next channels
-							go s.scanSettledConditionals(upd.Channel.Address().String(), upd.Transaction, settle)
-						}
+			if upd.Transaction.Success && upd.Transaction.InternalInBody != nil {
+				var settle payments.SettleConditionals
+				if err = tlb.LoadFromCell(&settle, upd.Transaction.InternalInBody.BeginParse()); err == nil {
+					if settle.IsFromA != isLeft {
+						// we need to check their conditional resolves and add missing if any, to resolve our next channels
+						go s.scanSettledConditionals(upd.Channel.Address().String(), upd.Transaction, settle)
 					}
 				}
 			}
@@ -582,7 +610,7 @@ func (s *Service) Start() {
 					TheirOnchain:           their,
 					Our:                    db.NewSide(upd.Channel.Storage.ChannelID, uint64(our.CommittedSeqno), uint64(their.CommittedSeqno)),
 					Their:                  db.NewSide(upd.Channel.Storage.ChannelID, uint64(their.CommittedSeqno), uint64(our.CommittedSeqno)),
-					InitAt:                 time.Unix(int64(upd.Transaction.Now), 0),
+					InitAt:                 time.Unix(upd.Transaction.At, 0),
 					CreatedAt:              createAt,
 					AcceptingActions:       upd.Channel.Status == payments.ChannelStatusOpen,
 					SafeOnchainClosePeriod: int64(s.cfg.BufferTimeToCommit) + int64(upd.Channel.Storage.ClosingConfig.QuarantineDuration) + int64(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration),
@@ -605,9 +633,12 @@ func (s *Service) Start() {
 			}
 
 			seqnoChanged := channel.OurOnchain.CommittedSeqno < our.CommittedSeqno || channel.TheirOnchain.CommittedSeqno < their.CommittedSeqno
-			balanceChanged := channel.OurOnchain.Deposited.Cmp(our.Deposited) != 0 || channel.TheirOnchain.Deposited.Cmp(their.Deposited) != 0
+			diffDeposit := new(big.Int).Sub(our.Deposited, channel.OurOnchain.Deposited)
+			diffTheirDeposit := new(big.Int).Sub(their.Deposited, channel.TheirOnchain.Deposited)
+			diffWithdrawn := new(big.Int).Sub(our.Withdrawn, channel.OurOnchain.Withdrawn)
+			diffTheirWithdrawn := new(big.Int).Sub(their.Withdrawn, channel.TheirOnchain.Withdrawn)
 
-			if seqnoChanged || balanceChanged {
+			if seqnoChanged {
 				// withdrawal is not pending anymore
 				// even if it was not executed, message is not valid anymore
 				channel.Our.PendingWithdraw.SetUint64(0)
@@ -618,6 +649,7 @@ func (s *Service) Start() {
 			channel.OurOnchain = our
 			channel.TheirOnchain = their
 
+			var startClosing, closed bool
 			switch upd.Channel.Status {
 			case payments.ChannelStatusOpen:
 				if channel.Status != db.ChannelStateActive {
@@ -639,7 +671,10 @@ func (s *Service) Start() {
 						Msg("onchain channel opened")
 				}
 			case payments.ChannelStatusClosureStarted:
-				channel.Status = db.ChannelStateClosing
+				if channel.Status != db.ChannelStateClosing {
+					startClosing = true
+					channel.Status = db.ChannelStateClosing
+				}
 
 				if (isLeft && !upd.Channel.Storage.Quarantine.StateCommittedByA) ||
 					(!isLeft && upd.Channel.Storage.Quarantine.StateCommittedByA) {
@@ -671,7 +706,10 @@ func (s *Service) Start() {
 				}
 				fallthrough
 			case payments.ChannelStatusSettlingConditionals:
-				channel.Status = db.ChannelStateClosing
+				if channel.Status != db.ChannelStateClosing {
+					startClosing = true
+					channel.Status = db.ChannelStateClosing
+				}
 
 				settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+3), 0)
 				finishAt := settleAt.Add(time.Duration(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration) * time.Second)
@@ -692,7 +730,10 @@ func (s *Service) Start() {
 				}
 				fallthrough
 			case payments.ChannelStatusAwaitingFinalization:
-				channel.Status = db.ChannelStateClosing
+				if channel.Status != db.ChannelStateClosing {
+					startClosing = true
+					channel.Status = db.ChannelStateClosing
+				}
 
 				settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+5), 0)
 				finishAt := settleAt.Add(time.Duration(upd.Channel.Storage.ClosingConfig.ConditionalCloseDuration+5) * time.Second)
@@ -713,6 +754,7 @@ func (s *Service) Start() {
 				}
 			case payments.ChannelStatusUninitialized:
 				if channel.Status != db.ChannelStateInactive {
+					closed = true
 					channel.Status = db.ChannelStateInactive
 
 					log.Info().Str("address", channel.Address).
@@ -726,10 +768,68 @@ func (s *Service) Start() {
 				fc = s.db.CreateChannel
 			}
 
-			if err = fc(context.Background(), channel); err != nil {
-				log.Error().Err(err).Msg("failed to set channel in db, retrying...")
-				time.Sleep(1 * time.Second)
+			err = s.db.Transaction(context.Background(), func(ctx context.Context) error {
+				createEv := func(amt *big.Int, evType db.ChannelHistoryEventType) error {
+					var jsonData []byte
+					if amt != nil {
+						evData := db.ChannelHistoryActionAmountData{
+							Amount: amt.String(),
+						}
+						jsonData, err = json.Marshal(evData)
+						if err != nil {
+							log.Error().Err(err).Int("type", int(evType)).Msg("failed to marshal event data")
+						}
+					}
 
+					if err = s.db.CreateChannelEvent(ctx, channel, time.Unix(upd.Transaction.At, 0), db.ChannelHistoryItem{
+						Action: evType,
+						Data:   jsonData,
+					}); err != nil {
+						return fmt.Errorf("failed to create withdraw channel event %d: %w", evType, err)
+					}
+					return nil
+				}
+
+				if startClosing {
+					if err = createEv(nil, db.ChannelHistoryActionUncooperativeCloseStarted); err != nil {
+						return err
+					}
+				}
+				if closed {
+					// both cooperative and uncooperative
+					if err = createEv(nil, db.ChannelHistoryActionClosed); err != nil {
+						return err
+					}
+				}
+
+				if diffWithdrawn.Sign() > 0 {
+					if err = createEv(diffWithdrawn, db.ChannelHistoryActionWithdraw); err != nil {
+						return err
+					}
+				}
+				if diffTheirWithdrawn.Sign() > 0 {
+					if err = createEv(diffTheirWithdrawn, db.ChannelHistoryActionWithdrawCapacity); err != nil {
+						return err
+					}
+				}
+				if diffDeposit.Sign() > 0 {
+					if err = createEv(diffDeposit, db.ChannelHistoryActionTopup); err != nil {
+						return err
+					}
+				}
+				if diffTheirDeposit.Sign() > 0 {
+					if err = createEv(diffTheirDeposit, db.ChannelHistoryActionTopupCapacity); err != nil {
+						return err
+					}
+				}
+
+				if err = fc(ctx, channel); err != nil {
+					return fmt.Errorf("failed to set channel in db: %w", err)
+				}
+				return nil
+			})
+			if err != nil {
+				log.Error().Err(err).Str("channel", channel.Address).Msg("failed to set channel in db")
 				// we retry full process because we need to reproduce all changes in case of concurrent update
 				goto retry
 			}
@@ -768,12 +868,12 @@ func (s *Service) DebugPrintVirtualChannels() {
 		}
 
 		inBalance, outBalance := "?", "?"
-		val, err := ch.CalcBalance(false)
+		val, _, err := ch.CalcBalance(false)
 		if err == nil {
 			outBalance = tlb.MustFromNano(val, int(cc.Decimals)).String()
 		}
 
-		val, err = ch.CalcBalance(true)
+		val, _, err = ch.CalcBalance(true)
 		if err == nil {
 			inBalance = tlb.MustFromNano(val, int(cc.Decimals)).String()
 		}
@@ -804,7 +904,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 				Str("till_safe_deadline", (till-time.Duration(ch.SafeOnchainClosePeriod)*time.Second).String()).
 				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
 				Str("prepaid", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
-				Hex("key", vch.Key).
+				Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
 				Msg("virtual from us")
 		}
 		for _, kv := range ch.Their.Conditionals.All() {
@@ -815,7 +915,7 @@ func (s *Service) DebugPrintVirtualChannels() {
 				Str("till_deadline", time.Unix(vch.Deadline, 0).Sub(time.Now()).String()).
 				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
 				Str("prepaid", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
-				Hex("key", vch.Key).
+				Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
 				Msg("virtual to us")
 		}
 	}
@@ -847,13 +947,21 @@ func (s *Service) GetVirtualChannelMeta(ctx context.Context, key ed25519.PublicK
 	return meta, nil
 }
 
+func (s *Service) getTransport(ch *db.Channel) Transport {
+	if ch.WebPeer && s.webTransport != nil {
+		return s.webTransport
+	}
+
+	return s.regularTransport
+}
+
 func (s *Service) requestAction(ctx context.Context, channelAddress string, action any) ([]byte, error) {
 	channel, err := s.db.GetChannel(ctx, channelAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	decision, err := s.transport.RequestAction(ctx, address.MustParseAddr(channel.Address), channel.TheirOnchain.Key, action)
+	decision, err := s.getTransport(channel).RequestAction(ctx, address.MustParseAddr(channel.Address), channel.TheirOnchain.Key, action)
 	if err != nil {
 		return nil, fmt.Errorf("failed to request actions: %w", err)
 	}
@@ -881,7 +989,7 @@ func (s *Service) proposeAction(ctx context.Context, lockId int64, channelAddres
 		return fmt.Errorf("failed to prepare actions for the next node - %w: %v", ErrNotPossible, err)
 	}
 
-	res, err := s.transport.ProposeAction(ctx, lockId, address.MustParseAddr(channel.Address), channel.TheirOnchain.Key, state, updProof, action)
+	res, err := s.getTransport(channel).ProposeAction(ctx, lockId, address.MustParseAddr(channel.Address), channel.TheirOnchain.Key, state, updProof, action)
 	if err != nil {
 		return fmt.Errorf("failed to propose actions: %w", err)
 	}
@@ -932,10 +1040,14 @@ func (s *Service) verifyChannel(p *payments.AsyncChannel) (ok bool, isLeft bool)
 	}
 
 	if !isLeft && p.Storage.PaymentConfig.DestB.Bounce(false).String() != s.wallet.WalletAddress().String() {
+		log.Debug().Str("address", p.Storage.PaymentConfig.DestB.Bounce(false).String()).
+			Str("expected", s.wallet.WalletAddress().String()).Msg("wrong address for channel")
 		return false, false
 	}
 
 	if isLeft && p.Storage.PaymentConfig.DestA.Bounce(false).String() != s.wallet.WalletAddress().String() {
+		log.Debug().Str("address", p.Storage.PaymentConfig.DestA.Bounce(false).String()).
+			Str("expected", s.wallet.WalletAddress().String()).Msg("wrong address for channel")
 		return false, false
 	}
 
@@ -944,15 +1056,18 @@ func (s *Service) verifyChannel(p *payments.AsyncChannel) (ok bool, isLeft bool)
 	case payments.CurrencyConfigEC:
 		cc, ok = s.supportedEC[v.ID]
 		if !ok {
+			log.Debug().Uint32("ec", v.ID).Msg("unknown ec config")
 			return false, false
 		}
 	case payments.CurrencyConfigJetton:
 		cc, ok = s.supportedJettons[v.Info.Master.Bounce(true).String()]
 		if !ok {
+			log.Debug().Str("jetton", v.Info.Master.Bounce(true).String()).Msg("jetton not supported")
 			return false, false
 		}
 	case payments.CurrencyConfigTon:
 		if !s.supportedTon {
+			log.Debug().Msg("ton is not supported")
 			return false, false
 		}
 		cc = s.cfg.SupportedCoins.Ton
@@ -961,12 +1076,14 @@ func (s *Service) verifyChannel(p *payments.AsyncChannel) (ok bool, isLeft bool)
 	}
 
 	if p.Storage.PaymentConfig.StorageFee.String() != tlb.MustFromTON(cc.ExcessFeeTon).String() {
+		log.Debug().Str("fee", p.Storage.PaymentConfig.StorageFee.String()).Str("expected", tlb.MustFromTON(cc.ExcessFeeTon).String()).Msg("wrong fee")
 		return false, false
 	}
 
 	if p.Storage.ClosingConfig.ConditionalCloseDuration != s.cfg.ConditionalCloseDurationSec ||
 		p.Storage.ClosingConfig.QuarantineDuration != s.cfg.QuarantineDurationSec ||
 		p.Storage.ClosingConfig.MisbehaviorFine.Nano().Cmp(tlb.MustFromDecimal(cc.MisbehaviorFine, int(cc.Decimals)).Nano()) != 0 {
+		log.Debug().Msg("channel config mismatch, rejecting")
 		return false, false
 	}
 	return true, isLeft
@@ -1110,7 +1227,7 @@ func (s *Service) ProcessExternalChannelLock(ctx context.Context, key ed25519.Pu
 		if unlockFunc != nil {
 			s.externalLock = nil
 			unlockFunc()
-			log.Debug().Type("channel", addr).Int64("id", id).Msg("external lock unlocked")
+			log.Debug().Str("channel", addr.String()).Int64("id", id).Msg("external lock unlocked")
 		}
 		// already unlocked (idempotency)
 		return nil
@@ -1118,7 +1235,7 @@ func (s *Service) ProcessExternalChannelLock(ctx context.Context, key ed25519.Pu
 
 	if unlockFunc != nil {
 		// already locked by other party (idempotency)
-		log.Debug().Type("channel", addr).Int64("id", id).Msg("external lock already locked")
+		log.Debug().Str("channel", addr.String()).Int64("id", id).Msg("external lock already locked")
 
 		return ErrChannelIsBusy
 	}
@@ -1145,14 +1262,14 @@ func (s *Service) ProcessExternalChannelLock(ctx context.Context, key ed25519.Pu
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			res, err := s.transport.IsChannelUnlocked(ctx, channel.TheirOnchain.Key, addr, -id)
+			res, err := s.getTransport(channel).IsChannelUnlocked(ctx, channel.TheirOnchain.Key, addr, -id)
 			cancel()
 			if err != nil {
 				continue
 			}
 
 			if !res.Agreed {
-				log.Warn().Type("channel", addr).Int64("id", id).Str("reason", res.Reason).Msg("external lock seems still locked")
+				log.Warn().Str("channel", addr.String()).Int64("id", id).Str("reason", res.Reason).Msg("external lock seems still locked")
 
 				continue
 			}
@@ -1169,7 +1286,7 @@ func (s *Service) ProcessExternalChannelLock(ctx context.Context, key ed25519.Pu
 		}
 	}()
 
-	log.Debug().Type("channel", addr).Int64("id", id).Msg("external lock accepted")
+	log.Debug().Str("channel", addr.String()).Int64("id", id).Msg("external lock accepted")
 
 	return nil
 }
@@ -1238,7 +1355,7 @@ func (s *Service) AcquireChannel(ctx context.Context, addr string, id ...int64) 
 
 	// l.pending = true
 	chAddr := address.MustParseAddr(channel.Address)
-	res, err := s.transport.RequestChannelLock(ctx, channel.TheirOnchain.Key, chAddr, l.id, true)
+	res, err := s.getTransport(channel).RequestChannelLock(ctx, channel.TheirOnchain.Key, chAddr, l.id, true)
 	// l.pending = false
 	if err != nil {
 		l.mx.Unlock()
@@ -1257,7 +1374,7 @@ func (s *Service) AcquireChannel(ctx context.Context, addr string, id ...int64) 
 	return channel, l.id, func() {
 		l.mx.Unlock()
 
-		res, err := s.transport.RequestChannelLock(ctx, channel.TheirOnchain.Key, chAddr, l.id, false)
+		res, err := s.getTransport(channel).RequestChannelLock(ctx, channel.TheirOnchain.Key, chAddr, l.id, false)
 		if err != nil {
 			log.Warn().Str("channel", addr).Int64("id", l.id).Err(err).Msg("external lock release failed, but state can be fetched by another party, no worries")
 		} else if !res.Agreed {

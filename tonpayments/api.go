@@ -3,19 +3,18 @@ package tonpayments
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/config"
-	db "github.com/xssnick/ton-payment-network/tonpayments/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
-	"github.com/xssnick/tonutils-go/ton/jetton"
-	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
 	"time"
@@ -112,17 +111,22 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 	}
 
 	excessFee := tlb.MustFromTON(cc.ExcessFeeTon)
-	destWallet, err := s.transport.ProposeChannelConfig(ctx, nodeKey, transport.ProposeChannelConfig{
+	destWallet, configVirtualResp, err := s.regularTransport.ProposeChannelConfig(ctx, nodeKey, transport.ProposeChannelConfig{
 		JettonAddr:               jettonData,
 		ExtraCurrencyID:          ecID,
 		ExcessFee:                excessFee.Nano().Bytes(),
 		QuarantineDuration:       s.cfg.QuarantineDurationSec,
 		MisbehaviorFine:          tlb.MustFromDecimal(cc.MisbehaviorFine, int(cc.Decimals)).Nano().Bytes(),
 		ConditionalCloseDuration: s.cfg.ConditionalCloseDurationSec,
+		NodeVersion:              payments.Version,
+		CodeHash:                 payments.PaymentChannelCodes[0].Hash(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("channel proposal failed: %w", err)
 	}
+
+	_ = configVirtualResp // TODO: check if it fits us
+	// TODO: if code hash is unknown to peer try older if possible
 
 	pc := payments.PaymentConfig{
 		StorageFee:     tlb.MustFromTON(cc.ExcessFeeTon),
@@ -146,7 +150,7 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 
 	log.Info().Msg("starting channel deploy...")
 
-	body, code, data, err := s.contractMaker.GetDeployAsyncChannelParams(channelId, true, s.key, nodeKey, payments.ClosingConfig{
+	body, code, data, err := s.channelClient.GetDeployAsyncChannelParams(channelId, true, s.key, nodeKey, payments.ClosingConfig{
 		QuarantineDuration:       s.cfg.QuarantineDurationSec,
 		MisbehaviorFine:          tlb.MustFromDecimal(cc.MisbehaviorFine, int(cc.Decimals)),
 		ConditionalCloseDuration: s.cfg.ConditionalCloseDurationSec,
@@ -170,12 +174,12 @@ func (s *Service) DeployChannelWithNode(ctx context.Context, nodeKey ed25519.Pub
 	}
 
 	fee := new(big.Int).Add(excessFee.Nano(), tlb.MustFromTON("0.25").Nano())
-	addr, tx, _, err := s.wallet.DeployContractWaitTransaction(ctx, tlb.FromNanoTON(fee), body, code, data)
+	addr, msgHash, err := s.wallet.DeployContractWaitTransaction(ctx, tlb.FromNanoTON(fee), body, code, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deploy: %w", err)
 	}
 
-	log.Info().Str("addr", addr.String()).Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("contract deployed")
+	log.Info().Str("addr", addr.String()).Str("hash", base64.StdEncoding.EncodeToString(msgHash)).Msg("contract deployed")
 
 	for !s.discoverChannel(addr) {
 		select {
@@ -214,7 +218,7 @@ func (s *Service) OpenVirtualChannel(ctx context.Context, with, instructionKey, 
 			continue
 		}
 
-		balance, err := ch.CalcBalance(false)
+		balance, _, err := ch.CalcBalance(false)
 		if err != nil {
 			return fmt.Errorf("failed to calc channel balance: %w", err)
 		}
@@ -457,9 +461,13 @@ func (s *Service) AddVirtualChannelResolve(ctx context.Context, virtualKey ed255
 }
 
 func (s *Service) RequestUncooperativeClose(ctx context.Context, addr string) error {
-	channel, err := s.GetActiveChannel(ctx, addr)
+	channel, err := s.GetChannel(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if channel.Status == db.ChannelStateInactive {
+		return fmt.Errorf("channel is already inactive")
 	}
 
 	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "uncooperative-close", channel.Address+"-uncoop",
@@ -478,20 +486,15 @@ var ErrNotEnoughTonBalance = fmt.Errorf("not enough ton balance")
 var ErrNotEnoughBalance = fmt.Errorf("not enough balance")
 
 func (s *Service) CheckWalletBalance(ctx context.Context, jettonAddr string, ec uint32, amount tlb.Coins) error {
-	master, err := s.ton.CurrentMasterchainInfo(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get masterchain info: %w", err)
-	}
-
-	acc, err := s.ton.GetAccount(ctx, master, s.wallet.WalletAddress())
+	acc, err := s.ton.GetAccount(ctx, s.wallet.WalletAddress())
 	if err != nil {
 		return fmt.Errorf("failed to get ton balance: %w", err)
 	}
-	if acc.State == nil {
+	if !acc.HasState {
 		return fmt.Errorf("wallet is not exists, topup it")
 	}
 
-	balance := acc.State.Balance.Nano()
+	balance := acc.Balance.Nano()
 	balance = balance.Sub(balance, minTonAmountForTx.Nano())
 	if balance.Sign() < 0 {
 		return ErrNotEnoughTonBalance
@@ -508,22 +511,20 @@ func (s *Service) CheckWalletBalance(ctx context.Context, jettonAddr string, ec 
 	}
 
 	if jettonAddr != "" {
-		jc := jetton.NewJettonMasterClient(s.ton, address.MustParseAddr(jettonAddr))
-		jw, err := jc.GetJettonWallet(ctx, s.wallet.WalletAddress())
-		if err != nil {
-			return fmt.Errorf("failed to get jetton wallet: %w", err)
-		}
-
-		balance, err = jw.GetBalance(ctx)
+		balance, err = s.ton.GetJettonBalance(ctx, address.MustParseAddr(jettonAddr), s.wallet.WalletAddress())
 		if err != nil {
 			return fmt.Errorf("failed to get jetton balance: %w", err)
 		}
 	} else if ec > 0 {
-		if acc.State.ExtraCurrencies.IsEmpty() {
+		if isWeb {
+			panic("extra currency is not supported on web")
+		}
+
+		if acc.ExtraCurrencies.IsEmpty() {
 			return fmt.Errorf("no extra currencies in wallet")
 		}
 
-		val, err := acc.State.ExtraCurrencies.LoadValueByIntKey(big.NewInt(int64(ec)))
+		val, err := acc.ExtraCurrencies.LoadValueByIntKey(big.NewInt(int64(ec)))
 		if err != nil {
 			return fmt.Errorf("failed to get extra currency value: %w", err)
 		}
@@ -552,7 +553,7 @@ func (s *Service) TopupChannel(ctx context.Context, addr *address.Address, amoun
 	}
 
 	if err = s.db.CreateTask(ctx, PaymentsTaskPool, "topup", channel.Address+"-topup",
-		"topup-"+channel.Address+"-"+fmt.Sprint(time.Now().UTC().Unix()),
+		"topup-"+channel.Address+"-"+channel.OurOnchain.Deposited.String()+"-"+fmt.Sprint(channel.InitAt.Unix()),
 		db.TopupTask{
 			Address:            channel.Address,
 			Amount:             amount.String(),
@@ -715,11 +716,11 @@ func (s *Service) executeCooperativeCommit(ctx context.Context, req *payments.Co
 		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
-	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(ch.Address), tlb.MustFromTON("0.16"), msg))
+	msgHash, err := s.wallet.DoTransaction(ctx, "Cooperative commit (withdraw)", address.MustParseAddr(ch.Address), tlb.MustFromTON("0.16"), msg)
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("cooperative commit transaction completed")
+	log.Info().Str("addr", ch.Address).Str("hash", base64.StdEncoding.EncodeToString(msgHash)).Msg("cooperative commit transaction completed")
 	return nil
 }
 
@@ -733,11 +734,11 @@ func (s *Service) executeCooperativeClose(ctx context.Context, req *payments.Coo
 		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
-	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msg))
+	msgHash, err := s.wallet.DoTransaction(ctx, "Cooperative channel close", address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msg)
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("cooperative close transaction completed")
+	log.Info().Str("addr", channel.Address).Str("hash", base64.StdEncoding.EncodeToString(msgHash)).Msg("cooperative close transaction completed")
 
 	return nil
 }
@@ -807,12 +808,12 @@ func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel
 	theirToWithdraw := new(big.Int).Sub(theirWithdraw.Nano(), maxTheirWithdraw)
 
 	// this is not locked balance
-	ourBalance, err := channel.CalcBalance(false)
+	ourBalance, _, err := channel.CalcBalance(false)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to calc our balance: %w", err)
 	}
 
-	theirBalance, err := channel.CalcBalance(true)
+	theirBalance, _, err := channel.CalcBalance(true)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to calc their balance: %w", err)
 	}
@@ -919,9 +920,13 @@ func (s *Service) getCooperativeCloseRequest(channel *db.Channel) (*payments.Coo
 }
 
 func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr string) error {
-	channel, err := s.GetActiveChannel(ctx, channelAddr)
+	channel, err := s.GetChannel(ctx, channelAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
+	}
+
+	if channel.Status != db.ChannelStateActive {
+		return fmt.Errorf("channel is not active")
 	}
 
 	channel.AcceptingActions = false
@@ -929,12 +934,7 @@ func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr strin
 		return fmt.Errorf("failed to update channel: %w", err)
 	}
 
-	block, err := s.ton.CurrentMasterchainInfo(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get master block: %w", err)
-	}
-
-	och, err := payments.NewPaymentChannelClient(s.ton).GetAsyncChannel(ctx, block, address.MustParseAddr(channelAddr), true)
+	och, err := s.channelClient.GetAsyncChannel(ctx, address.MustParseAddr(channelAddr), true)
 	if err != nil {
 		return fmt.Errorf("failed to get onchain channel: %w", err)
 	}
@@ -973,11 +973,11 @@ func (s *Service) startUncooperativeClose(ctx context.Context, channelAddr strin
 		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
-	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
+	msgHash, err := s.wallet.DoTransaction(ctx, "Channel closure initiation, because peer not responding for too long", address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell)
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("uncooperative close transaction completed")
+	log.Info().Str("addr", channel.Address).Str("hash", base64.StdEncoding.EncodeToString(msgHash)).Msg("uncooperative close transaction completed")
 
 	return nil
 }
@@ -988,12 +988,7 @@ func (s *Service) challengeChannelState(ctx context.Context, channelAddr string)
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	block, err := s.ton.CurrentMasterchainInfo(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get master block: %w", err)
-	}
-
-	och, err := payments.NewPaymentChannelClient(s.ton).GetAsyncChannel(ctx, block, address.MustParseAddr(channelAddr), true)
+	och, err := s.channelClient.GetAsyncChannel(ctx, address.MustParseAddr(channelAddr), true)
 	if err != nil {
 		return fmt.Errorf("failed to get onchain channel: %w", err)
 	}
@@ -1030,11 +1025,11 @@ func (s *Service) challengeChannelState(ctx context.Context, channelAddr string)
 		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
-	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
+	msgHash, err := s.wallet.DoTransaction(ctx, "Channel state challenge, because peer committed older state", address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell)
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("challenge channel state transaction completed")
+	log.Info().Str("addr", channel.Address).Str("hash", base64.StdEncoding.EncodeToString(msgHash)).Msg("challenge channel state transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
@@ -1046,12 +1041,7 @@ func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAd
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	block, err := s.ton.CurrentMasterchainInfo(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get master block: %w", err)
-	}
-
-	och, err := payments.NewPaymentChannelClient(s.ton).GetAsyncChannel(ctx, block, address.MustParseAddr(channelAddr), true)
+	och, err := s.channelClient.GetAsyncChannel(ctx, address.MustParseAddr(channelAddr), true)
 	if err != nil {
 		return fmt.Errorf("failed to get onchain channel: %w", err)
 	}
@@ -1070,18 +1060,17 @@ func (s *Service) finishUncooperativeChannelClose(ctx context.Context, channelAd
 		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
-	tx, _, err := s.wallet.SendWaitTransaction(ctx, wallet.SimpleMessage(address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell))
+	msgHash, err := s.wallet.DoTransaction(ctx, "Complete channel closure procedure", address.MustParseAddr(channel.Address), tlb.MustFromTON("0.05"), msgCell)
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
 	}
-	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("finish uncooperative close transaction completed")
+	log.Info().Str("addr", channel.Address).Str("hash", base64.StdEncoding.EncodeToString(msgHash)).Msg("finish uncooperative close transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
 }
 
 func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr string) error {
-	const messagesPerTransaction = 20
 	const conditionsPerMessage = 30
 
 	log.Info().Str("address", channelAddr).Msg("settling conditionals")
@@ -1097,12 +1086,7 @@ func (s *Service) settleChannelConditionals(ctx context.Context, channelAddr str
 		return nil
 	}
 
-	block, err := s.ton.CurrentMasterchainInfo(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get master block: %w", err)
-	}
-
-	och, err := payments.NewPaymentChannelClient(s.ton).GetAsyncChannel(ctx, block, address.MustParseAddr(channelAddr), true)
+	och, err := s.channelClient.GetAsyncChannel(ctx, address.MustParseAddr(channelAddr), true)
 	if err != nil {
 		return fmt.Errorf("failed to get onchain channel: %w", err)
 	}
@@ -1278,22 +1262,26 @@ func (s *Service) executeSettleStep(ctx context.Context, channelAddr string, mes
 		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
-	var list []*wallet.Message
+	var list []WalletMessage
 	for _, message := range messages {
-		list = append(list, wallet.SimpleMessage(address.MustParseAddr(channelAddr), tlb.MustFromTON("0.5"), message))
+		list = append(list, WalletMessage{
+			To:     address.MustParseAddr(channelAddr),
+			Amount: tlb.MustFromTON("0.5"),
+			Body:   message,
+		})
 	}
 
-	tx, _, err := s.wallet.SendManyWaitTransaction(ctx, list)
+	msgHash, err := s.wallet.DoTransactionMany(ctx, fmt.Sprintf("Channel actions settle step %d (required to resolve pending virtual channels)", step), list)
 	if err != nil {
 		return fmt.Errorf("failed to send internal messages to channel: %w", err)
 	}
-	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Int("step", step).Int("messages", len(list)).Msg("settle conditions step transaction completed")
+	log.Info().Str("addr", channel.Address).Str("hash", base64.StdEncoding.EncodeToString(msgHash)).Int("step", step).Int("messages", len(list)).Msg("settle conditions step transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
 }
 
-func (s *Service) executeTopup(ctx context.Context, channelAddr string, amount tlb.Coins) error {
+func (s *Service) ExecuteTopup(ctx context.Context, channelAddr string, amount tlb.Coins) error {
 	log.Info().Str("address", channelAddr).Msg("executing topup...")
 
 	if amount.Nano().Sign() <= 0 {
@@ -1322,24 +1310,27 @@ func (s *Service) executeTopup(ctx context.Context, channelAddr string, amount t
 		return fmt.Errorf("failed to serialize message to cell: %w", err)
 	}
 
-	var msg *wallet.Message
+	var msgHash []byte
 	if channel.JettonAddress != "" {
-		master := jetton.NewJettonMasterClient(s.ton, address.MustParseAddr(channel.JettonAddress))
-
-		jw, err := master.GetJettonWallet(ctx, s.wallet.WalletAddress())
+		jw, err := s.ton.GetJettonWalletAddress(ctx, address.MustParseAddr(channel.JettonAddress), s.wallet.WalletAddress())
 		if err != nil {
 			return fmt.Errorf("failed to get jetton wallet: %w", err)
 		}
 
-		tp, err := jw.BuildTransferPayloadV2(address.MustParseAddr(channelAddr), s.wallet.WalletAddress(), amount, tlb.MustFromTON("0.035"), c, nil)
+		tp, err := buildJettonTransferPayload(address.MustParseAddr(channelAddr), s.wallet.WalletAddress(), amount, tlb.MustFromTON("0.035"), c, nil)
 		if err != nil {
 			return fmt.Errorf("failed to build transfer payload: %w", err)
 		}
-		msg = wallet.SimpleMessage(jw.Address(), tlb.MustFromTON("0.07"), tp)
+
+		msgHash, err = s.wallet.DoTransaction(ctx, "Channel balance top up (jetton)", jw, tlb.MustFromTON("0.07"), tp)
+		if err != nil {
+			return fmt.Errorf("failed to send internal messages to channel (via jetton): %w", err)
+		}
 	} else if channel.ExtraCurrencyID > 0 {
-		msg = wallet.SimpleMessage(address.MustParseAddr(channelAddr), tlb.MustFromTON("0.07"), c)
-		msg.InternalMessage.ExtraCurrencies = cell.NewDict(32)
-		_ = msg.InternalMessage.ExtraCurrencies.SetIntKey(big.NewInt(int64(channel.ExtraCurrencyID)), cell.BeginCell().MustStoreBigVarUInt(amount.Nano(), 32).EndCell())
+		msgHash, err = s.wallet.DoTransactionEC(ctx, "Channel balance top up (extra currency)", address.MustParseAddr(channelAddr), tlb.MustFromTON("0.07"), c, channel.ExtraCurrencyID, amount)
+		if err != nil {
+			return fmt.Errorf("failed to send internal messages to channel: %w", err)
+		}
 	} else {
 		// add ton accept fee
 		toSend, err := tlb.FromNano(new(big.Int).Add(amount.Nano(), tlb.MustFromTON("0.03").Nano()), 9)
@@ -1347,15 +1338,53 @@ func (s *Service) executeTopup(ctx context.Context, channelAddr string, amount t
 			return fmt.Errorf("failed to convert amount to nano: %w", err)
 		}
 
-		msg = wallet.SimpleMessage(address.MustParseAddr(channelAddr), toSend, c)
+		msgHash, err = s.wallet.DoTransaction(ctx, "Channel balance top up", address.MustParseAddr(channelAddr), toSend, c)
+		if err != nil {
+			return fmt.Errorf("failed to send internal messages to channel: %w", err)
+		}
 	}
 
-	tx, _, err := s.wallet.SendManyWaitTransaction(ctx, []*wallet.Message{msg})
-	if err != nil {
-		return fmt.Errorf("failed to send internal messages to channel: %w", err)
-	}
-	log.Info().Str("hash", base64.StdEncoding.EncodeToString(tx.Hash)).Msg("topup transaction completed")
+	log.Info().Str("addr", channel.Address).Str("hash", base64.StdEncoding.EncodeToString(msgHash)).Msg("topup transaction completed")
 
 	// TODO: wait event from invalidator here to confirm
 	return nil
+}
+
+// we copied it here to lower binary size for wasm build (because of imports chain)
+func buildJettonTransferPayload(to, responseTo *address.Address, amountCoins, amountForwardTON tlb.Coins, payloadForward, customPayload *cell.Cell) (*cell.Cell, error) {
+	type TransferPayload struct {
+		_                   tlb.Magic        `tlb:"#0f8a7ea5"`
+		QueryID             uint64           `tlb:"## 64"`
+		Amount              tlb.Coins        `tlb:"."`
+		Destination         *address.Address `tlb:"addr"`
+		ResponseDestination *address.Address `tlb:"addr"`
+		CustomPayload       *cell.Cell       `tlb:"maybe ^"`
+		ForwardTONAmount    tlb.Coins        `tlb:"."`
+		ForwardPayload      *cell.Cell       `tlb:"either . ^"`
+	}
+
+	if payloadForward == nil {
+		payloadForward = cell.BeginCell().EndCell()
+	}
+
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, err
+	}
+	rnd := binary.LittleEndian.Uint64(buf)
+
+	body, err := tlb.ToCell(TransferPayload{
+		QueryID:             rnd,
+		Amount:              amountCoins,
+		Destination:         to,
+		ResponseDestination: responseTo,
+		CustomPayload:       customPayload,
+		ForwardTONAmount:    amountForwardTON,
+		ForwardPayload:      payloadForward,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert TransferPayload to cell: %w", err)
+	}
+
+	return body, nil
 }

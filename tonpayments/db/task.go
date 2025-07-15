@@ -1,4 +1,4 @@
-package leveldb
+package db
 
 import (
 	"context"
@@ -6,19 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/syndtr/goleveldb/leveldb/opt"
-	"github.com/syndtr/goleveldb/leveldb/util"
-	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"sort"
 	"time"
 )
 
-func (d *DB) DumpTasks(ctx context.Context, prefix string) (res []*db.Task, err error) {
-	tx := d.getExecutor(ctx)
+func (d *DB) DumpTasks(ctx context.Context, prefix string) (res []*Task, err error) {
+	tx := d.storage.GetExecutor(ctx)
 
 	keyIndex := []byte("tv:" + prefix)
 
-	iter := tx.NewIterator(util.BytesPrefix(keyIndex), nil)
+	iter := tx.NewIterator(keyIndex, true)
 	defer iter.Release()
 
 	for iter.Next() {
@@ -28,7 +25,7 @@ func (d *DB) DumpTasks(ctx context.Context, prefix string) (res []*db.Task, err 
 		default:
 		}
 
-		var task *db.Task
+		var task *Task
 		if err := json.Unmarshal(iter.Value(), &task); err != nil {
 			return nil, fmt.Errorf("failed to decode json data: %w", err)
 		}
@@ -43,13 +40,13 @@ func (d *DB) DumpTasks(ctx context.Context, prefix string) (res []*db.Task, err 
 	return res, nil
 }
 
-func (d *DB) ListActiveTasks(ctx context.Context, poolName string) ([]*db.Task, error) {
-	var result []*db.Task
-	tx := d.getExecutor(ctx)
+func (d *DB) ListActiveTasks(ctx context.Context, poolName string) ([]*Task, error) {
+	var result []*Task
+	tx := d.storage.GetExecutor(ctx)
 
 	keyIndex := []byte("ti:" + poolName + ":")
 
-	iter := tx.NewIterator(util.BytesPrefix(keyIndex), nil)
+	iter := tx.NewIterator(keyIndex, true)
 	defer iter.Release()
 
 	now := time.Now()
@@ -67,12 +64,12 @@ func (d *DB) ListActiveTasks(ctx context.Context, poolName string) ([]*db.Task, 
 			continue
 		}
 
-		data, err := tx.Get(dataKey, nil)
+		data, err := tx.Get(dataKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get task by index: %w", err)
 		}
 
-		var task *db.Task
+		var task *Task
 		if err := json.Unmarshal(data, &task); err != nil {
 			return nil, fmt.Errorf("failed to decode json data: %w", err)
 		}
@@ -88,14 +85,14 @@ func (d *DB) ListActiveTasks(ctx context.Context, poolName string) ([]*db.Task, 
 	return result, nil
 }
 
-func (d *DB) AcquireTask(ctx context.Context, poolName string) (*db.Task, error) {
-	var result *db.Task
+func (d *DB) AcquireTask(ctx context.Context, poolName string) (*Task, error) {
+	var result *Task
 	err := d.Transaction(ctx, func(ctx context.Context) error {
-		tx := d.getExecutor(ctx)
+		tx := d.storage.GetExecutor(ctx)
 
 		keyIndex := []byte("ti:" + poolName + ":")
 
-		iter := tx.NewIterator(util.BytesPrefix(keyIndex), nil)
+		iter := tx.NewIterator(keyIndex, true)
 		defer iter.Release()
 
 		now := time.Now()
@@ -119,12 +116,12 @@ func (d *DB) AcquireTask(ctx context.Context, poolName string) (*db.Task, error)
 
 			dataKey := iter.Value()
 
-			data, err := tx.Get(dataKey, nil)
+			data, err := tx.Get(dataKey)
 			if err != nil {
 				return fmt.Errorf("failed to get task by index: %w", err)
 			}
 
-			var task *db.Task
+			var task *Task
 			if err := json.Unmarshal(data, &task); err != nil {
 				return fmt.Errorf("failed to decode json data: %w", err)
 			}
@@ -149,9 +146,7 @@ func (d *DB) AcquireTask(ctx context.Context, poolName string) (*db.Task, error)
 
 			if task.ExecuteTill != nil && task.ExecuteTill.Before(now) {
 				// task is expired, remove from index (queue)
-				if err = tx.Delete(key, &opt.WriteOptions{
-					Sync: true,
-				}); err != nil {
+				if err = tx.Delete(key); err != nil {
 					return fmt.Errorf("failed to delete index: %w", err)
 				}
 				continue
@@ -168,9 +163,7 @@ func (d *DB) AcquireTask(ctx context.Context, poolName string) (*db.Task, error)
 				return fmt.Errorf("failed to encode json: %w", err)
 			}
 
-			if err = tx.Put(dataKey, data, &opt.WriteOptions{
-				Sync: true,
-			}); err != nil {
+			if err = tx.Put(dataKey, data); err != nil {
 				return fmt.Errorf("failed to put index: %w", err)
 			}
 
@@ -202,7 +195,7 @@ func (d *DB) CreateTask(ctx context.Context, poolName, typ, queue, id string, da
 			after = *executeAfter
 		}
 
-		if err = d.createTask(ctx, &db.Task{
+		if err = d.createTask(ctx, &Task{
 			ID:           id,
 			Type:         typ,
 			Queue:        queue,
@@ -211,7 +204,7 @@ func (d *DB) CreateTask(ctx context.Context, poolName, typ, queue, id string, da
 			ExecuteTill:  executeTill,
 			CreatedAt:    time.Now(),
 		}, poolName); err != nil {
-			if errors.Is(err, db.ErrAlreadyExists) {
+			if errors.Is(err, ErrAlreadyExists) {
 				// idempotency
 				return nil
 			}
@@ -221,7 +214,7 @@ func (d *DB) CreateTask(ctx context.Context, poolName, typ, queue, id string, da
 	})
 }
 
-func (d *DB) CompleteTask(ctx context.Context, poolName string, task *db.Task) error {
+func (d *DB) CompleteTask(ctx context.Context, poolName string, task *Task) error {
 	if task.CompletedAt != nil {
 		return nil
 	}
@@ -236,14 +229,14 @@ func (d *DB) CompleteTask(ctx context.Context, poolName string, task *db.Task) e
 	keyOrderIndex := getTaskIndexKey(task, poolName)
 
 	return d.Transaction(ctx, func(ctx context.Context) error {
-		tx := d.getExecutor(ctx)
+		tx := d.storage.GetExecutor(ctx)
 
-		has, err := tx.Has(key, nil)
+		has, err := tx.Has(key)
 		if err != nil {
 			return fmt.Errorf("failed to check existance: %w", err)
 		}
 		if !has {
-			return db.ErrNotFound
+			return ErrNotFound
 		}
 
 		data, err := json.Marshal(task)
@@ -251,21 +244,17 @@ func (d *DB) CompleteTask(ctx context.Context, poolName string, task *db.Task) e
 			return fmt.Errorf("failed to encode json: %w", err)
 		}
 
-		if err = tx.Put(key, data, &opt.WriteOptions{
-			Sync: true,
-		}); err != nil {
+		if err = tx.Put(key, data); err != nil {
 			return fmt.Errorf("failed to put: %w", err)
 		}
-		if err = tx.Delete(keyOrderIndex, &opt.WriteOptions{
-			Sync: true,
-		}); err != nil {
+		if err = tx.Delete(keyOrderIndex); err != nil {
 			return fmt.Errorf("failed to put index: %w", err)
 		}
 		return nil
 	})
 }
 
-func (d *DB) RetryTask(ctx context.Context, task *db.Task, reason string, retryAt time.Time) error {
+func (d *DB) RetryTask(ctx context.Context, task *Task, reason string, retryAt time.Time) error {
 	if task.CompletedAt != nil || task.LockedTill == nil {
 		return nil
 	}
@@ -277,14 +266,14 @@ func (d *DB) RetryTask(ctx context.Context, task *db.Task, reason string, retryA
 	key := append([]byte("tv:"), []byte(task.ID)...)
 
 	return d.Transaction(ctx, func(ctx context.Context) error {
-		tx := d.getExecutor(ctx)
+		tx := d.storage.GetExecutor(ctx)
 
-		has, err := tx.Has(key, nil)
+		has, err := tx.Has(key)
 		if err != nil {
 			return fmt.Errorf("failed to check existance: %w", err)
 		}
 		if !has {
-			return db.ErrNotFound
+			return ErrNotFound
 		}
 
 		data, err := json.Marshal(task)
@@ -292,30 +281,28 @@ func (d *DB) RetryTask(ctx context.Context, task *db.Task, reason string, retryA
 			return fmt.Errorf("failed to encode json: %w", err)
 		}
 
-		if err = tx.Put(key, data, &opt.WriteOptions{
-			Sync: true,
-		}); err != nil {
+		if err = tx.Put(key, data); err != nil {
 			return fmt.Errorf("failed to put: %w", err)
 		}
 		return nil
 	})
 }
 
-func (d *DB) createTask(ctx context.Context, task *db.Task, poolName string) error {
+func (d *DB) createTask(ctx context.Context, task *Task, poolName string) error {
 	key := append([]byte("tv:"), []byte(task.ID)...)
 
 	// we need an index to know processing order
 	keyOrderIndex := getTaskIndexKey(task, poolName)
 
 	return d.Transaction(ctx, func(ctx context.Context) error {
-		tx := d.getExecutor(ctx)
+		tx := d.storage.GetExecutor(ctx)
 
-		has, err := tx.Has(key, nil)
+		has, err := tx.Has(key)
 		if err != nil {
 			return fmt.Errorf("failed to check existance: %w", err)
 		}
 		if has {
-			return db.ErrAlreadyExists
+			return ErrAlreadyExists
 		}
 
 		data, err := json.Marshal(task)
@@ -323,21 +310,17 @@ func (d *DB) createTask(ctx context.Context, task *db.Task, poolName string) err
 			return fmt.Errorf("failed to encode json: %w", err)
 		}
 
-		if err = tx.Put(key, data, &opt.WriteOptions{
-			Sync: true,
-		}); err != nil {
+		if err = tx.Put(key, data); err != nil {
 			return fmt.Errorf("failed to put data: %w", err)
 		}
-		if err = tx.Put(keyOrderIndex, key, &opt.WriteOptions{
-			Sync: true,
-		}); err != nil {
+		if err = tx.Put(keyOrderIndex, key); err != nil {
 			return fmt.Errorf("failed to put index: %w", err)
 		}
 		return nil
 	})
 }
 
-func getTaskIndexKey(task *db.Task, poolName string) []byte {
+func getTaskIndexKey(task *Task, poolName string) []byte {
 	at := make([]byte, 8)
 	binary.BigEndian.PutUint64(at, uint64(task.ExecuteAfter.UTC().UnixNano()))
 

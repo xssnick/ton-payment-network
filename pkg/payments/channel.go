@@ -6,23 +6,19 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"github.com/xssnick/ton-payment-network/tonpayments/chain/client"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
-	"github.com/xssnick/tonutils-go/ton"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"time"
 )
 
-type TonApi interface {
-	WaitForBlock(seqno uint32) ton.APIClientWrapped
-	CurrentMasterchainInfo(ctx context.Context) (_ *ton.BlockIDExt, err error)
-	RunGetMethod(ctx context.Context, blockInfo *ton.BlockIDExt, addr *address.Address, method string, params ...any) (*ton.ExecutionResult, error)
-	SendExternalMessage(ctx context.Context, msg *tlb.ExternalMessage) error
-	GetAccount(ctx context.Context, block *ton.BlockIDExt, addr *address.Address) (*tlb.Account, error)
+type ChainAPI interface {
+	GetAccount(ctx context.Context, addr *address.Address) (*client.Account, error)
 }
 
 type Client struct {
-	api TonApi
+	api ChainAPI
 }
 
 type ChannelStatus int8
@@ -44,7 +40,7 @@ type AsyncChannel struct {
 
 type ChannelID []byte
 
-func NewPaymentChannelClient(api TonApi) *Client {
+func NewPaymentChannelClient(api ChainAPI) *Client {
 	return &Client{
 		api: api,
 	}
@@ -52,13 +48,13 @@ func NewPaymentChannelClient(api TonApi) *Client {
 
 var ErrVerificationNotPassed = fmt.Errorf("verification not passed")
 
-func (c *Client) GetAsyncChannel(ctx context.Context, block *ton.BlockIDExt, addr *address.Address, verify bool) (*AsyncChannel, error) {
-	acc, err := c.api.WaitForBlock(block.SeqNo).GetAccount(ctx, block, addr)
+func (c *Client) GetAsyncChannel(ctx context.Context, addr *address.Address, verify bool) (*AsyncChannel, error) {
+	acc, err := c.api.GetAccount(ctx, addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get account: %w", err)
 	}
 
-	if !acc.IsActive || !acc.State.IsValid || acc.State.Status != tlb.AccountStatusActive {
+	if !acc.IsActive {
 		return nil, fmt.Errorf("channel account is not active")
 	}
 

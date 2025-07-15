@@ -6,10 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
-	"github.com/xssnick/ton-payment-network/tonpayments/metrics"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
@@ -38,7 +37,7 @@ func (s *Service) addPeersForChannels() error {
 }
 
 func (s *Service) taskExecutor() {
-	if metrics.Registered {
+	if s.useMetrics {
 		go s.taskMonitor()
 	}
 
@@ -131,6 +130,20 @@ func (s *Service) taskExecutor() {
 						}
 					}
 
+					var vState payments.VirtualChannelState
+					if err = tlb.LoadFromCell(&vState, state.BeginParse()); err != nil {
+						return fmt.Errorf("failed to load virtual channel state cell: %w", err)
+					}
+
+					evData := db.ChannelHistoryActionTransferOutData{
+						Amount: vState.Amount.String(),
+						To:     meta.FinalDestination,
+					}
+					jsonData, err := json.Marshal(evData)
+					if err != nil {
+						log.Error().Err(err).Msg("failed to marshal event data")
+					}
+
 					toChannel, lockId, unlock, err := s.AcquireChannel(ctx, meta.Outgoing.ChannelAddress)
 					if err != nil {
 						return fmt.Errorf("failed to acquire 'to' channel: %w", err)
@@ -144,7 +157,7 @@ func (s *Service) taskExecutor() {
 						}
 
 						_, vch, err := payments.FindVirtualChannel(channel.Their.Conditionals, data.VirtualKey)
-						if err != nil {
+						if err != nil && !errors.Is(err, payments.ErrNotFound) {
 							return fmt.Errorf("failed to find virtual channel with 'from': %w", err)
 						}
 
@@ -158,7 +171,11 @@ func (s *Service) taskExecutor() {
 							}
 						}
 
-						tryTill := time.Unix(vch.Deadline, 0)
+						tryTill := time.Unix(channel.SafeOnchainClosePeriod+int64(s.cfg.MinSafeVirtualChannelTimeoutSec), 0)
+						if vch != nil {
+							tryTill = time.Unix(vch.Deadline, 0)
+						}
+
 						if err = s.db.CreateTask(ctx, PaymentsTaskPool, "close-next-virtual", meta.Incoming.ChannelAddress,
 							"close-next-"+base64.StdEncoding.EncodeToString(data.VirtualKey),
 							db.CloseNextVirtualTask{
@@ -176,6 +193,13 @@ func (s *Service) taskExecutor() {
 						if err != nil {
 							return fmt.Errorf("failed to propose action: %w", err)
 						}
+					}
+
+					if err = s.db.CreateChannelEvent(ctx, toChannel, time.Now(), db.ChannelHistoryItem{
+						Action: db.ChannelHistoryActionTransferOut,
+						Data:   jsonData,
+					}); err != nil {
+						return fmt.Errorf("failed to create channel event: %w", err)
 					}
 				case "close-next-virtual":
 					var data db.CloseNextVirtualTask
@@ -335,6 +359,7 @@ func (s *Service) taskExecutor() {
 						}
 
 						meta.Incoming = &db.VirtualChannelMetaSide{
+							SenderKey:             data.SenderKey,
 							ChannelAddress:        data.PrevChannelAddress,
 							Capacity:              tlb.MustFromNano(prevVch.Capacity, int(cc.Decimals)).String(),
 							Fee:                   tlb.MustFromNano(prevVch.Fee, int(cc.Decimals)).String(),
@@ -607,6 +632,10 @@ func (s *Service) taskExecutor() {
 					}
 					defer unlock()
 
+					if ch.Status != db.ChannelStateActive {
+						return nil
+					}
+
 					if ch.InitAt.Before(data.ChannelInitiatedAt) {
 						// expected channel already closed
 						return nil
@@ -628,9 +657,17 @@ func (s *Service) taskExecutor() {
 
 					log.Info().Str("address", ch.Address).Msg("trying cooperative close")
 
-					ch.AcceptingActions = false
-					if err = s.db.UpdateChannel(ctx, ch); err != nil {
-						return fmt.Errorf("failed to update channel: %w", err)
+					if ch.AcceptingActions {
+						err = s.db.Transaction(ctx, func(ctx context.Context) error {
+							ch.AcceptingActions = false
+							if err = s.db.UpdateChannel(ctx, ch); err != nil {
+								return fmt.Errorf("failed to update channel: %w", err)
+							}
+							return nil
+						})
+						if err != nil {
+							return fmt.Errorf("failed to update channel tx: %w", err)
+						}
 					}
 
 					partySignature, err := s.requestAction(ctx, ch.Address, transport.CooperativeCloseAction{
@@ -759,6 +796,10 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to get channel: %w", err)
 					}
 
+					if ch.Status != db.ChannelStateActive {
+						return nil
+					}
+
 					if ch.InitAt.Before(data.ChannelInitiatedAt) {
 						// expected channel already closed
 						return nil
@@ -769,7 +810,7 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to resolve coin config: %w", err)
 					}
 
-					if err = s.executeTopup(ctx, data.Address, tlb.MustFromDecimal(data.Amount, int(cc.Decimals))); err != nil {
+					if err = s.ExecuteTopup(ctx, data.Address, tlb.MustFromDecimal(data.Amount, int(cc.Decimals))); err != nil {
 						return fmt.Errorf("failed to execute topup: %w", err)
 					}
 				case "withdraw":
@@ -778,13 +819,22 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("invalid json: %w", err)
 					}
 
+					ch, err := s.db.GetChannel(ctx, data.Address)
+					if err != nil {
+						return fmt.Errorf("failed to get channel: %w", err)
+					}
+
+					if ch.Status != db.ChannelStateActive {
+						return nil
+					}
+
 					ch, _, unlock, err := s.AcquireChannel(ctx, data.Address)
 					if err != nil {
 						return fmt.Errorf("failed to acquire channel: %w", err)
 					}
 					defer unlock()
 
-					// TODO: check if not withdrawed already
+					// TODO: check if not withdrawn already
 					if ch.InitAt.Before(data.ChannelInitiatedAt) {
 						// expected channel already closed
 						return nil

@@ -1,16 +1,17 @@
+//go:build !(js && wasm)
+
 package tonpayments
 
 import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/metrics"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
-	"github.com/xssnick/tonutils-go/ton/jetton"
 	"math/big"
 	"strconv"
 	"time"
@@ -28,24 +29,19 @@ func (s *Service) walletMonitor() {
 			ctx, cancel := context.WithTimeout(s.globalCtx, 10*time.Second)
 			defer cancel()
 
-			master, err := s.ton.CurrentMasterchainInfo(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to get masterchain info: %w", err)
-			}
-
-			acc, err := s.ton.GetAccount(ctx, master, s.wallet.WalletAddress())
+			acc, err := s.ton.GetAccount(ctx, s.wallet.WalletAddress())
 			if err != nil {
 				return fmt.Errorf("failed to get ton balance: %w", err)
 			}
 
-			if acc.State == nil {
+			if !acc.HasState {
 				return fmt.Errorf("account is not yet initialized")
 			}
 
 			for ec, config := range s.cfg.SupportedCoins.ExtraCurrencies {
 				var balance float64
-				if !acc.State.ExtraCurrencies.IsEmpty() {
-					val, err := acc.State.ExtraCurrencies.LoadValueByIntKey(big.NewInt(int64(ec)))
+				if !acc.ExtraCurrencies.IsEmpty() {
+					val, err := acc.ExtraCurrencies.LoadValueByIntKey(big.NewInt(int64(ec)))
 					if err != nil {
 						log.Trace().Err(err).Msg("failed to get ec key")
 						continue
@@ -65,14 +61,7 @@ func (s *Service) walletMonitor() {
 
 			for jettonAddr, config := range s.cfg.SupportedCoins.Jettons {
 				var balance float64
-				jc := jetton.NewJettonMasterClient(s.ton, address.MustParseAddr(jettonAddr))
-				jw, err := jc.GetJettonWallet(ctx, s.wallet.WalletAddress())
-				if err != nil {
-					log.Trace().Err(err).Msg("failed to get jetton wallet")
-					continue
-				}
-
-				jb, err := jw.GetBalance(ctx)
+				jb, err := s.ton.GetJettonBalance(ctx, address.MustParseAddr(jettonAddr), s.wallet.WalletAddress())
 				if err != nil {
 					log.Trace().Err(err).Msg("failed to get jetton balance")
 					continue
@@ -83,7 +72,7 @@ func (s *Service) walletMonitor() {
 				metrics.WalletBalance.WithLabelValues(config.Symbol).Set(balance)
 			}
 
-			balance, _ := strconv.ParseFloat(acc.State.Balance.String(), 64)
+			balance, _ := strconv.ParseFloat(acc.Balance.String(), 64)
 			metrics.WalletBalance.WithLabelValues("TON").Set(balance)
 
 			return nil
@@ -126,6 +115,7 @@ func (s *Service) channelsMonitor() {
 			coinConfig, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, false)
 			if err != nil {
 				log.Error().Err(err).Msg("failed to resolve coin config")
+				continue next
 			}
 
 			channelName := "other"
@@ -197,7 +187,7 @@ func (s *Service) channelsMonitor() {
 					case "withdrawn":
 						value = onchainState.Withdrawn
 					case "balance":
-						value, err = channel.CalcBalance(isOurSide)
+						value, _, err = channel.CalcBalance(isOurSide)
 						if err != nil {
 							log.Error().Err(err).Msg("failed to calc balance")
 							continue next

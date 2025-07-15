@@ -77,6 +77,7 @@ type CommitVirtualTask struct {
 }
 
 type OpenVirtualTask struct {
+	SenderKey           ed25519.PublicKey
 	FinalDestinationKey ed25519.PublicKey // known only for initiator
 	PrevChannelAddress  string
 	ChannelAddress      string

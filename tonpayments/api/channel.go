@@ -16,7 +16,7 @@ import (
 )
 
 type Onchain struct {
-	CommittedSeqno uint32 `json:"committed_seqno"`
+	CommittedSeqno uint64 `json:"committed_seqno"`
 	WalletAddress  string `json:"wallet_address"`
 	Deposited      string `json:"deposited"`
 	Withdrawn      string `json:"withdrawn"`
@@ -346,11 +346,11 @@ func convertChannel(c *db.Channel, cc *config.CoinConfig) (OnchainChannel, error
 		status = "inactive"
 	}
 
-	theirBalance, err := c.CalcBalance(true)
+	theirBalance, _, err := c.CalcBalance(true)
 	if err != nil {
 		return OnchainChannel{}, fmt.Errorf("failed to calc balance: %w", err)
 	}
-	ourBalance, err := c.CalcBalance(true)
+	ourBalance, _, err := c.CalcBalance(true)
 	if err != nil {
 		return OnchainChannel{}, fmt.Errorf("failed to calc balance: %w", err)
 	}

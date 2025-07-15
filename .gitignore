@@ -5,3 +5,6 @@ payment-network-config*.json
 payment-node
 *.log
 build
+*.wasm
+*.gz
+*.br

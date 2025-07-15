@@ -7,15 +7,18 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
-	"github.com/xssnick/tonutils-go/adnl"
+	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math"
 	"math/big"
 	mRand "math/rand"
+	"reflect"
 	"time"
 )
+
+var ErrNotConnected = fmt.Errorf("not connected with peer")
 
 func init() {
 	tl.Register(Ping{}, "payments.ping value:long = payments.Ping")
@@ -23,7 +26,7 @@ func init() {
 
 	tl.Register(Decision{}, "payments.decision agreed:Bool reason:string signature:bytes = payments.Decision")
 	tl.Register(ProposalDecision{}, "payments.proposalDecision agreed:Bool reason:string signedState:bytes = payments.ProposalDecision")
-	tl.Register(ChannelConfigDecision{}, "payments.channelConfig ok:Bool walletAddr:int256 reason:string = payments.ChannelConfigDecision")
+	tl.Register(ChannelConfigDecision{}, "payments.channelConfig ok:Bool walletAddr:int256 reason:string proxyAllowed:bool proxyMinFee:bytes proxyMaxCap:bytes proxyPercentFeeFloat:long = payments.ChannelConfigDecision")
 	tl.Register(AuthenticateToSign{}, "payments.authenticateToSign a:int256 b:int256 timestamp:long = payments.AuthenticateToSign")
 	tl.Register(NodeAddress{}, "payments.nodeAddress adnl_addr:int256 = payments.NodeAddress")
 
@@ -37,13 +40,15 @@ func init() {
 	tl.Register(CooperativeCommitAction{}, "payments.cooperativeCommitAction signedCommitRequest:bytes = payments.Action")
 	tl.Register(IncrementStatesAction{}, "payments.incrementStatesAction wantResponse:Bool = payments.Action")
 
-	tl.Register(ProposeChannelConfig{}, "payments.proposeChannelConfig jettonAddr:int256 ec_id:int excessFee:bytes quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int = payments.Request")
+	tl.Register(ProposeChannelConfig{}, "payments.proposeChannelConfig jettonAddr:int256 ec_id:int excessFee:bytes quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int nodeVersion:int codeHash:int256 = payments.Request")
 	tl.Register(RequestAction{}, "payments.requestAction channelAddr:int256 action:payments.Action = payments.Request")
 	tl.Register(ProposeAction{}, "payments.proposeAction lockId:long channelAddr:int256 action:payments.Action state:bytes conditionals:bytes = payments.Request")
 	tl.Register(Authenticate{}, "payments.authenticate key:int256 timestamp:long signature:bytes = payments.Authenticate")
 
 	tl.Register(InstructionContainer{}, "payments.instructionContainer hash:int256 data:bytes = payments.InstructionContainer")
-	tl.Register(InstructionsToSign{}, "payments.instructionsToSign list:(vector payments.instructionContainer) = payments.InstructionsToSign")
+	tl.RegisterWithFabric(InstructionsToSign{}, "payments.instructionsToSign list:(vector payments.instructionContainer) = payments.InstructionsToSign", func() reflect.Value {
+		return reflect.ValueOf(&InstructionsToSign{})
+	})
 	tl.Register(OpenVirtualInstruction{}, "payments.openVirtualInstruction target:int256 expectedFee:bytes expectedCapacity:bytes expectedDeadline:long nextTarget:int256 nextFee:bytes nextCapacity:bytes nextDeadline:long finalState:bytes = payments.OpenVirtualInstruction")
 
 	tl.Register(RequestChannelLock{}, "payments.requestChannelLock lockId:long channel:int256 lock:Bool = payments.RequestChannelLock")
@@ -227,13 +232,26 @@ type ProposeChannelConfig struct {
 	QuarantineDuration       uint32 `tl:"int"`
 	MisbehaviorFine          []byte `tl:"bytes"`
 	ConditionalCloseDuration uint32 `tl:"int"`
+	NodeVersion              uint32 `tl:"int"`
+	CodeHash                 []byte `tl:"int256"`
 }
 
 // ChannelConfigDecision - response for ProposeChannelConfig
 type ChannelConfigDecision struct {
-	Ok         bool   `tl:"bool"`
-	WalletAddr []byte `tl:"int256"`
-	Reason     string `tl:"string"`
+	Ok                   bool   `tl:"bool"`
+	WalletAddr           []byte `tl:"int256"`
+	Reason               string `tl:"string"`
+	ProxyAllowed         bool   `tl:"bool"`
+	ProxyMinFee          []byte `tl:"bytes"`
+	ProxyMaxCap          []byte `tl:"bytes"`
+	ProxyPercentFeeFloat uint64 `tl:"long"`
+}
+
+type VirtualConfigResponse struct {
+	ProxyMaxCapacity *big.Int
+	ProxyMinFee      *big.Int
+	ProxyFeePercent  float64
+	AllowTunneling   bool
 }
 
 func (a *OpenVirtualAction) SetInstructions(actions []OpenVirtualInstruction, key ed25519.PrivateKey) error {
@@ -266,13 +284,13 @@ func (a *OpenVirtualAction) SetInstructions(actions []OpenVirtualInstruction, ke
 		// fill padding with random bytes to avoid potential zero padding attacks
 		_, _ = rand.Read(data[len(serializedActions[i]):])
 
-		sharedKey, err := adnl.SharedKey(actions[i].instructionPrivateKey, actions[i].Target)
+		sharedKey, err := keys.SharedKey(actions[i].instructionPrivateKey, actions[i].Target)
 		if err != nil {
 			return fmt.Errorf("failed to calc shared key: %w", err)
 		}
 
 		hash := sha256.Sum256(data)
-		stream, err := adnl.BuildSharedCipher(sharedKey, hash[:])
+		stream, err := keys.BuildSharedCipher(sharedKey, hash[:])
 		if err != nil {
 			return fmt.Errorf("failed to init cipher: %w", err)
 		}
@@ -303,13 +321,13 @@ func (a *OpenVirtualAction) DecryptOurInstruction(key ed25519.PrivateKey, instru
 		return nil, fmt.Errorf("incorrect signature")
 	}
 
-	sharedKey, err := adnl.SharedKey(key, instructionKey)
+	sharedKey, err := keys.SharedKey(key, instructionKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calc shared key: %w", err)
 	}
 
 	for _, instruction := range a.Instructions.List {
-		stream, err := adnl.BuildSharedCipher(sharedKey, instruction.Hash)
+		stream, err := keys.BuildSharedCipher(sharedKey, instruction.Hash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to init cipher: %w", err)
 		}
@@ -339,7 +357,7 @@ type TunnelChainPart struct {
 	Deadline time.Time
 }
 
-func GenerateTunnel(key ed25519.PrivateKey, chain []TunnelChainPart, stubSize uint8, withFinalState bool) (payments.VirtualChannel, ed25519.PublicKey, []OpenVirtualInstruction, error) {
+func GenerateTunnel(key ed25519.PrivateKey, chain []TunnelChainPart, stubSize uint8, withFinalState bool, senderKey ed25519.PrivateKey) (payments.VirtualChannel, ed25519.PublicKey, []OpenVirtualInstruction, error) {
 	if len(chain) == 0 {
 		return payments.VirtualChannel{}, nil, nil, fmt.Errorf("chain is empty")
 	}
@@ -362,9 +380,18 @@ func GenerateTunnel(key ed25519.PrivateKey, chain []TunnelChainPart, stubSize ui
 			Target:           chain[i].Target,
 		}
 
-		pub, private, err := ed25519.GenerateKey(nil)
-		if err != nil {
-			return payments.VirtualChannel{}, nil, nil, err
+		var err error
+		var pub ed25519.PublicKey
+		var private ed25519.PrivateKey
+		if i != len(chain)-1 || senderKey == nil {
+			pub, private, err = ed25519.GenerateKey(nil)
+			if err != nil {
+				return payments.VirtualChannel{}, nil, nil, err
+			}
+		} else {
+			// use sender key, so receiver will know from whom the transfer is received
+			pub = senderKey.Public().(ed25519.PublicKey)
+			private = senderKey
 		}
 
 		inst.instructionPrivateKey = private
@@ -399,51 +426,53 @@ func GenerateTunnel(key ed25519.PrivateKey, chain []TunnelChainPart, stubSize ui
 		list = append(list, inst)
 	}
 
-	// generate seed with cryptographic random
-	seed, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
-	if err != nil {
-		return payments.VirtualChannel{}, nil, nil, err
-	}
-	mRnd := mRand.New(mRand.NewSource(seed.Int64()))
+	if stubSize > 0 {
+		// generate seed with cryptographic random
+		seed, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
+		if err != nil {
+			return payments.VirtualChannel{}, nil, nil, err
+		}
+		mRnd := mRand.New(mRand.NewSource(seed.Int64()))
 
-	for i := 0; i < int(stubSize); i++ {
-		// all those actions will be encrypted, we use similar amounts
-		// just to keep bytes length similar to original for stronger security
+		for i := 0; i < int(stubSize); i++ {
+			// all those actions will be encrypted, we use similar amounts
+			// just to keep bytes length similar to original for stronger security
 
-		nextFee := randAmount(chain[len(chain)-1].Fee, chain[0].Fee)
-		nextCap := randAmount(chain[len(chain)-1].Capacity, chain[0].Capacity)
+			nextFee := randAmount(chain[len(chain)-1].Fee, chain[0].Fee)
+			nextCap := randAmount(chain[len(chain)-1].Capacity, chain[0].Capacity)
 
-		randKey := make([]byte, 32)
-		_, _ = rand.Read(randKey)
-		randKey2, _, _ := ed25519.GenerateKey(nil)
-		randKey3, randKey3prv, _ := ed25519.GenerateKey(nil)
+			randKey := make([]byte, 32)
+			_, _ = rand.Read(randKey)
+			randKey2, _, _ := ed25519.GenerateKey(nil)
+			randKey3, randKey3prv, _ := ed25519.GenerateKey(nil)
 
-		// spread deadlines to look similar to original
-		dlDiff := (chain[0].Deadline.UTC().Unix() - chain[len(chain)-1].Deadline.UTC().Unix()) * 2
-		if dlDiff < 3600 {
-			dlDiff = 3600
+			// spread deadlines to look similar to original
+			dlDiff := (chain[0].Deadline.UTC().Unix() - chain[len(chain)-1].Deadline.UTC().Unix()) * 2
+			if dlDiff < 3600 {
+				dlDiff = 3600
+			}
+
+			nextDl := (chain[len(chain)-1].Deadline.UTC().Unix() - dlDiff/2) + mRnd.Int63n(dlDiff)
+			expDl := nextDl + mRnd.Int63n(dlDiff)
+
+			list = append(list, OpenVirtualInstruction{
+				Target:                randKey2,
+				ExpectedFee:           randAmount(chain[len(chain)-1].Fee, nextFee).Bytes(),
+				ExpectedCapacity:      randAmount(chain[len(chain)-1].Capacity, nextCap).Bytes(),
+				ExpectedDeadline:      expDl,
+				NextTarget:            randKey,
+				NextInstructionKey:    randKey3,
+				NextFee:               nextFee.Bytes(),
+				NextDeadline:          nextDl,
+				NextCapacity:          nextCap.Bytes(),
+				instructionPrivateKey: randKey3prv,
+			})
 		}
 
-		nextDl := (chain[len(chain)-1].Deadline.UTC().Unix() - dlDiff/2) + mRnd.Int63n(dlDiff)
-		expDl := nextDl + mRnd.Int63n(dlDiff)
-
-		list = append(list, OpenVirtualInstruction{
-			Target:                randKey2,
-			ExpectedFee:           randAmount(chain[len(chain)-1].Fee, nextFee).Bytes(),
-			ExpectedCapacity:      randAmount(chain[len(chain)-1].Capacity, nextCap).Bytes(),
-			ExpectedDeadline:      expDl,
-			NextTarget:            randKey,
-			NextInstructionKey:    randKey3,
-			NextFee:               nextFee.Bytes(),
-			NextDeadline:          nextDl,
-			NextCapacity:          nextCap.Bytes(),
-			instructionPrivateKey: randKey3prv,
+		mRnd.Shuffle(len(list), func(i, j int) {
+			list[i], list[j] = list[j], list[i]
 		})
 	}
-
-	mRnd.Shuffle(len(list), func(i, j int) {
-		list[i], list[j] = list[j], list[i]
-	})
 
 	return vc, firstInstructionKey, list, nil
 }

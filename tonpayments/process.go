@@ -5,15 +5,15 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
-	db "github.com/xssnick/ton-payment-network/tonpayments/db"
+	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tlb"
-	"github.com/xssnick/tonutils-go/ton"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/big"
 	"reflect"
@@ -31,7 +31,7 @@ import (
 // 4. Node in chain repeats this steps in background, if it is not initial sender.
 
 func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lockId int64, channelAddr *address.Address,
-	signedState payments.SignedSemiChannel, action transport.Action, updateProof *cell.Cell) (*payments.SignedSemiChannel, error) {
+	signedState payments.SignedSemiChannel, action transport.Action, updateProof *cell.Cell, fromWeb bool) (*payments.SignedSemiChannel, error) {
 	lockId = -lockId // force negate, to not collide with our locks
 
 	channel, _, unlock, err := s.AcquireChannel(ctx, channelAddr.String(), lockId)
@@ -115,7 +115,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		return nil, fmt.Errorf("incorrect state seqno %d, want %d", signedState.State.Data.Seqno, channel.Their.State.Data.Seqno+1)
 	}
 
-	log.Debug().Type("action", action).Msg("action process")
+	log.Debug().Str("action", reflect.TypeOf(action).String()).Msg("action process")
 
 	switch data := action.(type) {
 	case transport.IncrementStatesAction:
@@ -268,6 +268,28 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				}
 			}
 
+			var senderKey []byte
+			if meta.Incoming != nil {
+				senderKey = meta.Incoming.SenderKey
+			}
+
+			evData := db.ChannelHistoryActionTransferInData{
+				Amount: vState.Amount.String(),
+				From:   senderKey,
+			}
+
+			jsonData, err := json.Marshal(evData)
+			if err != nil {
+				log.Error().Err(err).Msg("failed to marshal event data")
+			}
+
+			if err = s.db.CreateChannelEvent(ctx, channel, meta.UpdatedAt, db.ChannelHistoryItem{
+				Action: db.ChannelHistoryActionTransferIn,
+				Data:   jsonData,
+			}); err != nil {
+				return fmt.Errorf("failed to create channel event: %w", err)
+			}
+
 			log.Info().Str("key", base64.StdEncoding.EncodeToString(data.Key)).
 				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
 				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
@@ -362,7 +384,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("failed to settle condition with index %s: %w", index.String(), err)
 		}
 
-		theirBalance, err := channel.CalcBalance(true)
+		theirBalance, _, err := channel.CalcBalance(true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to calc other side balance: %w", err)
 		}
@@ -464,7 +486,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 					continue
 				}
 
-				balance, err := targetChannel.CalcBalance(false)
+				balance, _, err := targetChannel.CalcBalance(false)
 				if err != nil {
 					return nil, fmt.Errorf("failed to calc our channel %s balance: %w", targetChannel.Address, err)
 				}
@@ -482,12 +504,14 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 			// we will execute it only after all checks passed and final signature verify
 			toExecute = func(ctx context.Context) error {
+				senderKey := data.InstructionKey
 				data.InstructionKey = currentInstruction.NextInstructionKey
 
 				tryTill := time.Unix(currentInstruction.NextDeadline, 0)
 				err = s.db.CreateTask(ctx, PaymentsTaskPool, "open-virtual", target.Address,
 					"open-virtual-"+base64.StdEncoding.EncodeToString(vch.Key),
 					db.OpenVirtualTask{
+						SenderKey:          senderKey,
 						PrevChannelAddress: channel.Address,
 						ChannelAddress:     target.Address,
 						VirtualKey:         vch.Key,
@@ -519,6 +543,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 					Key:    vch.Key,
 					Status: db.VirtualChannelStateActive,
 					Incoming: &db.VirtualChannelMetaSide{
+						SenderKey:             data.InstructionKey,
 						ChannelAddress:        channel.Address,
 						Capacity:              tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String(),
 						Fee:                   tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String(),
@@ -624,7 +649,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		return nil, fmt.Errorf("state looks tampered: %w", err)
 	}
 
-	bal, err := channel.CalcBalance(true)
+	bal, _, err := channel.CalcBalance(true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calc balance: %w", err)
 	}
@@ -644,6 +669,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		return nil, fmt.Errorf("failed to serialize our state for signing: %w", err)
 	}
 	channel.Our.Signature = payments.Signature{Value: cl.Sign(s.key)}
+	channel.WebPeer = fromWeb
 
 	if err = s.db.Transaction(context.Background(), func(ctx context.Context) error {
 		if toExecute != nil {
@@ -676,7 +702,7 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 		return nil, fmt.Errorf("unauthorized channel")
 	}
 
-	log.Debug().Type("action", action).Msg("action request process")
+	log.Debug().Str("action", reflect.TypeOf(action).String()).Msg("action request process")
 
 	switch data := action.(type) {
 	case transport.RequestRemoveVirtualAction:
@@ -861,37 +887,18 @@ func (s *Service) discoverChannel(channelAddr *address.Address) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 
-	block, err := s.ton.CurrentMasterchainInfo(ctx)
+	tx, acc, err := s.ton.GetLastTransaction(ctx, channelAddr)
 	if err != nil {
-		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get current block")
+		log.Debug().Err(err).Str("address", channelAddr.String()).Msg("failed to get last transaction")
 		return false
 	}
 
-	acc, err := s.ton.GetAccount(ctx, block, channelAddr)
-	if err != nil {
-		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get account")
+	if tx == nil {
+		log.Debug().Str("address", channelAddr.String()).Msg("no transactions at requested unknown account")
 		return false
 	}
 
-	txList, err := s.ton.ListTransactions(ctx, channelAddr, 1, acc.LastTxLT, acc.LastTxHash)
-	if err != nil {
-		if !errors.Is(err, ton.ErrNoTransactionsWereFound) {
-			log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to get tx list")
-		}
-		return false
-	}
-
-	if len(txList) == 0 {
-		log.Warn().Str("address", channelAddr.String()).Msg("no transactions at requested unknown account")
-		return false
-	}
-
-	if txList[0].LT != acc.LastTxLT {
-		log.Warn().Str("address", channelAddr.String()).Msg("incorrect last tx lt at requested unknown account")
-		return false
-	}
-
-	ch, err := s.contractMaker.ParseAsyncChannel(channelAddr, acc.Code, acc.Data, true)
+	ch, err := s.channelClient.ParseAsyncChannel(channelAddr, acc.Code, acc.Data, true)
 	if err != nil {
 		log.Warn().Err(err).Str("address", channelAddr.String()).Msg("failed to parse channel")
 		return false
@@ -903,7 +910,7 @@ func (s *Service) discoverChannel(channelAddr *address.Address) bool {
 
 	log.Info().Str("address", channelAddr.String()).Msg("discovered channel, scheduling check")
 	s.updates <- ChannelUpdatedEvent{
-		Transaction: txList[0],
+		Transaction: tx,
 		Channel:     ch,
 	}
 

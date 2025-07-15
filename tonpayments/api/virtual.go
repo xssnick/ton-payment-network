@@ -428,7 +428,7 @@ func (s *Server) handleVirtualOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 5, false)
+	vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 5, false, s.svc.GetPrivateKey())
 	if err != nil {
 		writeErr(w, 500, "failed to generate tunnel: "+err.Error())
 		return
@@ -546,7 +546,7 @@ func (s *Server) handleVirtualTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 5, true)
+	vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 5, true, s.svc.GetPrivateKey())
 	if err != nil {
 		writeErr(w, 500, "failed to generate tunnel: "+err.Error())
 		return

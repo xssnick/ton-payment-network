@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
@@ -29,14 +30,40 @@ type VirtualChannelEvent struct {
 	VirtualChannel any                     `json:"virtual_channel"`
 }
 
+type ChannelHistoryActionTransferInData struct {
+	Amount string
+	From   []byte
+}
+
+type ChannelHistoryActionTransferOutData struct {
+	Amount string
+	To     []byte
+}
+
+type ChannelHistoryActionAmountData struct {
+	Amount string
+}
+
 type ChannelStatus uint8
 type VirtualChannelStatus uint8
+type ChannelHistoryEventType uint8
 
 const (
 	ChannelStateInactive ChannelStatus = iota
 	ChannelStateActive
 	ChannelStateClosing
 	ChannelStateAny ChannelStatus = 100
+)
+
+const (
+	ChannelHistoryActionTopup ChannelHistoryEventType = iota + 1
+	ChannelHistoryActionTopupCapacity
+	ChannelHistoryActionWithdraw
+	ChannelHistoryActionWithdrawCapacity
+	ChannelHistoryActionTransferIn
+	ChannelHistoryActionTransferOut
+	ChannelHistoryActionUncooperativeCloseStarted
+	ChannelHistoryActionClosed
 )
 
 const (
@@ -58,6 +85,7 @@ type VirtualChannelMetaSide struct {
 	Fee                   string
 	UncooperativeDeadline time.Time
 	SafeDeadline          time.Time
+	SenderKey             []byte
 }
 
 type VirtualChannelMeta struct {
@@ -72,6 +100,12 @@ type VirtualChannelMeta struct {
 	UpdatedAt time.Time
 }
 
+type ChannelHistoryItem struct {
+	At     time.Time `json:"-"`
+	Action ChannelHistoryEventType
+	Data   json.RawMessage
+}
+
 type Channel struct {
 	ID                     []byte
 	Address                string
@@ -84,6 +118,7 @@ type Channel struct {
 	SafeOnchainClosePeriod int64
 
 	AcceptingActions bool
+	WebPeer          bool
 
 	Our   Side
 	Their Side
@@ -100,7 +135,7 @@ type Channel struct {
 
 type OnchainState struct {
 	Key            ed25519.PublicKey
-	CommittedSeqno uint32
+	CommittedSeqno uint64
 	WalletAddress  string
 	Deposited      *big.Int
 	Withdrawn      *big.Int
@@ -218,7 +253,7 @@ func (s *Side) MarshalJSON() ([]byte, error) {
 	return []byte(strconv.Quote(base64.StdEncoding.EncodeToString(c.ToBOC()))), nil
 }
 
-func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
+func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, *big.Int, error) {
 	// TODO: cache calculated
 
 	ch.mx.RLock()
@@ -237,26 +272,35 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, error) {
 
 	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), new(big.Int).Sub(s1chain.Deposited, maxWithdraw))
 	balance = balance.Sub(balance, s1.State.Data.Sent.Nano())
+	
+	locked := big.NewInt(0)
+	if s1.PendingWithdraw.Sign() > 0 {
+		locked = locked.Sub(s1.PendingWithdraw, s1chain.Withdrawn)
+	}
 
 	if s1.Conditionals.IsEmpty() {
-		return balance, nil
+		return balance, locked, nil
 	}
 
 	all, err := s1.Conditionals.LoadAll()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load conditions: %w", err)
+		return nil, nil, fmt.Errorf("failed to load conditions: %w", err)
 	}
 
 	for _, kv := range all {
 		vch, err := payments.ParseVirtualChannelCond(kv.Value)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse condition %d: %w", kv.Key.MustLoadUInt(32), err)
+			return nil, nil, fmt.Errorf("failed to parse condition %d: %w", kv.Key.MustLoadUInt(32), err)
 		}
 		balance = balance.Sub(balance, vch.Capacity)
 		balance = balance.Sub(balance, vch.Fee)
 		balance = balance.Add(balance, vch.Prepay)
+
+		locked = locked.Add(locked, vch.Capacity)
+		locked = locked.Add(locked, vch.Fee)
+		locked = locked.Sub(locked, vch.Prepay)
 	}
-	return balance, nil
+	return balance, locked, nil
 }
 
 func (ch *VirtualChannelMeta) GetKnownResolve() *payments.VirtualChannelState {
@@ -308,4 +352,27 @@ func (ch *VirtualChannelMeta) AddKnownResolve(state *payments.VirtualChannelStat
 
 	ch.LastKnownResolve = cl.ToBOC()
 	return nil
+}
+
+func (h *ChannelHistoryItem) ParseData() any {
+	var dst any
+
+	switch h.Action {
+	case ChannelHistoryActionTopup,
+		ChannelHistoryActionTopupCapacity,
+		ChannelHistoryActionWithdraw,
+		ChannelHistoryActionWithdrawCapacity:
+		dst = &ChannelHistoryActionAmountData{}
+	case ChannelHistoryActionTransferIn:
+		dst = &ChannelHistoryActionTransferInData{}
+	case ChannelHistoryActionTransferOut:
+		dst = &ChannelHistoryActionTransferOutData{}
+	default:
+		return nil
+	}
+
+	if err := json.Unmarshal(h.Data, dst); err != nil {
+		return nil
+	}
+	return dst
 }

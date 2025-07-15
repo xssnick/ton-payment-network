@@ -9,16 +9,20 @@ import (
 	"github.com/natefinch/lumberjack"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments"
 	"github.com/xssnick/ton-payment-network/tonpayments/api"
 	"github.com/xssnick/ton-payment-network/tonpayments/chain"
+	chainClient "github.com/xssnick/ton-payment-network/tonpayments/chain/client"
 	"github.com/xssnick/ton-payment-network/tonpayments/config"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/db/leveldb"
 	"github.com/xssnick/ton-payment-network/tonpayments/metrics"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
+	adnlTransport "github.com/xssnick/ton-payment-network/tonpayments/transport/adnl"
+	"github.com/xssnick/ton-payment-network/tonpayments/transport/web"
+	pWallet "github.com/xssnick/ton-payment-network/tonpayments/wallet"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl"
 	adnlAddress "github.com/xssnick/tonutils-go/adnl/address"
@@ -78,31 +82,31 @@ func main() {
 	}
 	multi := zerolog.MultiLevelWriter(logWriters...)
 
-	log.Logger = zerolog.New(multi).With().Timestamp().Logger().Level(zerolog.InfoLevel)
-	scanLog := log.Logger
+	log.SetLogger(zerolog.New(multi).With().Timestamp().Logger().Level(zerolog.InfoLevel))
+	scanLog := log.GetLogger()
 	if *Verbosity >= 4 {
 		scanLog = scanLog.Level(zerolog.DebugLevel).With().Logger()
 	}
 
 	if *Verbosity >= 5 {
 		rldp.Logger = func(v ...any) {
-			log.Logger.Debug().Msg(fmt.Sprintln(v...))
+			log.Debug().Msg(fmt.Sprintln(v...))
 		}
 		dht.Logger = func(v ...any) {
-			log.Logger.Debug().Msg(fmt.Sprintln(v...))
+			log.Debug().Msg(fmt.Sprintln(v...))
 		}
 	}
 
 	if *Verbosity >= 3 {
-		log.Logger = log.Logger.Level(zerolog.DebugLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.DebugLevel).With().Logger())
 	} else if *Verbosity == 2 {
-		log.Logger = log.Logger.Level(zerolog.InfoLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.InfoLevel).With().Logger())
 	} else if *Verbosity == 1 {
-		log.Logger = log.Logger.Level(zerolog.WarnLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.WarnLevel).With().Logger())
 	} else if *Verbosity == 0 {
-		log.Logger = log.Logger.Level(zerolog.ErrorLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.ErrorLevel).With().Logger())
 	} else {
-		log.Logger = log.Logger.Level(zerolog.FatalLevel).With().Logger()
+		log.SetLogger(log.GetLogger().Level(zerolog.FatalLevel).With().Logger())
 	}
 
 	log.Info().Str("version", GitCommit).Msg("starting payment node...")
@@ -221,11 +225,12 @@ func main() {
 		}
 	}
 
-	fdb, freshDb, err := leveldb.NewDB(cfg.DBPath, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey).Public().(ed25519.PublicKey))
+	sdb, freshDb, err := leveldb.NewLevelDB(cfg.DBPath)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init leveldb")
 		return
 	}
+	fdb := db.NewDB(sdb, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey).Public().(ed25519.PublicKey))
 
 	if freshDb {
 		if err = fdb.SetMigrationVersion(context.Background(), len(db.Migrations)); err != nil {
@@ -237,7 +242,25 @@ func main() {
 		}
 	}
 
-	tr := transport.NewServer(dhtClient, gate, ed25519.NewKeyFromSeed(cfg.ADNLServerKey), ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), cfg.ExternalIP != "")
+	peerKey := ed25519.NewKeyFromSeed(cfg.ADNLServerKey)
+	trs := adnlTransport.NewServer(dhtClient, gate, peerKey, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), cfg.ExternalIP != "")
+	tr := transport.NewTransport(ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), trs, false)
+
+	var webTr *transport.Transport
+	if cfg.WebTransportListenAddr != "" {
+		wtr := web.NewHTTP(chainClient.NewTON(apiClient), peerKey)
+		go func() {
+			if err := wtr.StartServer(cfg.WebTransportListenAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatal().Err(err).Msg("failed to init web transport")
+			}
+		}()
+
+		webTr = transport.NewTransport(ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), wtr, true)
+		log.Info().
+			Str("listen", cfg.WebTransportListenAddr).
+			Str("peer_key", base64.StdEncoding.EncodeToString(peerKey.Public().(ed25519.PublicKey))).
+			Msg("web transport initialized")
+	}
 
 	var seqno uint32
 	if bo, err := fdb.GetBlockOffset(context.Background()); err != nil {
@@ -288,26 +311,30 @@ func main() {
 		}
 	}
 
-	w, err := chain.InitWallet(apiClient, ed25519.NewKeyFromSeed(cfg.WalletPrivateKey))
+	w, err := pWallet.InitWallet(apiClient, ed25519.NewKeyFromSeed(cfg.WalletPrivateKey))
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init wallet")
 		return
 	}
 	log.Info().Str("addr", w.WalletAddress().String()).Msg("wallet initialized")
 
-	svc, err := tonpayments.NewService(apiClient, fdb, tr, w, inv, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), cfg.ChannelConfig)
+	svc, err := tonpayments.NewService(chainClient.NewTON(apiClient), fdb, tr, webTr, w, inv, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), cfg.ChannelConfig, metrics.Registered)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to init service")
 		return
 	}
 
 	tr.SetService(svc)
+	if webTr != nil {
+		webTr.SetService(svc)
+	}
+
 	log.Info().Str("pubkey", base64.StdEncoding.EncodeToString(ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey).Public().(ed25519.PublicKey))).Msg("payment node initialized")
 
 	if !*DaemonMode {
 		go func() {
 			for {
-				if err := commandReader(svc, cfg, fdb, w, apiClient); err != nil {
+				if err := commandReader(svc, cfg, fdb, w.Wallet(), apiClient); err != nil {
 					log.Error().Err(err).Msg("command failed")
 				}
 			}
@@ -345,7 +372,7 @@ func main() {
 	svc.Start()
 }
 
-func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB, wlt *wallet.Wallet, apiClient ton.APIClientWrapped) error {
+func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *db.DB, wlt *wallet.Wallet, apiClient ton.APIClientWrapped) error {
 	var cmd string
 	_, _ = fmt.Scanln(&cmd)
 
@@ -724,7 +751,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 		}
 
 		_, vPriv, _ := ed25519.GenerateKey(nil)
-		vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 5, cmd == "send")
+		vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 5, cmd == "send", svc.GetPrivateKey())
 		if err != nil {
 			return fmt.Errorf("failed to generate tunnel: %w", err)
 		}
@@ -797,6 +824,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *leveldb.DB
 				Time("created_at", task.CreatedAt).
 				Str("last_error", task.LastError).
 				Time("after", task.ExecuteAfter).
+				Str("queue", task.Queue).
 				Msg("planned task")
 		}
 		log.Info().Msg("done")

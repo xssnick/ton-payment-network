@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog/log"
+	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/ton-payment-network/tonpayments/db"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
@@ -80,7 +80,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		// include whole value cell in proof
 		proofValueBranch.SetRecursive()
 
-		ourTargetBalance, err := channel.CalcBalance(false)
+		ourTargetBalance, _, err := channel.CalcBalance(false)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to calc our side balance with target: %w", err)
 		}
