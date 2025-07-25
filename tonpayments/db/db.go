@@ -34,7 +34,8 @@ type DB struct {
 	pubKey  ed25519.PublicKey
 	storage Storage
 
-	onChannelStateChange func(ctx context.Context, ch *Channel, statusChanged bool)
+	onChannelStateChange   func(ctx context.Context, ch *Channel, statusChanged bool)
+	onChannelHistoryUpdate func(ctx context.Context, ch *Channel, item ChannelHistoryItem)
 }
 
 func NewDB(storage Storage, pubKey ed25519.PublicKey) *DB {

@@ -27,8 +27,9 @@ declare global {
         walletAddress: () => string;
         onPaymentNetworkLoaded: (addr: string) => void;
         onPaymentChannelUpdated: (ev: PaymentChannelEvent) => void;
+        onPaymentChannelHistoryUpdated: () => void;
         topupChannel: (amount: string) => void;
-        sendTransfer: (amount: string, to: string) => string;
+        sendTransfer: (amount: string, to: string) => Promise<string>;
         estimateTransfer: (amount: string, to: string) => string;
         getChannelHistory: (limit: number) => Promise<PaymentChannelHistoryItem[] | null>;
         deployChannel: () => void;

@@ -27,8 +27,8 @@ import (
 var Service *tonpayments.Service
 var Config *config.Config
 
-const MinFee = "0.005"
-const FeePercentDiv100 = 100
+const MinFee = "0.000001"
+const FeePercentDiv100 = 10
 
 func main() {
 	var started bool
@@ -47,35 +47,58 @@ func main() {
 	}))
 
 	js.Global().Set("sendTransfer", js.FuncOf(func(this js.Value, args []js.Value) any {
-		if !started {
-			return js.Null()
-		}
+		promiseCtor := js.Global().Get("Promise")
 
-		if len(args) != 2 {
-			return js.ValueOf("wrong number of arguments")
-		}
+		return promiseCtor.New(js.FuncOf(func(this js.Value, prArgs []js.Value) any {
+			resolve := prArgs[0]
+			reject := prArgs[1]
 
-		amt, err := tlb.FromDecimal(args[0].String(), 9)
-		if err != nil {
-			return js.ValueOf("failed to parse amount: " + err.Error())
-		}
+			go func() {
+				if !started {
+					reject.Invoke("not started")
+					return
+				}
 
-		feeAmt := new(big.Int).Div(amt.Nano(), big.NewInt(100*100))
-		feeAmt = feeAmt.Mul(feeAmt, big.NewInt(FeePercentDiv100))
-		if feeAmt.Cmp(tlb.MustFromTON(MinFee).Nano()) < 0 {
-			feeAmt = tlb.MustFromTON(MinFee).Nano()
-		}
+				if len(args) != 2 {
+					reject.Invoke("wrong number of arguments")
+					return
+				}
 
-		addr, err := base64.StdEncoding.DecodeString(args[1].String())
-		if err != nil {
-			return js.ValueOf(err.Error())
-		}
+				amt, err := tlb.FromDecimal(args[0].String(), 9)
+				if err != nil {
+					reject.Invoke("failed to parse amount: " + err.Error())
+					return
+				}
 
-		if _, err = sendTransfer(amt, tlb.MustFromNano(feeAmt, 9), [][]byte{sPub, addr}, false); err != nil {
-			return js.ValueOf("failed to send transfer: " + err.Error())
-		}
+				if amt.IsNegative() {
+					reject.Invoke("amount below 0")
+					return
+				}
 
-		return js.ValueOf("")
+				feeAmt := new(big.Int).Div(amt.Nano(), big.NewInt(100*100))
+				feeAmt = feeAmt.Mul(feeAmt, big.NewInt(FeePercentDiv100))
+				if feeAmt.Cmp(tlb.MustFromTON(MinFee).Nano()) < 0 {
+					feeAmt = tlb.MustFromTON(MinFee).Nano()
+				}
+
+				addr, err := base64.StdEncoding.DecodeString(args[1].String())
+				if err != nil {
+					reject.Invoke("failed to parse address: " + err.Error())
+					return
+				}
+
+				_, vKey, err := sendTransfer(amt, tlb.MustFromNano(feeAmt, 9), [][]byte{sPub, addr}, false)
+				if err != nil {
+					reject.Invoke("failed to send transfer: " + err.Error())
+					return
+				}
+
+				resolve.Invoke(base64.StdEncoding.EncodeToString(vKey))
+				return
+			}()
+
+			return nil
+		}))
 	}))
 
 	js.Global().Set("estimateTransfer", js.FuncOf(func(this js.Value, args []js.Value) any {
@@ -90,7 +113,10 @@ func main() {
 		amt, err := tlb.FromDecimal(args[0].String(), 9)
 		if err != nil {
 			return js.ValueOf("")
-			// return js.ValueOf("failed to parse amount: " + err.Error())
+		}
+
+		if amt.IsNegative() {
+			return js.ValueOf("")
 		}
 
 		feeAmt := new(big.Int).Div(amt.Nano(), big.NewInt(100*100))
@@ -109,7 +135,7 @@ func main() {
 			return js.ValueOf("")
 		}
 
-		fullAmt, err := sendTransfer(amt, tlb.MustFromNano(feeAmt, 9), [][]byte{sPub, addr}, true)
+		fullAmt, _, err := sendTransfer(amt, tlb.MustFromNano(feeAmt, 9), [][]byte{sPub, addr}, true)
 		if err != nil {
 			return js.ValueOf("failed to send transfer: " + err.Error())
 		}
@@ -166,7 +192,7 @@ func main() {
 			return js.Null()
 		}
 
-		if _, err = sendTransfer(amt, feeAmt, parsedKeys, false); err != nil {
+		if _, _, err = sendTransfer(amt, feeAmt, parsedKeys, false); err != nil {
 			println("failed to send transfer: " + err.Error())
 			return js.Null()
 		}
@@ -281,12 +307,14 @@ func main() {
 
 				ch, err := getPrimaryChanel(sPub)
 				if err != nil {
+					resolve.Invoke(js.Global().Get("Array").New(0))
 					println("failed to get primary channel: " + err.Error())
 					return
 				}
 
 				cc, err := Service.ResolveCoinConfig(ch.JettonAddress, ch.ExtraCurrencyID, false)
 				if err != nil {
+					reject.Invoke("failed to get coin config: " + err.Error())
 					println("failed to get coin config: " + err.Error())
 					return
 				}
@@ -449,6 +477,11 @@ func start(peerKey, channelKey []byte) {
 		panic("onPaymentChannelUpdated is not a function (not registered from js)")
 	}
 
+	pcuHistoryFunc := js.Global().Get("onPaymentChannelHistoryUpdated")
+	if pcuHistoryFunc.Type() != js.TypeFunction {
+		panic("onPaymentChannelHistoryUpdated is not a function (not registered from js)")
+	}
+
 	onUpd := func(ctx context.Context, ch *db.Channel, statusChanged bool) {
 		sc.OnChannelUpdate(ctx, ch, statusChanged)
 
@@ -482,6 +515,9 @@ func start(peerKey, channelKey []byte) {
 	}
 
 	d.SetOnChannelUpdated(onUpd)
+	d.SetOnChannelHistoryUpdated(func(ctx context.Context, ch *db.Channel, item db.ChannelHistoryItem) {
+		pcuHistoryFunc.Invoke()
+	})
 
 	svc, err := tonpayments.NewService(tn, d, tr, nil, wl, ch, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), cfg.ChannelConfig, false)
 	if err != nil {
@@ -539,7 +575,7 @@ func getPrimaryChanel(with ed25519.PublicKey) (*db.Channel, error) {
 	return list[0], nil
 }
 
-func sendTransfer(amt, feeAmt tlb.Coins, keys [][]byte, justEstimate bool) (*big.Int, error) {
+func sendTransfer(amt, feeAmt tlb.Coins, keys [][]byte, justEstimate bool) (*big.Int, ed25519.PublicKey, error) {
 	safeHopTTL := time.Duration(Config.ChannelConfig.QuarantineDurationSec+Config.ChannelConfig.BufferTimeToCommit+Config.ChannelConfig.ConditionalCloseDurationSec+
 		Config.ChannelConfig.MinSafeVirtualChannelTimeoutSec) * time.Second
 
@@ -560,25 +596,27 @@ func sendTransfer(amt, feeAmt tlb.Coins, keys [][]byte, justEstimate bool) (*big
 		})
 	}
 
-	if !justEstimate {
-		_, vPriv, _ := ed25519.GenerateKey(nil)
-		vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 0, true, Service.GetPrivateKey())
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate tunnel: %w", err)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		err = Service.OpenVirtualChannel(ctx, tunChain[0].Target, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc, nil, uint32(0))
-		cancel()
-		if err != nil {
-			return nil, fmt.Errorf("failed to open virtual channel: %w", err)
-		}
-
-		// commit state to server to not get uncoop closed in case of browser page close
-		if err := Service.CommitAllOurVirtualChannelsAndWait(ctx); err != nil {
-			println("warn: transfer sent, but state not committed:" + err.Error())
-		}
+	if justEstimate {
+		return fullAmt, nil, nil
 	}
 
-	return fullAmt, nil
+	vPub, vPriv, _ := ed25519.GenerateKey(nil)
+	vc, firstInstructionKey, tun, err := transport.GenerateTunnel(vPriv, tunChain, 0, true, Service.GetPrivateKey())
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate tunnel: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	err = Service.OpenVirtualChannel(ctx, tunChain[0].Target, firstInstructionKey, tunChain[len(tunChain)-1].Target, vPriv, tun, vc, nil, uint32(0))
+	cancel()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open virtual channel: %w", err)
+	}
+
+	// commit state to server to not get uncoop closed in case of browser page close
+	if err := Service.CommitAllOurVirtualChannelsAndWait(ctx); err != nil {
+		println("warn: transfer sent, but state not committed:" + err.Error())
+	}
+
+	return fullAmt, vPub, nil
 }

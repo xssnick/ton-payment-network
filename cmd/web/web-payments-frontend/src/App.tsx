@@ -7,6 +7,7 @@ import {Card, CardContent} from "./components/ui/card";
 import {Input} from "./components/ui/input";
 import {Button} from "./components/ui/button";
 import {PaymentChannelHistoryItem} from "./index";
+import {CHAIN} from "@tonconnect/sdk";
 
 
 function App() {
@@ -27,9 +28,20 @@ function App() {
     setBalance(ev.balance);
     setCapacity(ev.capacity);
     setLockedBalance(ev.locked);
+
     window.getChannelHistory(5).then(history => {
       setHistory(history);
-    })
+    }).catch(e => {
+      console.error(e);
+    });
+  }
+
+  window.onPaymentChannelHistoryUpdated = function() {
+    window.getChannelHistory(5).then(history => {
+      setHistory(history);
+    }).catch(e => {
+      console.error(e);
+    });
   }
 
   useEffect(() => {
@@ -45,6 +57,7 @@ function App() {
 
         const transaction = {
           validUntil: Math.floor(Date.now() / 1000) + 90,
+          network: CHAIN.TESTNET,
           messages: [
             {
               address: to,
@@ -131,6 +144,7 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capac
   const [copied, setCopied] = useState(false);
   const [modalType, setModalType] = useState<"topup" | "withdraw" | null>(null);
   const [modalAmount, setModalAmount] = useState("");
+  const [transferStatus, setTransferStatus] = useState<"loading" | "success" | null>(null);
 
   const handleCopy = () => {
     if (!paymentAddr) return;
@@ -158,6 +172,7 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capac
         <div className="w-full max-w-xl space-y-6">
           <div className="flex justify-between items-center">
             <h1 className="text-2xl font-bold text-[#0098ea]">TON Payments Wallet</h1>
+            <h2 className="text-lg font-bold text-[#772233]">Testnet</h2>
             <TonConnectButton />
           </div>
 
@@ -237,12 +252,19 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capac
               }} />
               <div className="flex items-center justify-between mt-2">
                 <Button disabled={sendFeeAmount === ""} className="bg-[#0098ea] text-white px-4 py-2 rounded-xl flex items-center gap-2 disabled:bg-gray-300" onClick={()=>{
-                  let res = window.sendTransfer(sendAmount, sendTo);
-                  if (res !== "") {
-                    console.log("failed to transfer: "+res);
-                    return;
-                  }
-                  console.log("transferred: "+sendAmount+" to "+sendTo);
+                  setTransferStatus("loading");
+                  setSendFeeAmount("");
+                  setSendAmount("");
+
+                  window.sendTransfer(sendAmount, sendTo).then(res => {
+                    setTransferStatus("success");
+                    console.log("transferred: "+sendAmount+" to "+sendTo);
+                  }).catch(err => {
+                    setTransferStatus(null);
+                    alert(err);
+                    console.error(err);
+                  });
+
                 }}>
                   <Send size={16} /> Send
                 </Button>
@@ -315,17 +337,39 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capac
                 </CardContent>
               </Card>
           )}
-
-          {modalType && (
-              <ModalAmount
-                  title={modalType}
-                  value={modalAmount}
-                  onChange={setModalAmount}
-                  onConfirm={confirmModal}
-                  onCancel={closeModal}
-              />
-          )}
         </div>
+
+        {modalType && (
+            <ModalAmount
+                title={modalType}
+                value={modalAmount}
+                onChange={setModalAmount}
+                onConfirm={confirmModal}
+                onCancel={closeModal}
+            />
+        )}
+        {transferStatus && (
+            <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
+              <div className="bg-white p-6 rounded-2xl shadow-xl w-80 space-y-4">
+                <div className="flex items-center justify-center gap-3">
+                  {transferStatus === "loading" ? (
+                      <>
+                        <RefreshCw className="animate-spin" size={24}/>
+                        <span className="text-lg">Connecting to recipient...</span>
+                      </>
+                  ) : (
+                      <>
+                        <Check className="text-green-500" size={24}/>
+                        <span className="text-lg">Transfer on the way</span>
+                        <div className="flex justify-between gap-4">
+                          <Button onClick={() =>{setTransferStatus(null)}} className="bg-[#0098ea] text-white w-full">OK</Button>
+                        </div>
+                      </>
+                  )}
+                </div>
+              </div>
+            </div>
+        )}
       </div>
   );
 };
@@ -355,5 +399,7 @@ const ModalAmount: React.FC<{
       </div>
     </div>
 );
+
+
 
 export default App;

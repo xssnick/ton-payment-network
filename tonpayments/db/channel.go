@@ -17,8 +17,16 @@ func (d *DB) SetOnChannelUpdated(f func(ctx context.Context, ch *Channel, status
 	d.onChannelStateChange = f
 }
 
+func (d *DB) SetOnChannelHistoryUpdated(f func(ctx context.Context, ch *Channel, item ChannelHistoryItem)) {
+	d.onChannelHistoryUpdate = f
+}
+
 func (d *DB) GetOnChannelUpdated() func(ctx context.Context, ch *Channel, statusChanged bool) {
 	return d.onChannelStateChange
+}
+
+func (d *DB) GetOnChannelHistoryUpdated() func(ctx context.Context, ch *Channel, item ChannelHistoryItem) {
+	return d.onChannelHistoryUpdate
 }
 
 func (d *DB) AddUrgentPeer(ctx context.Context, peerAddress []byte) error {
@@ -257,6 +265,10 @@ func (d *DB) CreateChannelEvent(ctx context.Context, channel *Channel, at time.T
 
 		if err = tx.Put(key, data); err != nil {
 			return fmt.Errorf("failed to put: %w", err)
+		}
+
+		if d.onChannelHistoryUpdate != nil {
+			d.onChannelHistoryUpdate(ctx, channel, item)
 		}
 
 		return nil
