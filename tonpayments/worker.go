@@ -740,6 +740,16 @@ func (s *Service) taskExecutor() {
 						if err = s.executeCooperativeClose(ctxTx, req, ch); err != nil {
 							return fmt.Errorf("failed to execute cooperative close: %w", err)
 						}
+					} else {
+						balance, _, err := ch.CalcBalance(false)
+						if err != nil {
+							return fmt.Errorf("failed to calc balance: %w", err)
+						}
+
+						if balance.Sign() > 0 {
+							return fmt.Errorf("channel is not active onchain, and we have balance")
+						}
+						log.Warn().Str("channel", ch.Address).Msg("channel is not active onchain, and we have ne balance on this channel, onchain action skipped")
 					}
 				case "uncooperative-close":
 					var data db.ChannelUncooperativeCloseTask
@@ -878,6 +888,11 @@ func (s *Service) taskExecutor() {
 					}
 
 					if ch.Status != db.ChannelStateActive {
+						return nil
+					}
+
+					if !ch.ActiveOnchain {
+						log.Warn().Str("channel", ch.Address).Msg("channel is not active onchain, withdraw skipped")
 						return nil
 					}
 
