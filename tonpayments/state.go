@@ -2,8 +2,10 @@ package tonpayments
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/xssnick/ton-payment-network/pkg/log"
@@ -17,8 +19,8 @@ import (
 	"time"
 )
 
-func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport.Action, details any) (func(), *cell.Cell, *cell.Cell, error) {
-	var onSuccess func()
+func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport.Action, details any) (func(ctx context.Context) error, *cell.Cell, *cell.Cell, error) {
+	var onSuccess func(ctx context.Context) error
 
 	cc, err := s.ResolveCoinConfig(channel.JettonAddress, channel.ExtraCurrencyID, false)
 	if err != nil {
@@ -28,7 +30,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 	var idempotency bool
 	dictRoot := cell.CreateProofSkeleton()
 
-	switch ch := action.(type) {
+	switch act := action.(type) {
 	case transport.IncrementStatesAction:
 	case transport.OpenVirtualAction:
 		vch := details.(payments.VirtualChannel)
@@ -77,24 +79,24 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to find key for proof branch: %w", err)
 		}
-		// include whole value cell in proof
+		// include a whole value cell in proof
 		proofValueBranch.SetRecursive()
 
-		ourTargetBalance, _, err := channel.CalcBalance(false)
+		/*ourTargetBalance, _, err := channel.CalcBalance(false)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to calc our side balance with target: %w", err)
 		}
 
 		if ourTargetBalance.Sign() < 0 {
 			return nil, nil, nil, fmt.Errorf("not enough available balance with target")
-		}
+		}*/
 	case transport.CommitVirtualAction:
-		_, vch, err := payments.FindVirtualChannelWithProof(channel.Our.Conditionals, ch.Key, dictRoot)
+		_, vch, err := payments.FindVirtualChannelWithProof(channel.Our.Conditionals, act.Key, dictRoot)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 
-		prepay := new(big.Int).SetBytes(ch.PrepayAmount)
+		prepay := new(big.Int).SetBytes(act.PrepayAmount)
 		toSend := new(big.Int).Sub(prepay, vch.Prepay)
 
 		if toSend.Sign() < 0 {
@@ -112,18 +114,19 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 			return nil, nil, nil, fmt.Errorf("failed to set condition: %w", err)
 		}
 
-		channel.Our.State.Data.Sent = tlb.MustFromNano(new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), toSend), int(cc.Decimals))
+		channel.Our.State.Data.Sent = cc.MustAmount(new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), toSend))
 
-		onSuccess = func() {
+		onSuccess = func(_ context.Context) error {
 			log.Info().Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
 				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
 				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
 				Str("prepaid", vch.Prepay.String()).
 				Str("channel", channel.Address).
 				Msg("virtual channel commit confirmed")
+			return nil
 		}
 	case transport.RemoveVirtualAction:
-		idx, vch, err := payments.FindVirtualChannelWithProof(channel.Our.Conditionals, ch.Key, dictRoot)
+		idx, vch, err := payments.FindVirtualChannelWithProof(channel.Our.Conditionals, act.Key, dictRoot)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
 				// idempotency, if not found we consider it already closed
@@ -147,23 +150,24 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 			return nil, nil, nil, fmt.Errorf("deleted value is still exists for some reason: %w", err)
 		}
 
-		onSuccess = func() {
+		onSuccess = func(_ context.Context) error {
 			log.Info().Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
 				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
 				Str("channel", channel.Address).
 				Msg("virtual channel successfully removed")
+			return nil
 		}
 	case transport.ConfirmCloseAction:
 		var vState payments.VirtualChannelState
-		if err := tlb.LoadFromCell(&vState, ch.State.BeginParse()); err != nil {
+		if err := tlb.LoadFromCell(&vState, act.State.BeginParse()); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to load virtual channel state cell: %w", err)
 		}
 
-		if !vState.Verify(ch.Key) {
+		if !vState.Verify(act.Key) {
 			return nil, nil, nil, fmt.Errorf("incorrect channel state signature")
 		}
 
-		idx, vch, err := payments.FindVirtualChannelWithProof(channel.Our.Conditionals, ch.Key, dictRoot)
+		idx, vch, err := payments.FindVirtualChannelWithProof(channel.Our.Conditionals, act.Key, dictRoot)
 		if err != nil {
 			if errors.Is(err, payments.ErrNotFound) {
 				// idempotency, if not found we consider it already closed
@@ -197,20 +201,75 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 
 		if toSend.Sign() > 0 {
 			// we cannot decrease sent, even when we prepaid more than actual
-			channel.Our.State.Data.Sent = tlb.MustFromNano(toSend.Add(toSend, channel.Our.State.Data.Sent.Nano()), int(cc.Decimals))
+			channel.Our.State.Data.Sent = cc.MustAmount(new(big.Int).Add(toSend, channel.Our.State.Data.Sent.Nano()))
 		}
 
-		onSuccess = func() {
+		if channel.OurLockedDeposit != nil {
+			// mark part of the rented deposit as used
+			channel.OurLockedDeposit.Used.Add(channel.OurLockedDeposit.Used, toSend)
+		}
+
+		onSuccess = func(_ context.Context) error {
 			log.Info().Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
-				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
-				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
-				Str("amount", tlb.MustFromNano(vState.Amount, int(cc.Decimals)).String()).
-				Str("prepaid", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
+				Str("capacity", cc.MustAmount(vch.Capacity).String()).
+				Str("fee", cc.MustAmount(vch.Fee).String()).
+				Str("amount", cc.MustAmount(vState.Amount).String()).
+				Str("prepaid", cc.MustAmount(vch.Prepay).String()).
 				Str("channel", channel.Address).
 				Msg("virtual channel close confirmed")
+			return nil
+		}
+	case transport.RentCapacityAction:
+		amount := new(big.Int).SetBytes(act.Amount)
+		till := time.Unix(int64(act.Till), 0)
+		totalFee := channel.CalcDepositFee(cc, amount, till, true)
+
+		channel.Our.State.Data.Sent = cc.MustAmount(new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), totalFee))
+
+		used := big.NewInt(0)
+		if channel.TheirLockedDeposit != nil && channel.TheirLockedDeposit.Till.After(time.Now()) {
+			used = channel.TheirLockedDeposit.Used
+			if amount.Cmp(channel.TheirLockedDeposit.Amount) <= 0 {
+				return nil, nil, nil, fmt.Errorf("amount should increase only")
+			}
+			if till.Before(channel.TheirLockedDeposit.Till) {
+				return nil, nil, nil, fmt.Errorf("new till should be greater than old one")
+			}
+		}
+
+		channel.TheirLockedDeposit = &db.LockedDepositInfo{
+			Amount: amount,
+			Till:   till,
+			Used:   used,
+		}
+
+		evData := db.ChannelHistoryActionRentCapData{
+			Amount: amount.String(),
+			Fee:    totalFee.String(),
+			Till:   till.Unix(),
+		}
+		jsonData, err := json.Marshal(evData)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to marshal event data: %w", err)
+		}
+
+		onSuccess = func(ctx context.Context) error {
+			if err = s.db.CreateChannelEvent(ctx, channel, time.Now(), db.ChannelHistoryItem{
+				Action: db.ChannelHistoryActionTheirCapacityRented,
+				Data:   jsonData,
+			}); err != nil {
+				return fmt.Errorf("failed to create channel our cap rent event: %w", err)
+			}
+
+			log.Info().Str("fee", cc.MustAmount(totalFee).String()).
+				Str("amount", cc.MustAmount(amount).String()).
+				Str("channel", channel.Address).
+				Time("till", till).
+				Msg("capacity rent confirmed")
+			return nil
 		}
 	default:
-		return nil, nil, nil, fmt.Errorf("unexpected action type: %s", reflect.TypeOf(ch).String())
+		return nil, nil, nil, fmt.Errorf("unexpected action type: %s", reflect.TypeOf(act).String())
 	}
 
 	var cond *cell.Cell

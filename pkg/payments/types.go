@@ -122,7 +122,7 @@ type Balance struct {
 	SentB     tlb.Coins `tlb:"."`
 }
 
-type AsyncJettonChannelStorageData struct {
+type AsyncChannelStorageData struct {
 	Initialized     bool              `tlb:"bool"`
 	Balance         Balance           `tlb:"^"`
 	KeyA            []byte            `tlb:"bits 256"`
@@ -133,6 +133,14 @@ type AsyncJettonChannelStorageData struct {
 	CommittedSeqnoB uint64            `tlb:"## 64"`
 	Quarantine      *QuarantinedState `tlb:"maybe ^"`
 	PaymentConfig   PaymentConfig     `tlb:"^"`
+}
+
+type OpenConfigContainer struct {
+	KeyA          []byte        `tlb:"bits 256"`
+	KeyB          []byte        `tlb:"bits 256"`
+	ChannelID     ChannelID     `tlb:"bits 128"`
+	ClosingConfig ClosingConfig `tlb:"^"`
+	PaymentConfig PaymentConfig `tlb:"^"`
 }
 
 /// Messages

@@ -9,7 +9,42 @@ import (
 
 type Migration func(ctx context.Context, db *DB) error
 
-var Migrations = []Migration{migrationDeprecateChannels, migrationChangeUrgentPeerKey, migrationDeprecateChannels}
+var Migrations = []Migration{migrationDeprecateChannels, migrationChangeUrgentPeerKey, migrationDeprecateChannels, migrationChangeUrgentLogic}
+
+func migrationChangeUrgentLogic(ctx context.Context, db *DB) error {
+	peers, err := db.GetUrgentPeers(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get urgent peers: %w", err)
+	}
+
+	list, err := db.GetChannels(ctx, nil, ChannelStateActive)
+	if err != nil {
+		return fmt.Errorf("failed to get channels: %w", err)
+	}
+
+	urgent := map[string]bool{}
+	for _, peer := range peers {
+		urgent[string(peer)] = true
+
+		if err = db.RemoveUrgentPeer(ctx, peer); err != nil {
+			return fmt.Errorf("failed to remove urgent peer: %w", err)
+		}
+	}
+
+	for _, channel := range list {
+		channel.ActiveOnchain = true
+		if urgent[string(channel.TheirOnchain.Key)] {
+			channel.UrgentForUs = true
+		}
+
+		log.Warn().Msgf("[migration] migrating active channel %s, urgent %v", channel.Address, channel.UrgentForUs)
+		if err := db.UpdateChannel(ctx, channel); err != nil {
+			return fmt.Errorf("failed to update channel: %w", err)
+		}
+	}
+
+	return nil
+}
 
 func migrationChangeUrgentPeerKey(ctx context.Context, db *DB) error {
 	peers, err := db.GetUrgentPeers(ctx)

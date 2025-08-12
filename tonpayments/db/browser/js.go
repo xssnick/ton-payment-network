@@ -555,7 +555,6 @@ func (d *IndexedDB) Backup() error {
 		if err != nil {
 			return fmt.Errorf("backup put: %w", err)
 		}
-		println("PUT OK")
 	}
 
 	if err = it.Error(); err != nil {

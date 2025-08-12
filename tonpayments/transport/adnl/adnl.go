@@ -78,7 +78,7 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key, channelKey ed25519.Priv
 			case <-time.After(5 * time.Second):
 				s.mx.Lock()
 				for id, p := range s.peers {
-					if time.Since(time.Unix(p.lastQuery, 0)) > 10*time.Minute {
+					if time.Since(time.Unix(p.lastQuery, 0)) > 5*time.Minute {
 						delete(s.peers, id)
 						p.adnl.Close()
 
@@ -284,24 +284,19 @@ func (s *Server) Connect(ctx context.Context, channelKey ed25519.PublicKey) (*tr
 }
 
 func (p *PeerConnection) Query(ctx context.Context, req, resp tl.Serializable) error {
-	useRLDP := false
-	switch req.(type) {
-	case transport.ProposeAction, transport.RequestAction, transport.ProposeChannelConfig:
-		useRLDP = true
-	}
-
 	tm := time.Now()
 
-	if useRLDP {
+	switch req.(type) {
+	case transport.ProposeAction, transport.RequestAction, transport.ProposeChannelConfig:
 		if err := p.rldp.DoQuery(ctx, _RLDPMaxAnswerSize, req, resp); err != nil {
 			// TODO: check other network cases too
-			if time.Since(tm) > 5*time.Second {
+			if time.Since(tm) > 8*time.Second {
 				// drop peer to reconnect
 				p.adnl.Close()
 			}
 			return fmt.Errorf("failed to make rldp request: %w", err)
 		}
-	} else {
+	default:
 		if err := p.adnl.Query(ctx, req, resp); err != nil {
 			// TODO: check other network cases too
 			if time.Since(tm) > 3*time.Second {
@@ -311,6 +306,7 @@ func (p *PeerConnection) Query(ctx context.Context, req, resp tl.Serializable) e
 			return fmt.Errorf("failed to make adnl request: %w", err)
 		}
 	}
+	atomic.StoreInt64(&p.lastQuery, time.Now().Unix())
 
 	return nil
 }

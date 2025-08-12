@@ -56,59 +56,33 @@ func (w *Wallet) DoTransaction(ctx context.Context, reason string, to *address.A
 	return w.doTransactions(ctx, []*wallet.Message{wallet.SimpleMessage(to, amt, body)}, reason)
 }
 
-func (w *Wallet) DoTransactionEC(ctx context.Context, reason string, to *address.Address, tonAmt tlb.Coins, body *cell.Cell, ecID uint32, ecAmt tlb.Coins) ([]byte, error) {
-	m := wallet.SimpleMessage(to, tonAmt, body)
-	m.InternalMessage.ExtraCurrencies = cell.NewDict(32)
-	_ = m.InternalMessage.ExtraCurrencies.SetIntKey(big.NewInt(int64(ecID)), cell.BeginCell().MustStoreBigVarUInt(ecAmt.Nano(), 32).EndCell())
-
-	return w.doTransactions(ctx, []*wallet.Message{m}, reason)
-}
-
 func (w *Wallet) DoTransactionMany(ctx context.Context, reason string, messages []tonpayments.WalletMessage) ([]byte, error) {
 	var list []*wallet.Message
 	for _, m := range messages {
-		list = append(list, wallet.SimpleMessage(m.To, m.Amount, m.Body))
+		if m.StateInit != nil {
+			stateCell, err := tlb.ToCell(m.StateInit)
+			if err != nil {
+				return nil, err
+			}
+			m.To = address.NewAddress(0, 0, stateCell.Hash())
+		}
+
+		msg := wallet.SimpleMessage(m.To, m.Amount, m.Body)
+		if m.EC != nil {
+			msg.InternalMessage.ExtraCurrencies = cell.NewDict(32)
+			for u, coins := range m.EC {
+				_ = msg.InternalMessage.ExtraCurrencies.SetIntKey(big.NewInt(int64(u)), cell.BeginCell().MustStoreBigVarUInt(coins.Nano(), 32).EndCell())
+			}
+		}
+
+		if m.StateInit != nil {
+			msg.InternalMessage.Bounce = false
+			msg.InternalMessage.StateInit = m.StateInit
+		}
+		list = append(list, msg)
 	}
 
 	return w.doTransactions(ctx, list, reason)
-}
-
-func (w *Wallet) DeployContractWaitTransaction(ctx context.Context, amt tlb.Coins, body, code, data *cell.Cell) (*address.Address, []byte, error) {
-	state := &tlb.StateInit{
-		Data: data,
-		Code: code,
-	}
-
-	stateCell, err := tlb.ToCell(state)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	addr := address.NewAddress(0, 0, stateCell.Hash())
-
-	msg, err := w.wallet.PrepareExternalMessageForMany(ctx, false, []*wallet.Message{
-		{
-			Mode: wallet.PayGasSeparately + wallet.IgnoreErrors,
-			InternalMessage: &tlb.InternalMessage{
-				IHRDisabled: true,
-				Bounce:      false,
-				DstAddr:     addr,
-				Amount:      amt,
-				Body:        body,
-				StateInit:   state,
-			},
-		},
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to prepare tx: %w", err)
-	}
-
-	_, _, _, err = w.apiClient.SendExternalMessageWaitTransaction(ctx, msg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to send deploy tx: %w", err)
-	}
-
-	return addr, msg.NormalizedHash(), nil
 }
 
 func (w *Wallet) doTransactions(ctx context.Context, msgList []*wallet.Message, _ string) ([]byte, error) {

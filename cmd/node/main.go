@@ -132,6 +132,15 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to load config")
 		return
 	}
+	if config.Upgrade(cfg) {
+		if err = config.SaveConfig(cfg, *ConfigPath); err != nil {
+			log.Fatal().Err(err).Msg("failed to update config file")
+			return
+		}
+
+		log.Warn().Msg("config was upgraded, file changed, check the settings and strat again if it is ok for you")
+		return
+	}
 
 	log.Info().Msg("initializing ton client...")
 
@@ -523,7 +532,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *db.DB, wlt
 			return fmt.Errorf("incorrect format of address: %w", err)
 		}
 
-		ch, err := svc.GetChannel(context.Background(), addrStr)
+		ch, err := svc.GetActiveChannel(context.Background(), addr.String())
 		if err != nil {
 			return fmt.Errorf("failed to get channel: %w", err)
 		}
@@ -542,7 +551,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *db.DB, wlt
 			return fmt.Errorf("incorrect format of amount")
 		}
 
-		if err = svc.TopupChannel(context.Background(), addr, amt); err != nil {
+		if err = svc.TopupChannel(context.Background(), ch, amt); err != nil {
 			return fmt.Errorf("failed to topup channel: %w", err)
 		}
 	case "withdraw":
@@ -578,8 +587,8 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *db.DB, wlt
 		if err = svc.RequestWithdraw(context.Background(), addr, amt); err != nil {
 			return fmt.Errorf("failed to withdraw from channel: %w", err)
 		}
-	case "deploy":
-		log.Info().Msg("enter the key of node to deploy channel with:")
+	case "init":
+		log.Info().Msg("enter the key of node to initialize channel with:")
 
 		var strKey string
 		_, _ = fmt.Scanln(&strKey)
@@ -609,12 +618,11 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *db.DB, wlt
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		addr, err := svc.DeployChannelWithNode(ctx, btsKey, jettonMaster, uint32(ecID))
+		_, err = svc.OpenChannelWithNode(ctx, btsKey, jettonMaster, uint32(ecID))
 		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to deploy channel with node: %w", err)
 		}
-		log.Info().Str("address", addr.String()).Msg("onchain channel deployed")
 	case "wallet-ton-transfer":
 		log.Info().Msg("enter address to transfer to:")
 
@@ -746,7 +754,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *db.DB, wlt
 				Target:   parsedKey,
 				Capacity: amt.Nano(),
 				Fee:      fee,
-				Deadline: time.Now().Add(1*time.Minute + safeHopTTL*time.Duration(len(parsedKeys)-i)),
+				Deadline: time.Now().Add(3*time.Hour + safeHopTTL*time.Duration(len(parsedKeys)-i)),
 			})
 		}
 

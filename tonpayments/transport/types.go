@@ -39,11 +39,14 @@ func init() {
 	tl.Register(CooperativeCloseAction{}, "payments.cooperativeCloseAction signedCloseRequest:bytes = payments.Action")
 	tl.Register(CooperativeCommitAction{}, "payments.cooperativeCommitAction signedCommitRequest:bytes = payments.Action")
 	tl.Register(IncrementStatesAction{}, "payments.incrementStatesAction wantResponse:Bool = payments.Action")
+	tl.Register(RentCapacityAction{}, "payments.rentCapacityAction till:long amount:bytes = payments.Action")
 
 	tl.Register(ProposeChannelConfig{}, "payments.proposeChannelConfig jettonAddr:int256 ec_id:int excessFee:bytes quarantineDuration:int misbehaviorFine:bytes conditionalCloseDuration:int nodeVersion:int codeHash:int256 = payments.Request")
 	tl.Register(RequestAction{}, "payments.requestAction channelAddr:int256 action:payments.Action = payments.Request")
 	tl.Register(ProposeAction{}, "payments.proposeAction lockId:long channelAddr:int256 action:payments.Action state:bytes conditionals:bytes = payments.Request")
 	tl.Register(Authenticate{}, "payments.authenticate key:int256 timestamp:long signature:bytes = payments.Authenticate")
+	tl.Register(OpenChannelOffchain{}, "payments.openChannelOffchain codeHash:int256 openConfig:bytes nodeVersion:int = payments.OpenChannelOffchain")
+	tl.Register(OpenChannelOffchainResponse{}, "payments.openChannelOffchainResponse addr:int256 reason:string = payments.OpenChannelOffchainResponse")
 
 	tl.Register(InstructionContainer{}, "payments.instructionContainer hash:int256 data:bytes = payments.InstructionContainer")
 	tl.RegisterWithFabric(InstructionsToSign{}, "payments.instructionsToSign list:(vector payments.instructionContainer) = payments.InstructionsToSign", func() reflect.Value {
@@ -60,6 +63,19 @@ type Action any
 // NodeAddress - DHT record value which stores adnl addr related to node's public key used for channels
 type NodeAddress struct {
 	ADNLAddr []byte `tl:"int256"`
+}
+
+// OpenChannelOffchain - open and create chanel before deployment
+type OpenChannelOffchain struct {
+	CodeHash    []byte     `tl:"int256"`
+	OpenConfig  *cell.Cell `tl:"cell"`
+	NodeVersion uint32     `tl:"int"`
+}
+
+// OpenChannelOffchainResponse - result for OpenChannelOffchain
+type OpenChannelOffchainResponse struct {
+	Addr   []byte `tl:"int256"`
+	Reason string `tl:"string"`
 }
 
 // Ping - check connection is alive and delay
@@ -105,7 +121,7 @@ type AuthenticateToSign struct {
 type ProposeAction struct {
 	LockID      int64      `tl:"long"`
 	ChannelAddr []byte     `tl:"int256"`
-	Action      any        `tl:"struct boxed [payments.openVirtualAction,payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.incrementStatesAction,payments.commitVirtualAction]"`
+	Action      any        `tl:"struct boxed [payments.openVirtualAction,payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.incrementStatesAction,payments.commitVirtualAction,payments.rentCapacityAction]"`
 	SignedState *cell.Cell `tl:"cell"`
 	UpdateProof *cell.Cell `tl:"cell optional"`
 }
@@ -145,6 +161,12 @@ type OpenVirtualAction struct {
 	InstructionKey []byte             `tl:"int256"`
 	Instructions   InstructionsToSign `tl:"struct"`
 	Signature      []byte             `tl:"bytes"`
+}
+
+// RentCapacityAction - request party to deposit inbound capacity for us, for coins optionally
+type RentCapacityAction struct {
+	Till   uint64 `tl:"long"`
+	Amount []byte `tl:"bytes"`
 }
 
 type InstructionsToSign struct {

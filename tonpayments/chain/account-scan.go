@@ -44,7 +44,7 @@ func (v *Scanner) OnChannelUpdate(_ context.Context, ch *db.Channel, statusChang
 			lt = ch.LastProcessedLT - 1
 		}
 
-		log.Info().Str("address", ch.Address).Msg("start listening for channel events")
+		log.Info().Str("address", ch.Address).Msg("start listening for onchain channel events")
 		go v.startForContract(ctx, address.MustParseAddr(ch.Address), lt)
 	}
 }

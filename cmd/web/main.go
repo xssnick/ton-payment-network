@@ -24,22 +24,23 @@ import (
 	"time"
 )
 
+var DB *db.DB
 var Service *tonpayments.Service
 var Config *config.Config
 
-const MinFee = "0.000001"
-const FeePercentDiv100 = 10
+const MinFee = "0.000000001"
+const FeePercentDiv100 = 0
 
 func main() {
 	var started bool
 	var sPub ed25519.PublicKey
 
-	js.Global().Set("deployChannel", js.FuncOf(func(this js.Value, args []js.Value) any {
+	js.Global().Set("openChannel", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if !started {
 			return js.Null()
 		}
 
-		_, err := Service.DeployChannelWithNode(context.Background(), sPub, nil, 0)
+		_, err := Service.OpenChannelWithNode(context.Background(), sPub, nil, 0)
 		if err != nil {
 			println(err.Error())
 		}
@@ -377,6 +378,53 @@ func main() {
 		return js.Null()
 	}))
 
+	js.Global().Set("dumpTasks", js.FuncOf(func(this js.Value, args []js.Value) any {
+		pfx := args[0].String()
+		all := args[1].Bool()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		list, err := DB.DumpTasks(ctx, pfx)
+		cancel()
+		if err != nil {
+			log.Error().Err(err).Msg("failed to load planned tasks")
+			return js.Null()
+		}
+
+		for _, task := range list {
+			if task.CompletedAt != nil {
+				if all {
+					log.Info().Str("type", task.Type).
+						Str("id", task.ID).
+						Time("created_at", task.CreatedAt).
+						Time("completed_at", *task.CompletedAt).
+						Msg("completed task")
+				}
+				continue
+			}
+
+			if task.ExecuteTill != nil && task.ExecuteTill.Before(time.Now()) {
+				if all {
+					log.Info().Str("type", task.Type).
+						Str("id", task.ID).
+						Time("created_at", task.CreatedAt).
+						Time("execute_till", *task.ExecuteTill).
+						Msg("outdated task")
+				}
+				continue
+			}
+
+			log.Info().Str("type", task.Type).
+				Str("id", task.ID).
+				Time("created_at", task.CreatedAt).
+				Str("last_error", task.LastError).
+				Time("after", task.ExecuteAfter).
+				Str("queue", task.Queue).
+				Msg("planned task")
+		}
+
+		return js.Null()
+	}))
+
 	js.Global().Set("startPaymentNetwork", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if started {
 			return js.Null()
@@ -428,19 +476,26 @@ func main() {
 }
 
 func start(peerKey, channelKey []byte) {
-	cfg, err := config.LoadConfig("payments-config")
+	const configPath = "payments-config"
+	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		panic(err)
 	}
+	if config.Upgrade(cfg) {
+		if err = config.SaveConfig(cfg, configPath); err != nil {
+			log.Fatal().Err(err).Msg("failed to update config file")
+			return
+		}
+	}
 	Config = cfg
 
-	// cfg.ChannelConfig.BufferTimeToCommit = 60
-	// cfg.ChannelConfig.QuarantineDurationSec = 60
-	// cfg.ChannelConfig.ConditionalCloseDurationSec = 90
-	// cfg.ChannelConfig.MinSafeVirtualChannelTimeoutSec = 60
+	cfg.ChannelConfig.SupportedCoins.Ton.MinCapacityRequest = "1"
+	cfg.ChannelConfig.SupportedCoins.Ton.VirtualTunnelConfig.MaxCapacityToRentPerTx = "5"
+	cfg.ChannelConfig.SupportedCoins.Ton.VirtualTunnelConfig.CapacityDepositFee = "0.05"
+	cfg.ChannelConfig.SupportedCoins.Ton.VirtualTunnelConfig.CapacityFeePercentPer30Days = 0.1
 	cfg.ChannelConfig.SupportedCoins.Ton.BalanceControl = nil
 
-	if err = config.SaveConfig(cfg, "payments-config"); err != nil {
+	if err = config.SaveConfig(cfg, configPath); err != nil {
 		panic(err)
 	}
 
@@ -450,6 +505,7 @@ func start(peerKey, channelKey []byte) {
 	}
 
 	d := db.NewDB(idb, ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey).Public().(ed25519.PublicKey))
+	DB = d
 
 	if freshDb {
 		if err = d.SetMigrationVersion(context.Background(), len(db.Migrations)); err != nil {
@@ -497,18 +553,25 @@ func start(peerKey, channelKey []byte) {
 			return
 		}
 
-		capacity, _, err := ch.CalcBalance(true)
+		capacity, pendingIn, err := ch.CalcBalance(true)
 		if err != nil {
 			println("failed to calc capacity: " + err.Error())
 			return
 		}
+		if ch.Their.PendingWithdraw != nil {
+			pending := new(big.Int).Sub(ch.Their.PendingWithdraw, ch.TheirOnchain.Withdrawn)
+			if pending.Sign() > 0 {
+				pendingIn.Sub(pendingIn, pending)
+			}
+		}
 
 		jsEvent := map[string]any{
-			"active":   ch.Status == db.ChannelStateActive,
-			"balance":  tlb.MustFromNano(balance, int(cc.Decimals)).String(),
-			"capacity": tlb.MustFromNano(capacity, int(cc.Decimals)).String(),
-			"locked":   tlb.MustFromNano(locked, int(cc.Decimals)).String(),
-			"address":  ch.Address,
+			"active":    ch.Status == db.ChannelStateActive,
+			"balance":   cc.MustAmount(balance).String(),
+			"capacity":  cc.MustAmount(capacity).String(),
+			"locked":    cc.MustAmount(locked).String(),
+			"pendingIn": cc.MustAmount(pendingIn).String(),
+			"address":   ch.Address,
 		}
 
 		pcuFunc.Invoke(js.ValueOf(jsEvent))
@@ -592,7 +655,7 @@ func sendTransfer(amt, feeAmt tlb.Coins, keys [][]byte, justEstimate bool) (*big
 			Target:   parsedKey,
 			Capacity: amt.Nano(),
 			Fee:      fee,
-			Deadline: time.Now().Add(1*time.Minute + safeHopTTL*time.Duration(len(keys)-i)),
+			Deadline: time.Now().Add(3*time.Hour + safeHopTTL*time.Duration(len(keys)-i)),
 		})
 	}
 

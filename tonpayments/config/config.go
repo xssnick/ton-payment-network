@@ -4,13 +4,18 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"github.com/xssnick/tonutils-go/tlb"
+	"math/big"
 )
 
 type VirtualConfig struct {
-	ProxyMaxCapacity string
-	ProxyMinFee      string
-	ProxyFeePercent  float64
-	AllowTunneling   bool
+	MaxCapacityToRentPerTx      string
+	CapacityDepositFee          string
+	CapacityFeePercentPer30Days float64
+	ProxyMaxCapacity            string
+	ProxyMinFee                 string
+	ProxyFeePercent             float64
+	AllowTunneling              bool
 }
 
 type BalanceControlConfig struct {
@@ -26,8 +31,17 @@ type CoinConfig struct {
 	ExcessFeeTon        string
 	Symbol              string
 	Decimals            uint8
+	MinCapacityRequest  string
 
 	BalanceControl *BalanceControlConfig
+}
+
+func (c *CoinConfig) MustAmount(nano *big.Int) tlb.Coins {
+	return tlb.MustFromNano(nano, int(c.Decimals))
+}
+
+func (c *CoinConfig) MustAmountDecimal(str string) tlb.Coins {
+	return tlb.MustFromDecimal(str, int(c.Decimals))
 }
 
 type ChannelsConfig struct {
@@ -46,6 +60,7 @@ type CoinTypes struct {
 }
 
 type Config struct {
+	Version                        int
 	ADNLServerKey                  []byte
 	PaymentNodePrivateKey          []byte
 	WalletPrivateKey               []byte
@@ -61,6 +76,8 @@ type Config struct {
 	SecureProofPolicy              bool
 	ChannelConfig                  ChannelsConfig
 }
+
+const LatestConfigVersion = 2
 
 func Generate() (*Config, error) {
 	_, priv, err := ed25519.GenerateKey(nil)
@@ -84,6 +101,7 @@ func Generate() (*Config, error) {
 	}
 
 	cfg := &Config{
+		Version:                        LatestConfigVersion,
 		ADNLServerKey:                  nodePriv.Seed(),
 		PaymentNodePrivateKey:          priv.Seed(),
 		WalletPrivateKey:               walletPriv.Seed(),
@@ -102,34 +120,43 @@ func Generate() (*Config, error) {
 				Ton: CoinConfig{
 					Enabled: true,
 					VirtualTunnelConfig: VirtualConfig{
-						ProxyMaxCapacity: "5",
-						ProxyMinFee:      "0.0005",
-						ProxyFeePercent:  0.5,
-						AllowTunneling:   true,
+						MaxCapacityToRentPerTx:      "5",
+						CapacityDepositFee:          "0.05",
+						CapacityFeePercentPer30Days: 0.1,
+						ProxyMaxCapacity:            "5",
+						ProxyMinFee:                 "0.0005",
+						ProxyFeePercent:             0.5,
+						AllowTunneling:              true,
 					},
+					MisbehaviorFine:    "3",
+					ExcessFeeTon:       "0.25",
+					Symbol:             "TON",
+					Decimals:           9,
+					MinCapacityRequest: "1",
 					BalanceControl: &BalanceControlConfig{
 						DepositWhenAmountLessThan: "2",
 						DepositUpToAmount:         "3",
 						WithdrawWhenAmountReached: "5",
 					},
-					MisbehaviorFine: "3",
-					ExcessFeeTon:    "0.25",
-					Symbol:          "TON",
-					Decimals:        9,
 				},
 				Jettons: map[string]CoinConfig{
 					"EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs": {
 						Enabled: false,
 						VirtualTunnelConfig: VirtualConfig{
-							ProxyMaxCapacity: "15.5",
-							ProxyMinFee:      "0.002",
-							ProxyFeePercent:  0.8,
-							AllowTunneling:   false,
+							MaxCapacityToRentPerTx:      "10",
+							CapacityDepositFee:          "0.3",
+							CapacityFeePercentPer30Days: 0.1,
+							ProxyMaxCapacity:            "15.5",
+							ProxyMinFee:                 "0.002",
+							ProxyFeePercent:             0.8,
+							AllowTunneling:              false,
 						},
-						MisbehaviorFine: "12",
-						ExcessFeeTon:    "0.35",
-						Symbol:          "USDT",
-						Decimals:        6,
+						MisbehaviorFine:    "12",
+						ExcessFeeTon:       "0.35",
+						Symbol:             "USDT",
+						Decimals:           6,
+						MinCapacityRequest: "3",
+						BalanceControl:     nil,
 					},
 				},
 				ExtraCurrencies: map[uint32]CoinConfig{},
@@ -142,4 +169,36 @@ func Generate() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func Upgrade(cfg *Config) bool {
+	if cfg.Version >= LatestConfigVersion {
+		return false
+	}
+
+	if cfg.Version < 2 {
+		upgrade := func(cc CoinConfig) CoinConfig {
+			if cc.VirtualTunnelConfig.MaxCapacityToRentPerTx == "" {
+				cc.VirtualTunnelConfig.MaxCapacityToRentPerTx = "0"
+			}
+			if cc.VirtualTunnelConfig.CapacityDepositFee == "" {
+				cc.VirtualTunnelConfig.CapacityDepositFee = "0"
+			}
+			if cc.MinCapacityRequest == "" {
+				cc.MinCapacityRequest = "0"
+			}
+			return cc
+		}
+
+		cfg.ChannelConfig.SupportedCoins.Ton = upgrade(cfg.ChannelConfig.SupportedCoins.Ton)
+		for s := range cfg.ChannelConfig.SupportedCoins.Jettons {
+			cfg.ChannelConfig.SupportedCoins.Jettons[s] = upgrade(cfg.ChannelConfig.SupportedCoins.Jettons[s])
+		}
+		for s := range cfg.ChannelConfig.SupportedCoins.ExtraCurrencies {
+			cfg.ChannelConfig.SupportedCoins.ExtraCurrencies[s] = upgrade(cfg.ChannelConfig.SupportedCoins.ExtraCurrencies[s])
+		}
+	}
+
+	cfg.Version = LatestConfigVersion
+	return true
 }

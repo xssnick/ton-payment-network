@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +37,7 @@ type Transport interface {
 	ProposeAction(ctx context.Context, lockId int64, channelAddr *address.Address, theirChannelKey []byte, state, updateProof *cell.Cell, action transport.Action) (*transport.ProposalDecision, error)
 	RequestChannelLock(ctx context.Context, theirChannelKey ed25519.PublicKey, channel *address.Address, id int64, lock bool) (*transport.Decision, error)
 	IsChannelUnlocked(ctx context.Context, theirChannelKey ed25519.PublicKey, channel *address.Address, id int64) (*transport.Decision, error)
+	OpenOffchainChannel(ctx context.Context, theirChannelKey, codeHash []byte, cfg payments.OpenConfigContainer) (*address.Address, error)
 }
 
 type Webhook interface {
@@ -69,7 +69,6 @@ type DB interface {
 	CreateChannelEvent(ctx context.Context, channel *db.Channel, at time.Time, item db.ChannelHistoryItem) error
 
 	GetUrgentPeers(ctx context.Context) ([][]byte, error)
-	AddUrgentPeer(ctx context.Context, peerAddress []byte) error
 
 	GetChannelsHistoryByPeriod(ctx context.Context, addr string, limit int, before, after *time.Time) ([]db.ChannelHistoryItem, error)
 
@@ -77,17 +76,17 @@ type DB interface {
 }
 
 type WalletMessage struct {
-	To     *address.Address
-	Amount tlb.Coins
-	Body   *cell.Cell
+	To        *address.Address
+	Amount    tlb.Coins
+	Body      *cell.Cell
+	StateInit *tlb.StateInit
+	EC        map[uint32]tlb.Coins
 }
 
 type Wallet interface {
 	WalletAddress() *address.Address
 	DoTransactionMany(ctx context.Context, reason string, messages []WalletMessage) ([]byte, error)
-	DeployContractWaitTransaction(ctx context.Context, amt tlb.Coins, body, code, data *cell.Cell) (*address.Address, []byte, error)
 	DoTransaction(ctx context.Context, reason string, to *address.Address, amt tlb.Coins, body *cell.Cell) ([]byte, error)
-	DoTransactionEC(ctx context.Context, reason string, to *address.Address, amtTon tlb.Coins, body *cell.Cell, ecID uint32, ecAmt tlb.Coins) ([]byte, error)
 }
 
 type BlockCheckedEvent struct {
@@ -158,7 +157,7 @@ type Service struct {
 	supportedEC        map[uint32]config.CoinConfig
 	supportedTon       bool
 	balanceControllers map[string]*balanceControlConfig
-	urgentPeers        map[string]bool
+	urgentPeers        map[string]int
 	useMetrics         bool
 
 	globalCtx    context.Context
@@ -187,7 +186,7 @@ func NewService(api ChainAPI, database DB, transport, webTransport Transport, wa
 		supportedEC:                    map[uint32]config.CoinConfig{},
 		supportedTon:                   cfg.SupportedCoins.Ton.Enabled,
 		balanceControllers:             map[string]*balanceControlConfig{},
-		urgentPeers:                    map[string]bool{},
+		urgentPeers:                    map[string]int{},
 		globalCtx:                      globalCtx,
 		globalCancel:                   globalCancel,
 		useMetrics:                     useMetrics,
@@ -268,11 +267,11 @@ func NewService(api ChainAPI, database DB, transport, webTransport Transport, wa
 	}
 
 	if balanceControl {
-		handler := s.balanceControlCallback
+		handler := s.channelCallback
 		if current := database.GetOnChannelUpdated(); current != nil {
 			handler = func(ctx context.Context, ch *db.Channel, statusChanged bool) {
 				current(ctx, ch, statusChanged)
-				s.balanceControlCallback(ctx, ch, statusChanged)
+				s.channelCallback(ctx, ch, statusChanged)
 			}
 		}
 		database.SetOnChannelUpdated(handler)
@@ -288,7 +287,7 @@ func NewService(api ChainAPI, database DB, transport, webTransport Transport, wa
 			}
 
 			for _, ch := range channels {
-				s.balanceControlCallback(context.Background(), ch, false)
+				s.channelCallback(context.Background(), ch, false)
 			}
 		}()
 	}
@@ -308,33 +307,56 @@ func (s *Service) GetChannelsHistoryByPeriod(ctx context.Context, addr string, l
 	return s.db.GetChannelsHistoryByPeriod(ctx, addr, limit, before, after)
 }
 
-func (s *Service) AddUrgentPeer(ctx context.Context, peer []byte) error {
-	if err := s.db.AddUrgentPeer(ctx, peer); err != nil {
-		return err
-	}
-
+func (s *Service) AddUrgentPeer(peer []byte) {
 	s.urgentPeersMx.Lock()
-	s.urgentPeers[hex.EncodeToString(peer)] = true
+	refs := s.urgentPeers[string(peer)]
+	s.urgentPeers[string(peer)] = refs + 1
 	s.urgentPeersMx.Unlock()
 
-	s.regularTransport.AddUrgentPeer(peer)
-	return nil
+	if refs == 0 {
+		s.regularTransport.AddUrgentPeer(peer)
+	}
+}
+
+func (s *Service) RemoveUrgentPeer(peer []byte) {
+	s.urgentPeersMx.Lock()
+	refs := s.urgentPeers[string(peer)]
+	if refs > 1 {
+		s.urgentPeers[string(peer)] = refs - 1
+	} else {
+		delete(s.urgentPeers, string(peer))
+	}
+	s.urgentPeersMx.Unlock()
+
+	if refs == 1 {
+		s.regularTransport.RemoveUrgentPeer(peer)
+	}
 }
 
 func (s *Service) loadUrgentPeers(ctx context.Context) error {
-	peers, err := s.db.GetUrgentPeers(ctx)
+	channels, err := s.ListChannels(ctx, nil, db.ChannelStateActive)
 	if err != nil {
 		return err
 	}
 
-	for _, peer := range peers {
-		s.urgentPeersMx.Lock()
-		s.urgentPeers[hex.EncodeToString(peer)] = true
-		s.urgentPeersMx.Unlock()
-
-		s.regularTransport.AddUrgentPeer(peer)
+	for _, ch := range channels {
+		if ch.UrgentForUs {
+			s.AddUrgentPeer(ch.TheirOnchain.Key)
+		}
 	}
 	return nil
+}
+
+func (s *Service) channelCallback(ctx context.Context, ch *db.Channel, statusChanged bool) {
+	if ch.UrgentForUs && statusChanged {
+		if ch.Status == db.ChannelStateActive {
+			s.AddUrgentPeer(ch.TheirOnchain.Key)
+		} else {
+			s.RemoveUrgentPeer(ch.TheirOnchain.Key)
+		}
+	}
+
+	s.balanceControlCallback(ctx, ch, statusChanged)
 }
 
 func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ bool) {
@@ -368,24 +390,62 @@ func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ 
 
 	log.Debug().Str("address", ch.Address).Msg("balance control callback triggered")
 
-	balance, _, err := ch.CalcBalance(false)
+	balance, balanceHold, err := ch.CalcBalance(false)
 	if err != nil {
 		log.Error().Str("address", ch.Address).Err(err).Msg("failed to calc our balance in balance controller")
 		return
 	}
+	if ch.Our.PendingWithdraw != nil {
+		pw := new(big.Int).Sub(ch.Our.PendingWithdraw, ch.OurOnchain.Withdrawn)
+		if pw.Sign() > 0 {
+			balanceHold.Sub(balanceHold, pw)
+		}
+	}
+	balance.Add(balance, balanceHold) // no onchain actions for holden balance
 
-	if balance.Cmp(bc.DepositWhenAmountLessThan.Nano()) < 0 {
+	depWhenLess := new(big.Int).Set(bc.DepositWhenAmountLessThan.Nano())
+	depUpTo := new(big.Int).Set(bc.DepositUpToAmount.Nano())
+	wdAt := new(big.Int).Set(bc.WithdrawWhenAmountReached.Nano())
+
+	locked := big.NewInt(0)
+	if ch.OurLockedDeposit != nil {
+		// we must always keep available onchain till expire
+		locked = ch.OurLockedDeposit.Available()
+		minBalance := new(big.Int).Set(balance)
+
+		if minBalance.Cmp(locked) < 0 {
+			minBalance = new(big.Int).Set(locked)
+
+			if depWhenLess.Sign() > 0 && depUpTo.Sign() > 0 {
+				if depWhenLess.Cmp(minBalance) < 0 {
+					depWhenLess = new(big.Int).Set(minBalance)
+				}
+				if depUpTo.Cmp(minBalance) < 0 {
+					depUpTo = new(big.Int).Set(minBalance)
+				}
+			} else {
+				depWhenLess = new(big.Int).Set(minBalance)
+				depUpTo = new(big.Int).Set(minBalance)
+			}
+		}
+
+		if wdAt.Sign() > 0 {
+			wdAt.Add(wdAt, locked)
+		}
+	}
+
+	if (depWhenLess.Sign() > 0 || locked.Sign() > 0) && balance.Cmp(depWhenLess) < 0 {
 		if ctrl.depositStartedAtBalance == nil || ctrl.depositStartedAtBalance.Cmp(ch.OurOnchain.Deposited) < 0 {
-			amt := tlb.MustFromNano(new(big.Int).Sub(bc.DepositUpToAmount.Nano(), balance), bc.DepositUpToAmount.Decimals())
-			if err = s.TopupChannel(ctx, address.MustParseAddr(ch.Address), amt); err != nil {
+			amt := tlb.MustFromNano(new(big.Int).Sub(depUpTo, balance), bc.DepositUpToAmount.Decimals())
+			if err = s.TopupChannel(ctx, ch, amt); err != nil {
 				log.Error().Err(err).Str("address", ch.Address).Str("amount", amt.String()).Msg("failed to topup channel")
 				return
 			}
 			ctrl.depositStartedAtBalance = new(big.Int).Set(ch.OurOnchain.Deposited)
 		}
-	} else if bc.WithdrawWhenAmountReached.Nano().Sign() > 0 && balance.Cmp(bc.WithdrawWhenAmountReached.Nano()) > 0 {
+	} else if wdAt.Sign() > 0 && balance.Cmp(wdAt) > 0 {
 		if ctrl.withdrawStartedAtBalance == nil || ctrl.withdrawStartedAtBalance.Cmp(ch.OurOnchain.Withdrawn) < 0 {
-			amt := tlb.MustFromNano(new(big.Int).Sub(balance, bc.DepositUpToAmount.Nano()), bc.DepositUpToAmount.Decimals())
+			amt := tlb.MustFromNano(new(big.Int).Sub(balance, depUpTo), bc.DepositUpToAmount.Decimals())
 			if err = s.requestWithdraw(ctx, ch, amt); err != nil {
 				log.Error().Err(err).Str("address", ch.Address).Str("amount", amt.String()).Msg("failed to withdraw from channel")
 				return
@@ -504,10 +564,6 @@ func (s *Service) scanSettledConditionals(channelAddr string, tx *client.Transac
 }
 
 func (s *Service) Start() {
-	if err := s.addPeersForChannels(); err != nil {
-		log.Error().Err(err).Msg("failed to add urgent peers")
-	}
-
 	go s.taskExecutor()
 	if s.useMetrics {
 		go s.channelsMonitor()
@@ -589,6 +645,11 @@ func (s *Service) Start() {
 				our, their = their, our
 			}
 
+			if (channel == nil || !channel.ActiveOnchain) && upd.Channel.Status == payments.ChannelStatusUninitialized {
+				// to not reset the offchain channel which is not yet activated onchain
+				continue
+			}
+
 			isNew := channel == nil
 			if isNew || channel.Status == db.ChannelStateInactive {
 				if upd.Channel.Status == payments.ChannelStatusUninitialized {
@@ -608,8 +669,8 @@ func (s *Service) Start() {
 					WeLeft:                 isLeft,
 					OurOnchain:             our,
 					TheirOnchain:           their,
-					Our:                    db.NewSide(upd.Channel.Storage.ChannelID, uint64(our.CommittedSeqno), uint64(their.CommittedSeqno)),
-					Their:                  db.NewSide(upd.Channel.Storage.ChannelID, uint64(their.CommittedSeqno), uint64(our.CommittedSeqno)),
+					Our:                    db.NewSide(upd.Channel.Storage.ChannelID, our.CommittedSeqno, their.CommittedSeqno),
+					Their:                  db.NewSide(upd.Channel.Storage.ChannelID, their.CommittedSeqno, our.CommittedSeqno),
 					InitAt:                 time.Unix(upd.Transaction.At, 0),
 					CreatedAt:              createAt,
 					AcceptingActions:       upd.Channel.Status == payments.ChannelStatusOpen,
@@ -620,7 +681,6 @@ func (s *Service) Start() {
 				if upd.Channel.Storage.PaymentConfig.CurrencyConfig != nil {
 					switch cc := upd.Channel.Storage.PaymentConfig.CurrencyConfig.(type) {
 					case payments.CurrencyConfigJetton:
-						// TODO: filter allowed masters
 						channel.JettonAddress = cc.Info.Master.String()
 					case payments.CurrencyConfigEC:
 						channel.ExtraCurrencyID = cc.ID
@@ -652,14 +712,14 @@ func (s *Service) Start() {
 			var startClosing, closed bool
 			switch upd.Channel.Status {
 			case payments.ChannelStatusOpen:
+				channel.ActiveOnchain = true
+
 				if channel.Status != db.ChannelStateActive {
 					channel.Status = db.ChannelStateActive
 
-					// give 5 sec to other side for tx discovery
-					delay := time.Now().Add(5 * time.Second)
 					err = s.db.CreateTask(context.Background(), PaymentsTaskPool, "increment-state", channel.Address,
 						"exchange-states-"+channel.Address+"-"+fmt.Sprint(channel.InitAt.Unix()),
-						db.IncrementStatesTask{ChannelAddress: channel.Address, WantResponse: true}, &delay, nil,
+						db.IncrementStatesTask{ChannelAddress: channel.Address, WantResponse: true}, nil, nil,
 					)
 					if err != nil {
 						log.Error().Err(err).Str("channel", channel.Address).Msg("failed to create task for exchanging states")
@@ -671,6 +731,9 @@ func (s *Service) Start() {
 						Msg("onchain channel opened")
 				}
 			case payments.ChannelStatusClosureStarted:
+				channel.ActiveOnchain = true
+				channel.AcceptingActions = false
+
 				if channel.Status != db.ChannelStateClosing {
 					startClosing = true
 					channel.Status = db.ChannelStateClosing
@@ -706,6 +769,9 @@ func (s *Service) Start() {
 				}
 				fallthrough
 			case payments.ChannelStatusSettlingConditionals:
+				channel.ActiveOnchain = true
+				channel.AcceptingActions = false
+
 				if channel.Status != db.ChannelStateClosing {
 					startClosing = true
 					channel.Status = db.ChannelStateClosing
@@ -730,6 +796,9 @@ func (s *Service) Start() {
 				}
 				fallthrough
 			case payments.ChannelStatusAwaitingFinalization:
+				channel.ActiveOnchain = true
+				channel.AcceptingActions = false
+
 				if channel.Status != db.ChannelStateClosing {
 					startClosing = true
 					channel.Status = db.ChannelStateClosing
@@ -753,6 +822,9 @@ func (s *Service) Start() {
 					continue
 				}
 			case payments.ChannelStatusUninitialized:
+				channel.ActiveOnchain = false
+				channel.AcceptingActions = false
+
 				if channel.Status != db.ChannelStateInactive {
 					closed = true
 					channel.Status = db.ChannelStateInactive
@@ -875,35 +947,50 @@ func (s *Service) DebugPrintVirtualChannels() {
 
 		val, _, err = ch.CalcBalance(true)
 		if err == nil {
-			inBalance = tlb.MustFromNano(val, int(cc.Decimals)).String()
+			inBalance = cc.MustAmount(val).String()
 		}
 
-		log.Info().Str("address", ch.Address).
+		lg := log.Info().Str("address", ch.Address).
 			Str("with", base64.StdEncoding.EncodeToString(ch.TheirOnchain.Key)).
-			Str("out_deposit", tlb.MustFromNano(ch.OurOnchain.Deposited, int(cc.Decimals)).String()).
-			Str("out_withdrawn", tlb.MustFromNano(ch.OurOnchain.Withdrawn, int(cc.Decimals)).String()).
+			Str("out_deposit", cc.MustAmount(ch.OurOnchain.Deposited).String()).
+			Str("out_withdrawn", cc.MustAmount(ch.OurOnchain.Withdrawn).String()).
 			Str("sent_out", ch.Our.State.Data.Sent.String()).
 			Str("balance_out", outBalance).
-			Str("in_deposit", tlb.MustFromNano(ch.TheirOnchain.Deposited, int(cc.Decimals)).String()).
-			Str("in_withdrawn", tlb.MustFromNano(ch.TheirOnchain.Withdrawn, int(cc.Decimals)).String()).
+			Str("in_deposit", cc.MustAmount(ch.TheirOnchain.Deposited).String()).
+			Str("in_withdrawn", cc.MustAmount(ch.TheirOnchain.Withdrawn).String()).
 			Str("sent_in", ch.Their.State.Data.Sent.String()).
 			Str("balance_in", inBalance).
 			Uint64("seqno_their", ch.Their.State.Data.Seqno).
 			Uint64("seqno_our", ch.Our.State.Data.Seqno).
 			Bool("accepting_actions", ch.AcceptingActions).
 			Bool("we_master", ch.WeLeft).
+			Str("our_locked_dep", cc.MustAmount(ch.OurLockedDeposit.Available()).String()).
+			Str("their_locked_dep", cc.MustAmount(ch.TheirLockedDeposit.Available()).String()).
+			Bool("onchain", ch.ActiveOnchain).
 			Str("jetton", ch.JettonAddress).
-			Uint32("ec", ch.ExtraCurrencyID).
-			Msg("active onchain channel")
+			Uint32("ec", ch.ExtraCurrencyID)
+
+		if ch.OurLockedDeposit != nil {
+			lg.Str("our_locked_dep_used", cc.MustAmount(ch.OurLockedDeposit.Used).String())
+			lg.Str("our_locked_dep_amount", cc.MustAmount(ch.OurLockedDeposit.Amount).String())
+		}
+
+		if ch.TheirLockedDeposit != nil {
+			lg.Str("their_locked_dep_used", cc.MustAmount(ch.TheirLockedDeposit.Used).String())
+			lg.Str("their_locked_dep_amount", cc.MustAmount(ch.TheirLockedDeposit.Amount).String())
+		}
+
+		lg.Msg("active onchain channel")
+
 		for _, kv := range ch.Our.Conditionals.All() {
 			vch, _ := payments.ParseVirtualChannelCond(kv.Value.BeginParse())
 			till := time.Unix(vch.Deadline, 0).Sub(time.Now())
 			log.Info().
-				Str("capacity", tlb.MustFromNano(vch.Capacity, int(cc.Decimals)).String()).
+				Str("capacity", cc.MustAmount(vch.Capacity).String()).
 				Str("till_deadline", till.String()).
 				Str("till_safe_deadline", (till-time.Duration(ch.SafeOnchainClosePeriod)*time.Second).String()).
-				Str("fee", tlb.MustFromNano(vch.Fee, int(cc.Decimals)).String()).
-				Str("prepaid", tlb.MustFromNano(vch.Prepay, int(cc.Decimals)).String()).
+				Str("fee", cc.MustAmount(vch.Fee).String()).
+				Str("prepaid", cc.MustAmount(vch.Prepay).String()).
 				Str("key", base64.StdEncoding.EncodeToString(vch.Key)).
 				Msg("virtual from us")
 		}
@@ -936,6 +1023,158 @@ func (s *Service) GetActiveChannel(ctx context.Context, channelAddr string) (*db
 	}
 
 	return channel, nil
+}
+
+func (s *Service) OpenChannelOffchain(ctx context.Context, cfg *payments.OpenConfigContainer, codeHash, authorizedKey []byte, urgent, withWebPeer bool) (*address.Address, error) {
+	isLeft := bytes.Equal(cfg.KeyA, s.key.Public().(ed25519.PublicKey))
+	if !isLeft && !bytes.Equal(cfg.KeyB, s.key.Public().(ed25519.PublicKey)) {
+		return nil, fmt.Errorf("unknown keys")
+	}
+
+	theirKey := cfg.KeyB
+	if !isLeft {
+		theirKey = cfg.KeyA
+	}
+
+	if !bytes.Equal(theirKey, authorizedKey) {
+		return nil, fmt.Errorf("authorized key mismatch")
+	}
+
+	var code *cell.Cell
+	for _, cd := range payments.PaymentChannelCodes {
+		if bytes.Equal(cd.Hash(), codeHash) {
+			code = cd
+			break
+		}
+	}
+
+	if code == nil {
+		return nil, fmt.Errorf("unknown payment channel code")
+	}
+
+	body, data, err := s.channelClient.GetDeployAsyncChannelParams(cfg.ChannelID, isLeft, s.key, theirKey, cfg.ClosingConfig, cfg.PaymentConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get deploy params: %w", err)
+	}
+
+	si, err := tlb.ToCell(tlb.StateInit{
+		Code: code,
+		Data: data,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize state init: %w", err)
+	}
+	addr := address.NewAddress(0, 0, si.Hash())
+
+	proposed, err := s.channelClient.ParseAsyncChannel(addr, code, data, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse async channel: %w", err)
+	}
+
+	// verify that config suits us
+	if ok, _ := s.verifyChannel(proposed); !ok {
+		return nil, fmt.Errorf("verification not passed")
+	}
+
+	channel, err := s.db.GetChannel(ctx, addr.String())
+	if err != nil && !errors.Is(err, db.ErrNotFound) {
+		return nil, fmt.Errorf("failed to get channel: %w", err)
+	}
+	var exists = channel != nil
+
+	if exists && channel.Status != db.ChannelStateInactive {
+		// already initialized, idempotency
+		return addr, nil
+	}
+
+	our := db.OnchainState{
+		Key:            cfg.KeyB,
+		CommittedSeqno: 0,
+		WalletAddress:  cfg.PaymentConfig.DestB.String(),
+		Deposited:      big.NewInt(0),
+		Withdrawn:      big.NewInt(0),
+		Sent:           big.NewInt(0),
+	}
+	their := db.OnchainState{
+		Key:            cfg.KeyA,
+		CommittedSeqno: 0,
+		WalletAddress:  cfg.PaymentConfig.DestA.String(),
+		Deposited:      big.NewInt(0),
+		Withdrawn:      big.NewInt(0),
+		Sent:           big.NewInt(0),
+	}
+
+	createAt := time.Now()
+	var version int64
+	if exists {
+		version = channel.DBVersion
+		createAt = channel.CreatedAt
+
+		our.CommittedSeqno = channel.OurOnchain.CommittedSeqno
+		their.CommittedSeqno = channel.TheirOnchain.CommittedSeqno
+	}
+
+	if isLeft {
+		our, their = their, our
+	}
+
+	channel = &db.Channel{
+		ID:                     cfg.ChannelID,
+		Address:                proposed.Address().String(),
+		Status:                 db.ChannelStateActive,
+		WeLeft:                 isLeft,
+		OurOnchain:             our,
+		TheirOnchain:           their,
+		SafeOnchainClosePeriod: int64(s.cfg.BufferTimeToCommit) + int64(cfg.ClosingConfig.QuarantineDuration) + int64(cfg.ClosingConfig.ConditionalCloseDuration),
+		AcceptingActions:       true,
+		WebPeer:                withWebPeer,
+		ActiveOnchain:          false,
+		UrgentForUs:            urgent,
+		Our:                    db.NewSide(cfg.ChannelID, our.CommittedSeqno, their.CommittedSeqno),
+		Their:                  db.NewSide(cfg.ChannelID, their.CommittedSeqno, our.CommittedSeqno),
+		InitAt:                 time.Now(),
+		CreatedAt:              createAt,
+		CodeHash:               codeHash,
+		InitMessageBody:        body,
+		InitialData:            data,
+		DBVersion:              version,
+	}
+
+	if cfg.PaymentConfig.CurrencyConfig != nil {
+		switch cc := cfg.PaymentConfig.CurrencyConfig.(type) {
+		case payments.CurrencyConfigJetton:
+			channel.JettonAddress = cc.Info.Master.String()
+		case payments.CurrencyConfigEC:
+			channel.ExtraCurrencyID = cc.ID
+		}
+	}
+
+	fc := s.db.UpdateChannel
+	if !exists {
+		fc = s.db.CreateChannel
+	}
+
+	err = s.db.Transaction(ctx, func(ctx context.Context) error {
+		if err = fc(ctx, channel); err != nil {
+			return fmt.Errorf("failed to set channel in db: %w", err)
+		}
+
+		if urgent {
+			err = s.db.CreateTask(ctx, PaymentsTaskPool, "increment-state", channel.Address,
+				"exchange-states-"+channel.Address+"-"+fmt.Sprint(channel.InitAt.Unix()),
+				db.IncrementStatesTask{ChannelAddress: channel.Address, WantResponse: true}, nil, nil,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create task for incrementing states: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to exec channel db tx: %w", err)
+	}
+
+	return addr, nil
 }
 
 func (s *Service) GetVirtualChannelMeta(ctx context.Context, key ed25519.PublicKey) (*db.VirtualChannelMeta, error) {
@@ -978,6 +1217,7 @@ func (s *Service) requestAction(ctx context.Context, channelAddress string, acti
 // Call should be considered as finished only when nil or ErrDenied was returned.
 // That's why all calls to proposeAction must be done via worker jobs.
 // Repeatable calls with the same state should be ok, other side's ProcessAction supports idempotency.
+// Must be called from worker only to ensure rollbacks are always happening in case of error.
 func (s *Service) proposeAction(ctx context.Context, lockId int64, channelAddress string, action transport.Action, details any) error {
 	channel, err := s.db.GetChannel(ctx, channelAddress)
 	if err != nil {
@@ -1019,14 +1259,22 @@ func (s *Service) proposeAction(ctx context.Context, lockId int64, channelAddres
 		return fmt.Errorf("states are not syncronized: %w", err)
 	}
 
-	// renew their state to update their reference to our state
-	channel.Their.SignedSemiChannel = theirState
-	if err = s.db.UpdateChannel(ctx, channel); err != nil {
-		return fmt.Errorf("failed to update channel in db: %w", err)
-	}
+	err = s.db.Transaction(ctx, func(ctx context.Context) error {
+		// renew their state to update their reference to our state
+		channel.Their.SignedSemiChannel = theirState
+		if err = s.db.UpdateChannel(ctx, channel); err != nil {
+			return fmt.Errorf("failed to update channel in db: %w", err)
+		}
 
-	if onSuccess != nil {
-		onSuccess()
+		if onSuccess != nil {
+			if err = onSuccess(ctx); err != nil {
+				return fmt.Errorf("failed to execute on success in tx: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	return nil
