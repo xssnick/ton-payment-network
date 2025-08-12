@@ -246,6 +246,7 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		evData := db.ChannelHistoryActionRentCapData{
 			Amount: amount.String(),
 			Fee:    totalFee.String(),
+			Till:   till.Unix(),
 		}
 		jsonData, err := json.Marshal(evData)
 		if err != nil {

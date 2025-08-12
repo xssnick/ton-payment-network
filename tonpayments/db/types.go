@@ -47,6 +47,7 @@ type ChannelHistoryActionAmountData struct {
 type ChannelHistoryActionRentCapData struct {
 	Amount string
 	Fee    string
+	Till   int64
 }
 
 type ChannelStatus uint8
@@ -301,7 +302,7 @@ func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, *big.Int, error) {
 
 	balance := new(big.Int).Add(s2.State.Data.Sent.Nano(), new(big.Int).Sub(s1chain.Deposited, maxWithdraw))
 	balance = balance.Sub(balance, s1.State.Data.Sent.Nano())
-	
+
 	locked := big.NewInt(0)
 	if s1.PendingWithdraw.Sign() > 0 {
 		locked = locked.Sub(s1.PendingWithdraw, s1chain.Withdrawn)

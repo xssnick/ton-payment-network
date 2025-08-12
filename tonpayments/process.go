@@ -700,6 +700,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			evData := db.ChannelHistoryActionRentCapData{
 				Amount: amount.String(),
 				Fee:    totalFee.String(),
+				Till:   dt.Unix(),
 			}
 			jsonData, err := json.Marshal(evData)
 			if err != nil {
