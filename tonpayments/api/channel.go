@@ -85,9 +85,9 @@ func (s *Server) handleChannelOpen(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	addr, err := s.svc.DeployChannelWithNode(r.Context(), key, jetton, req.ExtraCurrencyID)
+	addr, err := s.svc.OpenChannelWithNode(r.Context(), key, jetton, req.ExtraCurrencyID)
 	if err != nil {
-		writeErr(w, 500, "failed to deploy channel: "+err.Error())
+		writeErr(w, 500, "failed to open channel: "+err.Error())
 		return
 	}
 
@@ -125,7 +125,7 @@ func (s *Server) handleTopup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch, err := s.svc.GetChannel(r.Context(), addr.String())
+	ch, err := s.svc.GetActiveChannel(r.Context(), addr.String())
 	if err != nil {
 		writeErr(w, 500, "failed to get channel: "+err.Error())
 		return
@@ -137,7 +137,7 @@ func (s *Server) handleTopup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err = s.svc.TopupChannel(r.Context(), addr, tlb.MustFromNano(amt, int(cc.Decimals))); err != nil {
+	if err = s.svc.TopupChannel(r.Context(), ch, cc.MustAmount(amt)); err != nil {
 		writeErr(w, 500, "failed to topup channel: "+err.Error())
 		return
 	}

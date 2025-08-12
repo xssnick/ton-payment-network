@@ -44,6 +44,7 @@ type Service interface {
 	ProcessActionRequest(ctx context.Context, key ed25519.PublicKey, channelAddr *address.Address, action Action) ([]byte, error)
 	ProcessExternalChannelLock(ctx context.Context, key ed25519.PublicKey, addr *address.Address, id int64, lock bool) error
 	ProcessIsChannelLocked(ctx context.Context, key ed25519.PublicKey, addr *address.Address, id int64) error
+	OpenChannelOffchain(ctx context.Context, cfg *payments.OpenConfigContainer, codeHash, authorizedKey []byte, urgent, withWeb bool) (*address.Address, error)
 }
 
 type Transport struct {
@@ -202,7 +203,7 @@ func (t *Transport) handleQuery(ctx context.Context, peer *Peer, msg any) (any, 
 		if err != nil {
 			reason = err.Error()
 			ok = false
-			log.Debug().Str("reason", reason).Msg("failed to process action")
+			log.Debug().Str("addr", address.NewAddress(0, 0, q.ChannelAddr).String()).Str("reason", reason).Msg("failed to process action")
 		} else {
 			if updCell, err = tlb.ToCell(updateProof); err != nil {
 				return nil, fmt.Errorf("failed to serialize state cell: %w", err)
@@ -236,6 +237,22 @@ func (t *Transport) handleQuery(ctx context.Context, peer *Peer, msg any) (any, 
 		}
 
 		return Decision{Agreed: ok, Reason: reason, Signature: sign}, nil
+	case OpenChannelOffchain:
+		if peer.AuthKey == nil {
+			return nil, fmt.Errorf("not authorized")
+		}
+
+		var ctr payments.OpenConfigContainer
+		if err := tlb.LoadFromCell(&ctr, q.OpenConfig.BeginParse()); err != nil {
+			return nil, fmt.Errorf("failed to parse channel open config")
+		}
+
+		addr, err := t.svc.OpenChannelOffchain(ctx, &ctr, q.CodeHash, peer.AuthKey, false, t.web)
+		if err != nil {
+			return OpenChannelOffchainResponse{make([]byte, 32), err.Error()}, nil
+		}
+
+		return OpenChannelOffchainResponse{addr.Data(), ""}, nil
 	}
 
 	return nil, fmt.Errorf("unknown query")
@@ -400,7 +417,7 @@ func (t *Transport) ProposeChannelConfig(ctx context.Context, theirChannelKey ed
 		if len(res.ProxyMinFee) > 32 || len(res.ProxyMaxCap) > 32 {
 			return nil, VirtualConfigResponse{}, fmt.Errorf("invalid proxy config")
 		}
-		
+
 		cfg.ProxyMinFee = new(big.Int).SetBytes(res.ProxyMinFee)
 		cfg.ProxyMaxCapacity = new(big.Int).SetBytes(res.ProxyMaxCap)
 	}
@@ -459,6 +476,28 @@ func (t *Transport) RequestAction(ctx context.Context, channelAddr *address.Addr
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
 	return &res, nil
+}
+
+func (t *Transport) OpenOffchainChannel(ctx context.Context, theirChannelKey, codeHash []byte, cfg payments.OpenConfigContainer) (*address.Address, error) {
+	cl, err := tlb.ToCell(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize config to cell: %w", err)
+	}
+
+	var res OpenChannelOffchainResponse
+	err = t.doQuery(ctx, theirChannelKey, OpenChannelOffchain{
+		CodeHash:    codeHash,
+		OpenConfig:  cl,
+		NodeVersion: payments.Version,
+	}, &res, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	if res.Reason != "" {
+		return nil, fmt.Errorf("failed to open channel, response: %s", res.Reason)
+	}
+
+	return address.NewAddress(0, 0, res.Addr), nil
 }
 
 func (t *Transport) doQuery(ctx context.Context, theirKey []byte, req, resp tl.Serializable, connect bool) error {

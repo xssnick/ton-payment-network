@@ -31,16 +31,51 @@ func (w *Wallet) WalletAddress() *address.Address {
 }
 
 func (w *Wallet) DoTransaction(ctx context.Context, reason string, to *address.Address, amt tlb.Coins, body *cell.Cell) ([]byte, error) {
+	return w.DoTransactionMany(ctx, reason, []tonpayments.WalletMessage{
+		{
+			To:     to,
+			Amount: amt,
+			Body:   body,
+		},
+	})
+}
+
+func (w *Wallet) DoTransactionMany(ctx context.Context, reason string, messages []tonpayments.WalletMessage) ([]byte, error) {
+	if len(messages) > 4 {
+		panic("attempt to execute more than 4 messages in web")
+	}
+
 	doTransaction := js.Global().Get("doTransaction")
 	if doTransaction.Type() != js.TypeFunction {
 		panic("doTransaction func is not registered globally")
 	}
 
+	txMessages := make([]interface{}, len(messages))
+	for i, msg := range messages {
+		if msg.EC != nil {
+			panic("ec is not supported on web")
+		}
+
+		txMsg := map[string]interface{}{
+			"to":      msg.To.String(),
+			"amtNano": msg.Amount.Nano().String(),
+			"body":    base64.StdEncoding.EncodeToString(msg.Body.ToBOC()),
+		}
+
+		if msg.StateInit != nil {
+			stateCell, err := tlb.ToCell(msg.StateInit)
+			if err != nil {
+				return nil, err
+			}
+			txMsg["stateInit"] = base64.StdEncoding.EncodeToString(stateCell.ToBOC())
+		}
+
+		txMessages[i] = txMsg
+	}
+
 	promise := doTransaction.Invoke(
 		js.ValueOf(reason),
-		js.ValueOf(to.String()),
-		js.ValueOf(amt.Nano().String()),
-		js.ValueOf(base64.StdEncoding.EncodeToString(body.ToBOC())),
+		js.ValueOf(txMessages),
 	)
 
 	val, err := awaitPromise(promise)
@@ -54,56 +89,6 @@ func (w *Wallet) DoTransaction(ctx context.Context, reason string, to *address.A
 	}
 
 	return hash, nil
-}
-
-func (w *Wallet) DeployContractWaitTransaction(ctx context.Context, amt tlb.Coins, body, code, data *cell.Cell) (*address.Address, []byte, error) {
-	state := &tlb.StateInit{
-		Data: data,
-		Code: code,
-	}
-
-	stateCell, err := tlb.ToCell(state)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	to := address.NewAddress(0, 0, stateCell.Hash())
-
-	doTransaction := js.Global().Get("doTransaction")
-	if doTransaction.Type() != js.TypeFunction {
-		panic("doTransaction func is not registered globally")
-	}
-
-	promise := doTransaction.Invoke(
-		js.ValueOf("Deploy channel contract"),
-		js.ValueOf(to.String()),
-		js.ValueOf(amt.Nano().String()),
-		js.ValueOf(base64.StdEncoding.EncodeToString(body.ToBOC())),
-		js.ValueOf(base64.StdEncoding.EncodeToString(stateCell.ToBOC())),
-	)
-
-	val, err := awaitPromise(promise)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	hash, err := parseResultMsg(val.String())
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return to, hash, nil
-}
-
-func (w *Wallet) DoTransactionMany(ctx context.Context, reason string, messages []tonpayments.WalletMessage) ([]byte, error) {
-	if len(messages) > 1 {
-		panic("attempt to execute multiple messages in web")
-	}
-	return w.DoTransaction(ctx, reason, messages[0].To, messages[0].Amount, messages[0].Body)
-}
-
-func (w *Wallet) DoTransactionEC(ctx context.Context, reason string, to *address.Address, tonAmt tlb.Coins, body *cell.Cell, ecID uint32, ecAmt tlb.Coins) ([]byte, error) {
-	return nil, fmt.Errorf("ec is not supported on web")
 }
 
 func awaitPromise(p js.Value) (js.Value, error) {

@@ -41,7 +41,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		} else if errors.Is(err, db.ErrNotFound) {
 			if s.discoveryMx.TryLock() {
 				go func() {
-					// our party proposed action with channel we don't know,
+					// our party proposed action with a channel we don't know,
 					// we will try to find it onchain and register (asynchronously)
 					s.discoverChannel(channelAddr)
 					s.discoveryMx.Unlock()
@@ -138,7 +138,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			if !hasStates {
 				log.Info().Str("address", channel.Address).
 					Str("with", base64.StdEncoding.EncodeToString(channel.TheirOnchain.Key)).
-					Msg("onchain channel states exchanged, ready to use")
+					Msg("channel states exchanged, ready to use")
 			}
 			return nil
 		}
@@ -253,6 +253,11 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 		if err = channel.Their.Conditionals.DeleteIntKey(index); err != nil {
 			return nil, fmt.Errorf("failed to remove condition with index %s: %w", index.String(), err)
+		}
+
+		if channel.TheirLockedDeposit != nil {
+			// mark part of the rented deposit as used
+			channel.TheirLockedDeposit.Used.Add(channel.TheirLockedDeposit.Used, balanceDiff)
 		}
 
 		toExecute = func(ctx context.Context) error {
@@ -389,10 +394,6 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("failed to calc other side balance: %w", err)
 		}
 
-		if theirBalance.Sign() == -1 {
-			return nil, fmt.Errorf("not enough available balance, you need %s more to do this", theirBalance.Abs(theirBalance).String())
-		}
-
 		currentInstruction, err := data.DecryptOurInstruction(s.key, data.InstructionKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt instruction: %w", err)
@@ -422,7 +423,10 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		}
 
 		if !bytes.Equal(currentInstruction.NextTarget, s.key.Public().(ed25519.PublicKey)) {
-			// willing to open tunnel for a virtual channel
+			// willing to open tunnel for a virtual channel, for this we require party to have enough balance
+			if theirBalance.Sign() < 0 {
+				return nil, fmt.Errorf("not enough available balance, you need %s more tunnel channel through me", theirBalance.Abs(theirBalance).String())
+			}
 
 			nextFee := new(big.Int).SetBytes(currentInstruction.NextFee)
 			nextCap := new(big.Int).SetBytes(currentInstruction.NextCapacity)
@@ -472,6 +476,8 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			}
 
 			var target *db.Channel
+			var targetNoBalance *db.Channel
+			var highestBalance *big.Int
 			for _, targetChannel := range targetChannels {
 				if targetChannel.Status != db.ChannelStateActive {
 					continue
@@ -492,17 +498,27 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				}
 
 				amt := new(big.Int).Add(nextCap, nextFee)
-				if balance.Cmp(amt) != -1 {
+				if balance.Cmp(amt) >= 0 {
+					// balance is enough to tunnel
 					target = targetChannel
 					break
+				}
+
+				if highestBalance == nil || (highestBalance.Sign() >= 0 && balance.Cmp(highestBalance) > 0) || balance.Sign() < 0 {
+					// if we already have a credited channel, it is better to use it again for less onchain actions
+					targetNoBalance = targetChannel
+					highestBalance = balance
 				}
 			}
 
 			if target == nil {
-				return nil, fmt.Errorf("not enough balance with %s to tunnel requested capacity", base64.StdEncoding.EncodeToString(currentInstruction.NextTarget))
+				if targetNoBalance == nil {
+					return nil, fmt.Errorf("no active channel with %s to tunnel requested capacity", base64.StdEncoding.EncodeToString(currentInstruction.NextTarget))
+				}
+				target = targetNoBalance // we will tunnel and topup to get a resolve
 			}
 
-			// we will execute it only after all checks passed and final signature verify
+			// we will execute it only after all checks passed and final signature verified
 			toExecute = func(ctx context.Context) error {
 				senderKey := data.InstructionKey
 				data.InstructionKey = currentInstruction.NextInstructionKey
@@ -538,6 +554,29 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				return nil
 			}
 		} else {
+			var state payments.VirtualChannelState
+			if currentInstruction.FinalState != nil {
+				// for channels with known final state we allow credit, so we will wait for their topup and use it
+				if err = tlb.LoadFromCell(&state, currentInstruction.FinalState.BeginParse()); err != nil {
+					return nil, fmt.Errorf("failed to parse virtual channel state: %w", err)
+				}
+
+				if !state.Verify(vch.Key) {
+					return nil, fmt.Errorf("final state is incorrect")
+				}
+
+				if state.Amount.Cmp(vch.Capacity) != 0 {
+					return nil, fmt.Errorf("final state should use full capacity")
+				}
+
+				maxRentPerAction := cc.MustAmountDecimal(cc.VirtualTunnelConfig.MaxCapacityToRentPerTx)
+				if new(big.Int).Add(state.Amount, vch.Fee).Cmp(maxRentPerAction.Nano()) > 0 {
+					return nil, fmt.Errorf("amount to receive is too big to rent in single operation")
+				}
+			} else if theirBalance.Sign() < 0 {
+				return nil, fmt.Errorf("not enough available balance, you need %s more to open virtual channel with me", theirBalance.Abs(theirBalance).String())
+			}
+
 			toExecute = func(ctx context.Context) error {
 				meta := &db.VirtualChannelMeta{
 					Key:    vch.Key,
@@ -555,19 +594,6 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				}
 
 				if currentInstruction.FinalState != nil {
-					var state payments.VirtualChannelState
-					if err = tlb.LoadFromCell(&state, currentInstruction.FinalState.BeginParse()); err != nil {
-						return fmt.Errorf("failed to parse virtual channel state: %w", err)
-					}
-
-					if !state.Verify(vch.Key) {
-						return fmt.Errorf("final state is incorrect")
-					}
-
-					if state.Amount.Cmp(vch.Capacity) != 0 {
-						return fmt.Errorf("final state should use full capacity")
-					}
-
 					if err = meta.AddKnownResolve(&state); err != nil {
 						return fmt.Errorf("failed to add channel condition resolve: %w", err)
 					}
@@ -578,7 +604,6 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 						db.CloseNextVirtualTask{
 							VirtualKey: vch.Key,
 							State:      currentInstruction.FinalState.ToBOC(),
-							IsTransfer: true,
 						}, nil, &tryTill,
 					); err != nil {
 						return fmt.Errorf("failed to create close-next-virtual task: %w", err)
@@ -605,6 +630,97 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 				return nil
 			}
+		}
+	case transport.RentCapacityAction:
+		attachedFee := new(big.Int).Sub(signedState.State.Data.Sent.Nano(), channel.Their.State.Data.Sent.Nano())
+		amount := new(big.Int).SetBytes(data.Amount)
+		maxRentPerAction := cc.MustAmountDecimal(cc.VirtualTunnelConfig.MaxCapacityToRentPerTx)
+
+		dt := time.Unix(int64(data.Till), 0)
+
+		amountBefore := big.NewInt(0)
+		used := big.NewInt(0)
+		if channel.OurLockedDeposit != nil && channel.OurLockedDeposit.Till.After(time.Now()) {
+			used = new(big.Int).Set(channel.OurLockedDeposit.Used)
+			amountBefore = new(big.Int).Set(channel.OurLockedDeposit.Amount)
+		}
+		diffAmount := new(big.Int).Sub(amount, amountBefore)
+
+		if time.Until(dt) > 366*24*time.Hour {
+			// more than one year is too long
+			return nil, fmt.Errorf("duration too long")
+		}
+		if diffAmount.Sign() <= 0 {
+			return nil, fmt.Errorf("resulting topup amount must be positive")
+		}
+		if diffAmount.Cmp(maxRentPerAction.Nano()) > 0 {
+			return nil, fmt.Errorf("capacity to rent is too big")
+		}
+
+		totalFee := channel.CalcDepositFee(cc, amount, dt, false)
+		if totalFee.Sign() <= 0 {
+			return nil, fmt.Errorf("payment not needed, capacity is already enough")
+		}
+
+		if attachedFee.Cmp(totalFee) < 0 {
+			return nil, fmt.Errorf("not enough fee, %s need %s", cc.MustAmount(attachedFee).String(), cc.MustAmount(totalFee).String())
+		}
+
+		theirBalance, _, err := channel.CalcBalance(true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calc their balance: %w", err)
+		}
+		_, ourLockedBalance, err := channel.CalcBalance(false)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calc our balance: %w", err)
+		}
+
+		// calc balance + amount potentially could be received
+		usableBalance := new(big.Int).Add(theirBalance, ourLockedBalance)
+		if channel.Our.PendingWithdraw != nil {
+			// pending withdraw is not usable
+			pendingWithdraw := new(big.Int).Sub(channel.Our.PendingWithdraw, channel.OurOnchain.Withdrawn)
+			if pendingWithdraw.Sign() > 0 {
+				usableBalance = usableBalance.Sub(usableBalance, pendingWithdraw)
+			}
+		}
+
+		if usableBalance.Cmp(totalFee) < 0 {
+			return nil, fmt.Errorf("not enough locked+balance for fee to rent")
+		}
+
+		channel.OurLockedDeposit = &db.LockedDepositInfo{
+			Amount: amount,
+			Till:   dt,
+			Used:   used,
+		}
+
+		// we will execute it only after all checks passed and final signature verified
+		toExecute = func(ctx context.Context) error {
+			evData := db.ChannelHistoryActionRentCapData{
+				Amount: amount.String(),
+				Fee:    totalFee.String(),
+			}
+			jsonData, err := json.Marshal(evData)
+			if err != nil {
+				return fmt.Errorf("failed to marshal event data: %w", err)
+			}
+
+			if err = s.db.CreateChannelEvent(ctx, channel, time.Now(), db.ChannelHistoryItem{
+				Action: db.ChannelHistoryActionOurCapacityRented,
+				Data:   jsonData,
+			}); err != nil {
+				return fmt.Errorf("failed to create channel our cap rent event: %w", err)
+			}
+
+			// topup will be executed by balance handler on chanel updated
+			log.Info().Str("total", cc.MustAmount(amount).String()).
+				Str("amount", cc.MustAmount(diffAmount).String()).
+				Str("paid", cc.MustAmount(attachedFee).String()).
+				Str("channel", channel.Address).
+				Msg("capacity purchased")
+
+			return nil
 		}
 	default:
 		return nil, fmt.Errorf("unexpected action type: %s", reflect.TypeOf(data).String())
@@ -649,14 +765,14 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 		return nil, fmt.Errorf("state looks tampered: %w", err)
 	}
 
-	bal, _, err := channel.CalcBalance(true)
+	/*bal, _, err := channel.CalcBalance(true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calc balance: %w", err)
 	}
 
 	if bal.Sign() < 0 {
 		return nil, fmt.Errorf("balance cannot be negative")
-	}
+	}*/
 
 	cp, err := channel.Their.State.Data.Copy()
 	if err != nil {

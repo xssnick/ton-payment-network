@@ -33,7 +33,7 @@ const (
 
 type AsyncChannel struct {
 	Status  ChannelStatus
-	Storage AsyncJettonChannelStorageData
+	Storage AsyncChannelStorageData
 	addr    *address.Address
 	client  *Client
 }
@@ -88,7 +88,7 @@ func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell,
 	}
 
 	if verify {
-		storageData := AsyncJettonChannelStorageData{
+		storageData := AsyncChannelStorageData{
 			Initialized:     false,
 			Balance:         Balance{},
 			KeyA:            ch.Storage.KeyA,
@@ -132,12 +132,12 @@ func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell,
 	return ch, nil
 }
 
-func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, ourKey ed25519.PrivateKey, theirKey ed25519.PublicKey, closingConfig ClosingConfig, paymentConfig PaymentConfig) (body, code, data *cell.Cell, err error) {
+func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, ourKey ed25519.PrivateKey, theirKey ed25519.PublicKey, closingConfig ClosingConfig, paymentConfig PaymentConfig) (body, data *cell.Cell, err error) {
 	if len(channelId) != 16 {
-		return nil, nil, nil, fmt.Errorf("channelId len should be 16 bytes")
+		return nil, nil, fmt.Errorf("channelId len should be 16 bytes")
 	}
 
-	storageData := AsyncJettonChannelStorageData{
+	storageData := AsyncChannelStorageData{
 		KeyA:          ourKey.Public().(ed25519.PublicKey),
 		KeyB:          theirKey,
 		ChannelID:     channelId,
@@ -151,7 +151,7 @@ func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, ourK
 
 	data, err = tlb.ToCell(storageData)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to serialize storage data: %w", err)
+		return nil, nil, fmt.Errorf("failed to serialize storage data: %w", err)
 	}
 
 	initCh := InitChannel{}
@@ -159,14 +159,14 @@ func (c *Client) GetDeployAsyncChannelParams(channelId ChannelID, isA bool, ourK
 	initCh.Signed.ChannelID = channelId
 	initCh.Signature, err = toSignature(initCh.Signed, ourKey)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to sign data: %w", err)
+		return nil, nil, fmt.Errorf("failed to sign data: %w", err)
 	}
 
 	body, err = tlb.ToCell(initCh)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to serialize message: %w", err)
+		return nil, nil, fmt.Errorf("failed to serialize message: %w", err)
 	}
-	return body, PaymentChannelCodes[0], data, nil
+	return body, data, nil
 }
 
 func (c *AsyncChannel) Address() *address.Address {

@@ -2,5 +2,5 @@
 
 package tonpayments
 
-const messagesPerTransaction = 1
+const messagesPerTransaction = 4
 const isWeb = true

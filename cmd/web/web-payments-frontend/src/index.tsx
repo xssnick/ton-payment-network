@@ -10,6 +10,7 @@ interface PaymentChannelEvent {
     balance: string;
     capacity: string;
     locked: string;
+    pendingIn: string;
     address: string;
 }
 
@@ -19,6 +20,13 @@ export interface PaymentChannelHistoryItem {
     timestamp: string;
     amount: string | undefined;
     party: string | undefined;
+}
+
+export interface TxMessage {
+    to: string;
+    amtNano: string;
+    body: string;
+    state?: string;
 }
 
 declare global {
@@ -32,9 +40,9 @@ declare global {
         sendTransfer: (amount: string, to: string) => Promise<string>;
         estimateTransfer: (amount: string, to: string) => string;
         getChannelHistory: (limit: number) => Promise<PaymentChannelHistoryItem[] | null>;
-        deployChannel: () => void;
+        openChannel: () => void;
         withdrawChannel: (amount: string) => void;
-        doTransaction: (reason: string, to: string, amtNano: string, body: string, state?: string) => Promise<string>;
+        doTransaction: (reason: string, messages: TxMessage[]) => Promise<string>;
     }
 }
 

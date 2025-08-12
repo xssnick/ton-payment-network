@@ -26,6 +26,7 @@ type Queue interface {
 
 type Service interface {
 	GetChannel(ctx context.Context, addr string) (*db.Channel, error)
+	GetActiveChannel(ctx context.Context, addr string) (*db.Channel, error)
 	ListChannels(ctx context.Context, key ed25519.PublicKey, status db.ChannelStatus) ([]*db.Channel, error)
 
 	GetVirtualChannelMeta(ctx context.Context, key ed25519.PublicKey) (*db.VirtualChannelMeta, error)
@@ -35,8 +36,8 @@ type Service interface {
 	CloseVirtualChannel(ctx context.Context, virtualKey ed25519.PublicKey) error
 	AddVirtualChannelResolve(ctx context.Context, virtualKey ed25519.PublicKey, state payments.VirtualChannelState) error
 	OpenVirtualChannel(ctx context.Context, with, instructionKey, finalDest ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel, jettonMaster *address.Address, ecID uint32) error
-	DeployChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error)
-	TopupChannel(ctx context.Context, addr *address.Address, amount tlb.Coins) error
+	OpenChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error)
+	TopupChannel(ctx context.Context, ch *db.Channel, amount tlb.Coins) error
 	RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins) error
 	ResolveCoinConfig(jetton string, ecID uint32, onlyEnabled bool) (*config.CoinConfig, error)
 	GetPrivateKey() ed25519.PrivateKey

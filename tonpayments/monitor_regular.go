@@ -121,7 +121,7 @@ func (s *Service) channelsMonitor() {
 			channelName := "other"
 			s.urgentPeersMx.RLock()
 			key := base64.StdEncoding.EncodeToString(channel.TheirOnchain.Key)
-			if s.urgentPeers[key] {
+			if s.urgentPeers[key] > 0 {
 				channelName = key[:16]
 			}
 			s.urgentPeersMx.RUnlock()

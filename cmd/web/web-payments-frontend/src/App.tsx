@@ -18,6 +18,7 @@ function App() {
   let [balance, setBalance] = useState("...");
   let [capacity, setCapacity] = useState("...");
   let [lockedBalance, setLockedBalance] = useState("");
+  let [pendingIn, setPendingIn] = useState("...");
   let [history, setHistory] = useState<PaymentChannelHistoryItem[] | null>(null);
 
   window.onPaymentNetworkLoaded = function(addr) {
@@ -28,6 +29,7 @@ function App() {
     setBalance(ev.balance);
     setCapacity(ev.capacity);
     setLockedBalance(ev.locked);
+    setPendingIn(ev.pendingIn);
 
     window.getChannelHistory(5).then(history => {
       setHistory(history);
@@ -52,20 +54,23 @@ function App() {
         return addr;
       };
 
-      window.doTransaction = async (reason, to, amtNano, body, state) => {
+      window.doTransaction = async (reason, messages) => {
         console.log("requested tx: "+ reason);
+
+        let list = [];
+        for (let i = 0; i < messages.length; i++) {
+          list.push({
+            address:  messages[i].to,
+            amount:  messages[i].amtNano,
+            stateInit:  messages[i].state,
+            payload:  messages[i].body,
+          })
+        }
 
         const transaction = {
           validUntil: Math.floor(Date.now() / 1000) + 90,
           network: CHAIN.TESTNET,
-          messages: [
-            {
-              address: to,
-              amount: amtNano,
-              stateInit: state,
-              payload: body,
-            }
-          ]
+          messages: list
         }
 
         let resp = await tonConnectUI.sendTransaction(transaction);
@@ -124,7 +129,7 @@ function App() {
   }
 
   return (
-      <WalletUI paymentAddr={paymentAddr} balance={balance} locked={lockedBalance} capacity={capacity} transactions={history}/>
+      <WalletUI paymentAddr={paymentAddr} balance={balance} locked={lockedBalance} capacity={capacity} pendingIn={pendingIn} transactions={history}/>
   );
 }
 
@@ -132,11 +137,12 @@ type WalletUIProps = {
   paymentAddr: string;
   balance: string;
   capacity: string;
+  pendingIn: string;
   locked: string;
   transactions: PaymentChannelHistoryItem[] | null;
 };
 
-const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capacity, transactions }) => {
+const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capacity, pendingIn, transactions }) => {
   const [connected, setConnected] = useState(false);
   const [sendTo, setSendTo] = useState("");
   const [sendAmount, setSendAmount] = useState("");
@@ -183,7 +189,7 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capac
                 <div className="text-3xl text-[#0098ea]">{balance} TON</div>
                 <div className="space-x-2">
                   {balance === "" ? (
-                          <Button onClick={()=>{ window.deployChannel() }} className="bg-[#0098ea] text-white px-4 py-2 rounded-xl">Deploy Wallet</Button>
+                          <Button onClick={()=>{ window.openChannel() }} className="bg-[#0098ea] text-white px-4 py-2 rounded-xl">Create Wallet</Button>
                       ) : (
                           <>
                             <Button onClick={() => setModalType("topup")} className="bg-[#0098ea] text-white px-3 py-1 rounded-lg text-sm">Top Up</Button>
@@ -202,6 +208,11 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capac
               <div className="flex items-center justify-between mt-1">
                 <span className="text-sm text-gray-500">Receive Capacity</span>
                 <span className="text-sm font-medium">{capacity} TON</span>
+              </div>
+
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-sm text-gray-500">Pending incoming amount</span>
+                <span className="text-sm font-medium">{pendingIn} TON</span>
               </div>
 
               <h2 className="text-xl font-semibold">Your Address</h2>

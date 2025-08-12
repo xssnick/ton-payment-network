@@ -68,7 +68,6 @@ type ConfirmCloseVirtualTask struct {
 type CloseNextVirtualTask struct {
 	VirtualKey []byte
 	State      []byte
-	IsTransfer bool
 }
 
 type CommitVirtualTask struct {
@@ -96,6 +95,11 @@ type AskRemoveVirtualTask struct {
 type AskCloseVirtualTask struct {
 	Key            []byte
 	ChannelAddress string
+}
+
+type RentCapacityTask struct {
+	ChannelAddress string
+	Amount         string
 }
 
 type IncrementStatesTask struct {
