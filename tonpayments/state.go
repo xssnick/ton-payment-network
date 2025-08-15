@@ -81,15 +81,6 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 		}
 		// include a whole value cell in proof
 		proofValueBranch.SetRecursive()
-
-		/*ourTargetBalance, _, err := channel.CalcBalance(false)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to calc our side balance with target: %w", err)
-		}
-
-		if ourTargetBalance.Sign() < 0 {
-			return nil, nil, nil, fmt.Errorf("not enough available balance with target")
-		}*/
 	case transport.CommitVirtualAction:
 		_, vch, err := payments.FindVirtualChannelWithProof(channel.Our.Conditionals, act.Key, dictRoot)
 		if err != nil {
@@ -266,6 +257,53 @@ func (s *Service) updateOurStateWithAction(channel *db.Channel, action transport
 				Str("channel", channel.Address).
 				Time("till", till).
 				Msg("capacity rent confirmed")
+			return nil
+		}
+	case transport.CooperativeCommitAction:
+		var req payments.CooperativeCommit
+		err = tlb.LoadFromCell(&req, act.SignedCommitRequest.BeginParse())
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to parse commit channel request: %w", err)
+		}
+
+		totalFee := cc.MustAmountDecimal(cc.FeePerWithdrawPropose).Nano()
+		channel.Our.State.Data.Sent = cc.MustAmount(new(big.Int).Add(channel.Our.State.Data.Sent.Nano(), totalFee))
+
+		wd := req.Signed.WithdrawB.Nano()
+		if channel.WeLeft {
+			wd = req.Signed.WithdrawA.Nano()
+		}
+
+		if err = channel.UpdatePendingWithdraw(false, wd); err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to update our pending withdraw: %w", err)
+		}
+
+		ourTargetBalance, _, err := channel.CalcBalance(false)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to calc our side balance with target: %w", err)
+		}
+
+		if ourTargetBalance.Sign() < 0 {
+			return nil, nil, nil, fmt.Errorf("not enough available balance with target")
+		}
+
+		jsonData, err := json.Marshal(db.ChannelHistoryActionTxRequest{
+			Fee: totalFee.String(),
+		})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to marshal event data: %w", err)
+		}
+
+		onSuccess = func(ctx context.Context) error {
+			if err = s.db.CreateChannelEvent(ctx, channel, time.Now(), db.ChannelHistoryItem{
+				Action: db.ChannelHistoryActionWithdrawTransactionRequest,
+				Data:   jsonData,
+			}); err != nil {
+				return fmt.Errorf("failed to create channel our cap rent event: %w", err)
+			}
+
+			log.Info().Str("fee", cc.MustAmount(totalFee).String()).
+				Msg("withdraw transaction proposal accepted")
 			return nil
 		}
 	default:

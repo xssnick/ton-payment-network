@@ -25,13 +25,14 @@ type BalanceControlConfig struct {
 }
 
 type CoinConfig struct {
-	Enabled             bool
-	VirtualTunnelConfig VirtualConfig
-	MisbehaviorFine     string
-	ExcessFeeTon        string
-	Symbol              string
-	Decimals            uint8
-	MinCapacityRequest  string
+	Enabled               bool
+	VirtualTunnelConfig   VirtualConfig
+	MisbehaviorFine       string
+	ExcessFeeTon          string
+	Symbol                string
+	Decimals              uint8
+	MinCapacityRequest    string
+	FeePerWithdrawPropose string
 
 	BalanceControl *BalanceControlConfig
 }
@@ -77,7 +78,7 @@ type Config struct {
 	ChannelConfig                  ChannelsConfig
 }
 
-const LatestConfigVersion = 2
+const LatestConfigVersion = 3
 
 func Generate() (*Config, error) {
 	_, priv, err := ed25519.GenerateKey(nil)
@@ -128,11 +129,12 @@ func Generate() (*Config, error) {
 						ProxyFeePercent:             0.5,
 						AllowTunneling:              true,
 					},
-					MisbehaviorFine:    "3",
-					ExcessFeeTon:       "0.25",
-					Symbol:             "TON",
-					Decimals:           9,
-					MinCapacityRequest: "1",
+					MisbehaviorFine:       "3",
+					ExcessFeeTon:          "0.25",
+					Symbol:                "TON",
+					Decimals:              9,
+					MinCapacityRequest:    "1",
+					FeePerWithdrawPropose: "0.05",
 					BalanceControl: &BalanceControlConfig{
 						DepositWhenAmountLessThan: "2",
 						DepositUpToAmount:         "3",
@@ -151,12 +153,13 @@ func Generate() (*Config, error) {
 							ProxyFeePercent:             0.8,
 							AllowTunneling:              false,
 						},
-						MisbehaviorFine:    "12",
-						ExcessFeeTon:       "0.35",
-						Symbol:             "USDT",
-						Decimals:           6,
-						MinCapacityRequest: "3",
-						BalanceControl:     nil,
+						MisbehaviorFine:       "12",
+						ExcessFeeTon:          "0.35",
+						Symbol:                "USDT",
+						Decimals:              6,
+						MinCapacityRequest:    "3",
+						FeePerWithdrawPropose: "0.3",
+						BalanceControl:        nil,
 					},
 				},
 				ExtraCurrencies: map[uint32]CoinConfig{},
@@ -186,6 +189,23 @@ func Upgrade(cfg *Config) bool {
 			}
 			if cc.MinCapacityRequest == "" {
 				cc.MinCapacityRequest = "0"
+			}
+			return cc
+		}
+
+		cfg.ChannelConfig.SupportedCoins.Ton = upgrade(cfg.ChannelConfig.SupportedCoins.Ton)
+		for s := range cfg.ChannelConfig.SupportedCoins.Jettons {
+			cfg.ChannelConfig.SupportedCoins.Jettons[s] = upgrade(cfg.ChannelConfig.SupportedCoins.Jettons[s])
+		}
+		for s := range cfg.ChannelConfig.SupportedCoins.ExtraCurrencies {
+			cfg.ChannelConfig.SupportedCoins.ExtraCurrencies[s] = upgrade(cfg.ChannelConfig.SupportedCoins.ExtraCurrencies[s])
+		}
+	}
+
+	if cfg.Version < 3 {
+		upgrade := func(cc CoinConfig) CoinConfig {
+			if cc.FeePerWithdrawPropose == "" {
+				cc.FeePerWithdrawPropose = "0"
 			}
 			return cc
 		}

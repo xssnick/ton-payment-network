@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -631,6 +632,102 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 				return nil
 			}
 		}
+	case transport.CooperativeCommitAction:
+		// When requested to process this kind of action,
+		// then we should execute tx by ourselves and take fee from a party for gas
+		// it is useful when the party doesn't have a onchain balance yet
+		attachedFee := new(big.Int).Sub(signedState.State.Data.Sent.Nano(), channel.Their.State.Data.Sent.Nano())
+		wantFeePerAction := cc.MustAmountDecimal(cc.FeePerWithdrawPropose)
+		if wantFeePerAction.Nano().Sign() <= 0 {
+			return nil, fmt.Errorf("node not accepts cooperative commit proposals, use request")
+		}
+
+		if attachedFee.Cmp(wantFeePerAction.Nano()) < 0 {
+			return nil, fmt.Errorf("not enough fee, %s need %s", cc.MustAmount(attachedFee).String(), wantFeePerAction.String())
+		}
+
+		theirBalance, _, err := channel.CalcBalance(true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calc other side balance: %w", err)
+		}
+
+		if theirBalance.Cmp(attachedFee) < 0 {
+			return nil, fmt.Errorf("balance is less than attached fee")
+		}
+
+		var reqTheir payments.CooperativeCommit
+		err = tlb.LoadFromCell(&reqTheir, data.SignedCommitRequest.BeginParse())
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize their commit channel request: %w", err)
+		}
+
+		wOur, wTheir := reqTheir.Signed.WithdrawA, reqTheir.Signed.WithdrawB
+		if !channel.WeLeft {
+			wOur, wTheir = wTheir, wOur
+		}
+
+		var theirSignature = reqTheir.SignatureA.Value
+		if channel.WeLeft {
+			theirSignature = reqTheir.SignatureB.Value
+		}
+
+		req, dataCell, _, err := s.getCommitRequest(wOur, wTheir, channel)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare commit channel request: %w", err)
+		}
+
+		if !dataCell.Verify(channel.TheirOnchain.Key, theirSignature) {
+			return nil, fmt.Errorf("incorrect party signature")
+		}
+
+		if channel.WeLeft {
+			req.SignatureB.Value = theirSignature
+		} else {
+			req.SignatureA.Value = theirSignature
+		}
+
+		cl, err := tlb.ToCell(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize commit channel request: %w", err)
+		}
+
+		ourW := req.Signed.WithdrawA.Nano()
+		theirW := req.Signed.WithdrawB.Nano()
+		if !channel.WeLeft {
+			ourW, theirW = theirW, ourW
+		}
+
+		if err = channel.UpdatePendingWithdraw(false, ourW); err != nil {
+			return nil, fmt.Errorf("failed to update our pending withdraw: %w", err)
+		}
+		if err = channel.UpdatePendingWithdraw(true, theirW); err != nil {
+			return nil, fmt.Errorf("failed to update their pending withdraw: %w", err)
+		}
+
+		toExecute = func(ctx context.Context) error {
+			if err = s.db.CreateTask(ctx, PaymentsTaskPool, "increment-state", channel.Address,
+				"increment-state-"+channel.Address+"-"+fmt.Sprint(channel.Our.State.Data.Seqno),
+				db.IncrementStatesTask{
+					ChannelAddress: channel.Address,
+					WantResponse:   true,
+				}, nil, nil,
+			); err != nil {
+				return fmt.Errorf("failed to create increment-state task: %w", err)
+			}
+
+			if err = s.db.CreateTask(ctx, PaymentsTaskPool, "withdraw-execute", channel.Address,
+				"withdraw-execute-"+channel.Address+"-"+hex.EncodeToString(cl.Hash()),
+				db.WithdrawExecuteTask{
+					Address:       channel.Address,
+					SignedRequest: cl,
+				}, nil, nil,
+			); err != nil {
+				return fmt.Errorf("failed to create increment-state task: %w", err)
+			}
+
+			log.Info().Str("address", channel.Address).Msg("accepted cooperative commit proposal")
+			return nil
+		}
 	case transport.RentCapacityAction:
 		attachedFee := new(big.Int).Sub(signedState.State.Data.Sent.Nano(), channel.Their.State.Data.Sent.Nano())
 		amount := new(big.Int).SetBytes(data.Amount)
@@ -677,12 +774,10 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 		// calc balance + amount potentially could be received
 		usableBalance := new(big.Int).Add(theirBalance, ourLockedBalance)
-		if channel.Our.PendingWithdraw != nil {
-			// pending withdraw is not usable
-			pendingWithdraw := new(big.Int).Sub(channel.Our.PendingWithdraw, channel.OurOnchain.Withdrawn)
-			if pendingWithdraw.Sign() > 0 {
-				usableBalance = usableBalance.Sub(usableBalance, pendingWithdraw)
-			}
+		// pending withdraw is not usable
+		pendingWithdraw := new(big.Int).Sub(channel.Our.PendingWithdraw, channel.OurOnchain.Withdrawn)
+		if pendingWithdraw.Sign() > 0 {
+			usableBalance = usableBalance.Sub(usableBalance, pendingWithdraw)
 		}
 
 		if usableBalance.Cmp(totalFee) < 0 {
@@ -983,10 +1078,17 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return nil, fmt.Errorf("incorrect party signature")
 		}
 
-		channel.Our.PendingWithdraw = req.Signed.WithdrawA.Nano()
-		channel.Their.PendingWithdraw = req.Signed.WithdrawB.Nano()
+		ourW := req.Signed.WithdrawA.Nano()
+		theirW := req.Signed.WithdrawB.Nano()
 		if !channel.WeLeft {
-			channel.Our.PendingWithdraw, channel.Their.PendingWithdraw = channel.Their.PendingWithdraw, channel.Our.PendingWithdraw
+			ourW, theirW = theirW, ourW
+		}
+
+		if err = channel.UpdatePendingWithdraw(false, ourW); err != nil {
+			return nil, fmt.Errorf("failed to update our pending withdraw: %w", err)
+		}
+		if err = channel.UpdatePendingWithdraw(true, theirW); err != nil {
+			return nil, fmt.Errorf("failed to update their pending withdraw: %w", err)
 		}
 
 		if err = s.db.UpdateChannel(ctx, channel); err != nil {

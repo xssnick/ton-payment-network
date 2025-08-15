@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"github.com/xssnick/ton-payment-network/pkg/log"
 	"github.com/xssnick/ton-payment-network/tonpayments"
@@ -229,7 +230,7 @@ func main() {
 			return js.Null()
 		}
 
-		if err = Service.RequestWithdraw(context.Background(), address.MustParseAddr(ch.Address), amt); err != nil {
+		if err = Service.RequestWithdraw(context.Background(), address.MustParseAddr(ch.Address), amt, false); err != nil {
 			println("failed to request withdraw: " + err.Error())
 			return js.Null()
 		}
@@ -476,7 +477,10 @@ func main() {
 }
 
 func start(peerKey, channelKey []byte) {
-	const configPath = "payments-config"
+	wl, _ := wallet.InitWallet()
+	userId := hex.EncodeToString(wl.WalletAddress().Data())
+
+	var configPath = "payments-config-" + userId
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		panic(err)
@@ -490,6 +494,7 @@ func start(peerKey, channelKey []byte) {
 	Config = cfg
 
 	cfg.ChannelConfig.SupportedCoins.Ton.MinCapacityRequest = "1"
+	cfg.ChannelConfig.SupportedCoins.Ton.FeePerWithdrawPropose = "0.05"
 	cfg.ChannelConfig.SupportedCoins.Ton.VirtualTunnelConfig.MaxCapacityToRentPerTx = "5"
 	cfg.ChannelConfig.SupportedCoins.Ton.VirtualTunnelConfig.CapacityDepositFee = "0.05"
 	cfg.ChannelConfig.SupportedCoins.Ton.VirtualTunnelConfig.CapacityFeePercentPer30Days = 0.1
@@ -499,7 +504,7 @@ func start(peerKey, channelKey []byte) {
 		panic(err)
 	}
 
-	idb, freshDb, err := browser.NewIndexedDB()
+	idb, freshDb, err := browser.NewIndexedDB(userId)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -522,7 +527,6 @@ func start(peerKey, channelKey []byte) {
 
 	tn := client.NewTON()
 	nt := web.NewHTTP(tn, ed25519.NewKeyFromSeed(cfg.ADNLServerKey), sPub, pKey)
-	wl, _ := wallet.InitWallet()
 	tr := transport.NewTransport(ed25519.NewKeyFromSeed(cfg.PaymentNodePrivateKey), nt, false)
 
 	ch := make(chan any, 10)
@@ -558,11 +562,9 @@ func start(peerKey, channelKey []byte) {
 			println("failed to calc capacity: " + err.Error())
 			return
 		}
-		if ch.Their.PendingWithdraw != nil {
-			pending := new(big.Int).Sub(ch.Their.PendingWithdraw, ch.TheirOnchain.Withdrawn)
-			if pending.Sign() > 0 {
-				pendingIn.Sub(pendingIn, pending)
-			}
+		pending := new(big.Int).Sub(ch.Their.PendingWithdraw, ch.TheirOnchain.Withdrawn)
+		if pending.Sign() > 0 {
+			pendingIn.Sub(pendingIn, pending)
 		}
 
 		jsEvent := map[string]any{

@@ -21,6 +21,26 @@ import (
 var ErrNotConnected = fmt.Errorf("not connected with peer")
 
 func init() {
+	tl.RegisterAllowedGroup("payments.proposable",
+		"payments.openVirtualAction",
+		"payments.closeVirtualAction",
+		"payments.confirmCloseAction",
+		"payments.removeVirtualAction",
+		"payments.syncStateAction",
+		"payments.incrementStatesAction",
+		"payments.commitVirtualAction",
+		"payments.rentCapacityAction",
+		"payments.cooperativeCommitAction")
+
+	tl.RegisterAllowedGroup("payments.requestable",
+		"payments.closeVirtualAction",
+		"payments.confirmCloseAction",
+		"payments.removeVirtualAction",
+		"payments.syncStateAction",
+		"payments.cooperativeCloseAction",
+		"payments.cooperativeCommitAction",
+		"payments.requestRemoveVirtualAction")
+
 	tl.Register(Ping{}, "payments.ping value:long = payments.Ping")
 	tl.Register(Pong{}, "payments.pong value:long = payments.Pong")
 
@@ -121,7 +141,7 @@ type AuthenticateToSign struct {
 type ProposeAction struct {
 	LockID      int64      `tl:"long"`
 	ChannelAddr []byte     `tl:"int256"`
-	Action      any        `tl:"struct boxed [payments.openVirtualAction,payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.incrementStatesAction,payments.commitVirtualAction,payments.rentCapacityAction]"`
+	Action      any        `tl:"struct boxed [payments.proposable]"`
 	SignedState *cell.Cell `tl:"cell"`
 	UpdateProof *cell.Cell `tl:"cell optional"`
 }
@@ -129,7 +149,7 @@ type ProposeAction struct {
 // RequestAction - request party to propose some action
 type RequestAction struct {
 	ChannelAddr []byte `tl:"int256"`
-	Action      any    `tl:"struct boxed [payments.closeVirtualAction,payments.confirmCloseAction,payments.removeVirtualAction,payments.syncStateAction,payments.cooperativeCloseAction,payments.cooperativeCommitAction,payments.requestRemoveVirtualAction]"`
+	Action      any    `tl:"struct boxed [payments.requestable]"`
 }
 
 // Decision - response for actions request, Reason is filled when not agreed

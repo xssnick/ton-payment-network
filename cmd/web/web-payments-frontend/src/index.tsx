@@ -26,7 +26,7 @@ export interface TxMessage {
     to: string;
     amtNano: string;
     body: string;
-    state?: string;
+    stateInit?: string;
 }
 
 declare global {

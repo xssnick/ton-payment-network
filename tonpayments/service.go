@@ -395,11 +395,9 @@ func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ 
 		log.Error().Str("address", ch.Address).Err(err).Msg("failed to calc our balance in balance controller")
 		return
 	}
-	if ch.Our.PendingWithdraw != nil {
-		pw := new(big.Int).Sub(ch.Our.PendingWithdraw, ch.OurOnchain.Withdrawn)
-		if pw.Sign() > 0 {
-			balanceHold.Sub(balanceHold, pw)
-		}
+	pw := new(big.Int).Sub(ch.Our.PendingWithdraw, ch.OurOnchain.Withdrawn)
+	if pw.Sign() > 0 {
+		balanceHold.Sub(balanceHold, pw)
 	}
 	balance.Add(balance, balanceHold) // no onchain actions for holden balance
 
@@ -446,7 +444,7 @@ func (s *Service) balanceControlCallback(ctx context.Context, ch *db.Channel, _ 
 	} else if wdAt.Sign() > 0 && balance.Cmp(wdAt) > 0 {
 		if ctrl.withdrawStartedAtBalance == nil || ctrl.withdrawStartedAtBalance.Cmp(ch.OurOnchain.Withdrawn) < 0 {
 			amt := tlb.MustFromNano(new(big.Int).Sub(balance, depUpTo), bc.DepositUpToAmount.Decimals())
-			if err = s.requestWithdraw(ctx, ch, amt); err != nil {
+			if err = s.requestWithdraw(ctx, ch, amt, true); err != nil {
 				log.Error().Err(err).Str("address", ch.Address).Str("amount", amt.String()).Msg("failed to withdraw from channel")
 				return
 			}

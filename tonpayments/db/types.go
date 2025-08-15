@@ -50,6 +50,10 @@ type ChannelHistoryActionRentCapData struct {
 	Till   int64
 }
 
+type ChannelHistoryActionTxRequest struct {
+	Fee string
+}
+
 type ChannelStatus uint8
 type VirtualChannelStatus uint8
 type ChannelHistoryEventType uint8
@@ -72,6 +76,7 @@ const (
 	ChannelHistoryActionClosed
 	ChannelHistoryActionTheirCapacityRented
 	ChannelHistoryActionOurCapacityRented
+	ChannelHistoryActionWithdrawTransactionRequest
 )
 
 const (
@@ -281,6 +286,21 @@ func (s *Side) MarshalJSON() ([]byte, error) {
 
 	c := cell.BeginCell().MustStoreRef(bts).MustStoreDict(s.Conditionals).MustStoreBigCoins(s.PendingWithdraw).EndCell()
 	return []byte(strconv.Quote(base64.StdEncoding.EncodeToString(c.ToBOC()))), nil
+}
+
+func (ch *Channel) UpdatePendingWithdraw(isTheir bool, value *big.Int) error {
+	s := &ch.Our
+	sOnchain := &ch.OurOnchain
+	if isTheir {
+		s = &ch.Their
+		sOnchain = &ch.TheirOnchain
+	}
+
+	if value.Cmp(s.PendingWithdraw) < 0 || value.Cmp(sOnchain.Withdrawn) < 0 {
+		return fmt.Errorf("new pending withdraw is less than current")
+	}
+	s.PendingWithdraw.Set(value)
+	return nil
 }
 
 func (ch *Channel) CalcBalance(isTheir bool) (*big.Int, *big.Int, error) {

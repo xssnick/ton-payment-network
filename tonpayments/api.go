@@ -108,10 +108,6 @@ func (s *Service) OpenChannelWithNode(ctx context.Context, nodeKey ed25519.Publi
 		jettonData = jettonMaster.Data()
 	}
 
-	if err = s.CheckWalletBalance(ctx, jettonAddr, ecID, tlb.ZeroCoins); err != nil {
-		return nil, fmt.Errorf("failed to check balance: %w", err)
-	}
-
 	excessFee := tlb.MustFromTON(cc.ExcessFeeTon)
 	destWallet, configVirtualResp, err := s.regularTransport.ProposeChannelConfig(ctx, nodeKey, transport.ProposeChannelConfig{
 		JettonAddr:               jettonData,
@@ -563,15 +559,15 @@ func (s *Service) TopupChannel(ctx context.Context, channel *db.Channel, amount 
 	return nil
 }
 
-func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins) error {
+func (s *Service) RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins, doTxOurself bool) error {
 	channel, err := s.GetActiveChannel(ctx, addr.Bounce(true).String())
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
-	return s.requestWithdraw(ctx, channel, amount)
+	return s.requestWithdraw(ctx, channel, amount, doTxOurself)
 }
 
-func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amount tlb.Coins) error {
+func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amount tlb.Coins, doTxOurself bool) error {
 	var err error
 	fullAmount := new(big.Int).Add(amount.Nano(), channel.OurOnchain.Withdrawn)
 
@@ -588,14 +584,15 @@ func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amou
 	if err != nil {
 		return fmt.Errorf("failed to convert amount to nano: %w", err)
 	}
-	// 4.2 - 1.3
 
 	if _, _, _, err := s.getCommitRequest(amount, amountTheir, channel); err != nil {
 		return fmt.Errorf("failed to prepare channel commit request: %w", err)
 	}
 
-	if err := s.CheckWalletBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
-		return fmt.Errorf("failed to check balance: %w", err)
+	if doTxOurself {
+		if err := s.CheckWalletBalance(ctx, channel.JettonAddress, channel.ExtraCurrencyID, tlb.ZeroCoins); err != nil {
+			return fmt.Errorf("failed to check balance: %w", err)
+		}
 	}
 
 	if err := s.db.CreateTask(ctx, PaymentsTaskPool, "withdraw", channel.Address+"-withdraw",
@@ -604,6 +601,7 @@ func (s *Service) requestWithdraw(ctx context.Context, channel *db.Channel, amou
 			Address:            channel.Address,
 			Amount:             amount.String(),
 			ChannelInitiatedAt: channel.InitAt,
+			Propose:            !doTxOurself,
 		}, nil, nil,
 	); err != nil {
 		return err
@@ -721,6 +719,8 @@ func (s *Service) executeCooperativeCommit(ctx context.Context, req *payments.Co
 		return fmt.Errorf("failed to check balance: %w", err)
 	}
 
+	log.Info().Str("addr", ch.Address).Msg("executing cooperative commit transaction...")
+
 	msgHash, err := s.wallet.DoTransaction(ctx, "Cooperative commit (withdraw)", address.MustParseAddr(ch.Address), tlb.MustFromTON("0.16"), msg)
 	if err != nil {
 		return fmt.Errorf("failed to send internal message to channel: %w", err)
@@ -800,12 +800,12 @@ func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel
 	}
 
 	maxOurWithdraw := new(big.Int).Set(channel.OurOnchain.Withdrawn)
-	if channel.Our.PendingWithdraw != nil && channel.Our.PendingWithdraw.Cmp(maxOurWithdraw) > 0 {
+	if channel.Our.PendingWithdraw.Cmp(maxOurWithdraw) > 0 {
 		maxOurWithdraw.Set(channel.Our.PendingWithdraw)
 	}
 
 	maxTheirWithdraw := new(big.Int).Set(channel.TheirOnchain.Withdrawn)
-	if channel.Their.PendingWithdraw != nil && channel.Their.PendingWithdraw.Cmp(maxTheirWithdraw) > 0 {
+	if channel.Their.PendingWithdraw.Cmp(maxTheirWithdraw) > 0 {
 		maxTheirWithdraw.Set(channel.Their.PendingWithdraw)
 	}
 
@@ -817,22 +817,18 @@ func (s *Service) getCommitRequest(ourWithdraw, theirWithdraw tlb.Coins, channel
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to calc our balance: %w", err)
 	}
-	if channel.Our.PendingWithdraw != nil {
-		pending := new(big.Int).Sub(channel.Our.PendingWithdraw, channel.OurOnchain.Withdrawn)
-		if pending.Sign() > 0 {
-			ourBalance.Add(ourBalance, pending)
-		}
+	pending := new(big.Int).Sub(channel.Our.PendingWithdraw, channel.OurOnchain.Withdrawn)
+	if pending.Sign() > 0 {
+		ourBalance.Add(ourBalance, pending)
 	}
 
 	theirBalance, _, err := channel.CalcBalance(true)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to calc their balance: %w", err)
 	}
-	if channel.Their.PendingWithdraw != nil {
-		pending := new(big.Int).Sub(channel.Their.PendingWithdraw, channel.TheirOnchain.Withdrawn)
-		if pending.Sign() > 0 {
-			theirBalance.Add(theirBalance, pending)
-		}
+	pending = new(big.Int).Sub(channel.Their.PendingWithdraw, channel.TheirOnchain.Withdrawn)
+	if pending.Sign() > 0 {
+		theirBalance.Add(theirBalance, pending)
 	}
 
 	if ourToWithdraw.Cmp(ourBalance) > 0 {

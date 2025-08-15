@@ -56,18 +56,24 @@ func (w *Wallet) DoTransactionMany(ctx context.Context, reason string, messages 
 			panic("ec is not supported on web")
 		}
 
-		txMsg := map[string]interface{}{
-			"to":      msg.To.String(),
-			"amtNano": msg.Amount.Nano().String(),
-			"body":    base64.StdEncoding.EncodeToString(msg.Body.ToBOC()),
-		}
-
+		var siBoc string
 		if msg.StateInit != nil {
 			stateCell, err := tlb.ToCell(msg.StateInit)
 			if err != nil {
 				return nil, err
 			}
-			txMsg["stateInit"] = base64.StdEncoding.EncodeToString(stateCell.ToBOC())
+			msg.To = address.NewAddress(0, 0, stateCell.Hash()).Bounce(false)
+			siBoc = base64.StdEncoding.EncodeToString(stateCell.ToBOC())
+		}
+
+		txMsg := map[string]any{
+			"to":      msg.To.String(),
+			"amtNano": msg.Amount.Nano().String(),
+			"body":    base64.StdEncoding.EncodeToString(msg.Body.ToBOC()),
+		}
+
+		if siBoc != "" {
+			txMsg["stateInit"] = siBoc
 		}
 
 		txMessages[i] = txMsg

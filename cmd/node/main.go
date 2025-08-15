@@ -584,7 +584,7 @@ func commandReader(svc *tonpayments.Service, cfg *config.Config, fdb *db.DB, wlt
 			return fmt.Errorf("incorrect format of amount")
 		}
 
-		if err = svc.RequestWithdraw(context.Background(), addr, amt); err != nil {
+		if err = svc.RequestWithdraw(context.Background(), addr, amt, false); err != nil {
 			return fmt.Errorf("failed to withdraw from channel: %w", err)
 		}
 	case "init":
