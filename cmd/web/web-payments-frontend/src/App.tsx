@@ -62,7 +62,7 @@ function App() {
           list.push({
             address:  messages[i].to,
             amount:  messages[i].amtNano,
-            stateInit:  messages[i].state,
+            stateInit:  messages[i].stateInit,
             payload:  messages[i].body,
           })
         }
@@ -148,6 +148,7 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capac
   const [sendAmount, setSendAmount] = useState("");
   const [sendFeeAmount, setSendFeeAmount] = useState("");
   const [copied, setCopied] = useState(false);
+  const [creationStarted, setCreationStarted] = useState(false);
   const [modalType, setModalType] = useState<"topup" | "withdraw" | null>(null);
   const [modalAmount, setModalAmount] = useState("");
   const [transferStatus, setTransferStatus] = useState<"loading" | "success" | null>(null);
@@ -189,31 +190,57 @@ const WalletUI: React.FC<WalletUIProps> = ({ paymentAddr, balance, locked, capac
                 <div className="text-3xl text-[#0098ea]">{balance} TON</div>
                 <div className="space-x-2">
                   {balance === "" ? (
-                          <Button onClick={()=>{ window.openChannel() }} className="bg-[#0098ea] text-white px-4 py-2 rounded-xl">Create Wallet</Button>
+                      creationStarted ? (
+                          <Button className="bg-gray-200 text-gray-700 px-4 py-2 rounded-xl" disabled>
+                            <RefreshCw className="animate-spin inline mr-2" size={16} />
+                            Creating...
+                          </Button>
                       ) : (
-                          <>
-                            <Button onClick={() => setModalType("topup")} className="bg-[#0098ea] text-white px-3 py-1 rounded-lg text-sm">Top Up</Button>
-                            <Button onClick={() => setModalType("withdraw")} className="bg-gray-200 text-gray-700 px-3 py-1 rounded-lg text-sm">Withdraw</Button>
-                          </>
-                      )}
+                          <Button
+                              onClick={() => {
+                                setCreationStarted(true);
+                                window.openChannel();
+                              }}
+                              className="bg-[#0098ea] text-white px-4 py-2 rounded-xl"
+                          >
+                            Create Wallet
+                          </Button>
+                      )
+                  ) : (
+                      <>
+                        <Button
+                            onClick={() => setModalType("topup")}
+                            className="bg-[#0098ea] text-white px-3 py-1 rounded-lg text-sm"
+                        >
+                          Top Up
+                        </Button>
+                        <Button
+                            onClick={() => setModalType("withdraw")}
+                            className="bg-gray-200 text-gray-700 px-3 py-1 rounded-lg text-sm"
+                        >
+                          Withdraw
+                        </Button>
+                      </>
+                  )}
                 </div>
               </div>
-
-              {locked !== "0" ?
-              <div className="flex items-center justify-between mt-1">
-                <span className="text-sm text-gray-500">Locked Balance</span>
-                <span className="text-sm font-medium">{locked} TON</span>
-              </div> : ""}
 
               <div className="flex items-center justify-between mt-1">
                 <span className="text-sm text-gray-500">Receive Capacity</span>
                 <span className="text-sm font-medium">{capacity} TON</span>
               </div>
 
+              {locked !== "0" ?
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-sm text-gray-500">Balance on hold</span>
+                <span className="text-sm font-medium">{locked} TON</span>
+              </div> : ""}
+
+              {pendingIn !== "0" ?
               <div className="flex items-center justify-between mt-1">
                 <span className="text-sm text-gray-500">Pending incoming amount</span>
                 <span className="text-sm font-medium">{pendingIn} TON</span>
-              </div>
+              </div> : ""}
 
               <h2 className="text-xl font-semibold">Your Address</h2>
               {balance === "..." ? (

@@ -40,6 +40,6 @@ func (i *IndexedDB) Close() {
 	panic("dev")
 }
 
-func NewIndexedDB() (*IndexedDB, error) {
+func NewIndexedDB(path string) (*IndexedDB, error) {
 	return nil, nil
 }

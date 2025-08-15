@@ -3,6 +3,7 @@ package tonpayments
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -462,11 +463,9 @@ func (s *Service) taskExecutor() {
 					if err != nil {
 						return fmt.Errorf("failed to calc other side balance: %w", err)
 					}
-					if channel.Their.PendingWithdraw != nil {
-						pw := new(big.Int).Sub(channel.Their.PendingWithdraw, channel.TheirOnchain.Withdrawn)
-						if pw.Sign() > 0 {
-							theirHoldBalance.Sub(theirHoldBalance, pw)
-						}
+					pw := new(big.Int).Sub(channel.Their.PendingWithdraw, channel.TheirOnchain.Withdrawn)
+					if pw.Sign() > 0 {
+						theirHoldBalance.Sub(theirHoldBalance, pw)
 					}
 
 					// if balance is negative we should rent capacity
@@ -896,7 +895,7 @@ func (s *Service) taskExecutor() {
 						return nil
 					}
 
-					ch, _, unlock, err := s.AcquireChannel(ctx, data.Address)
+					ch, lockId, unlock, err := s.AcquireChannel(ctx, data.Address)
 					if err != nil {
 						return fmt.Errorf("failed to acquire channel: %w", err)
 					}
@@ -937,7 +936,20 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("failed to serialize request to cell: %w", err)
 					}
 
-					log.Info().Str("address", ch.Address).Msg("trying cooperative commit to withdraw")
+					if data.Propose {
+						log.Info().Str("address", ch.Address).Msg("proposing cooperative commit to withdraw")
+
+						// ask party to do tx for some fee
+						if err := s.proposeAction(ctx, lockId, ch.Address, transport.CooperativeCommitAction{
+							SignedCommitRequest: cl,
+						}, nil); err != nil {
+							return fmt.Errorf("failed to increment state with party: %w", err)
+						}
+
+						return nil
+					}
+
+					log.Info().Str("address", ch.Address).Msg("requesting cooperative commit to withdraw")
 
 					partySignature, err := s.requestAction(ctx, ch.Address, transport.CooperativeCommitAction{
 						SignedCommitRequest: cl,
@@ -950,34 +962,75 @@ func (s *Service) taskExecutor() {
 						return fmt.Errorf("incorrect party signature")
 					}
 
-					log.Info().Str("address", ch.Address).Msg("cooperative commit party signature received, executing transaction...")
-
 					if ch.WeLeft {
 						req.SignatureB.Value = partySignature
 					} else {
 						req.SignatureA.Value = partySignature
 					}
 
-					ch.Our.PendingWithdraw = amount.Nano()
-					if err = s.db.UpdateChannel(ctx, ch); err != nil {
-						return fmt.Errorf("failed to update channel: %w", err)
+					cl, err = tlb.ToCell(req)
+					if err != nil {
+						return fmt.Errorf("failed to serialize request to cell: %w", err)
+					}
+
+					err = s.db.Transaction(ctx, func(ctx context.Context) error {
+						ch.Our.PendingWithdraw = amount.Nano()
+						if err = s.db.UpdateChannel(ctx, ch); err != nil {
+							return fmt.Errorf("failed to update channel: %w", err)
+						}
+
+						if err = s.db.CreateTask(ctx, PaymentsTaskPool, "withdraw-execute", ch.Address,
+							"withdraw-execute-"+ch.Address+"-"+hex.EncodeToString(cl.Hash()),
+							db.WithdrawExecuteTask{
+								Address:       ch.Address,
+								SignedRequest: cl,
+							}, nil, nil,
+						); err != nil {
+							return fmt.Errorf("failed to create increment-state task: %w", err)
+						}
+
+						if err = s.db.CreateTask(ctx, PaymentsTaskPool, "increment-state", ch.Address,
+							"increment-state-"+ch.Address+"-"+fmt.Sprint(ch.Our.State.Data.Seqno),
+							db.IncrementStatesTask{
+								ChannelAddress: ch.Address,
+								WantResponse:   true,
+							}, nil, nil,
+						); err != nil {
+							return fmt.Errorf("failed to create increment-state task: %w", err)
+						}
+
+						log.Info().Str("address", ch.Address).Msg("cooperative commit party signature received")
+
+						return nil
+					})
+					if err != nil {
+						return fmt.Errorf("failed to execute db transaction: %w", err)
+					}
+				case "withdraw-execute":
+					var data db.WithdrawExecuteTask
+					if err = json.Unmarshal(task.Data, &data); err != nil {
+						return fmt.Errorf("invalid json: %w", err)
+					}
+
+					var req payments.CooperativeCommit
+					if err = tlb.LoadFromCell(&req, data.SignedRequest.BeginParse()); err != nil {
+						return fmt.Errorf("failed to serialize their commit channel request: %w", err)
+					}
+
+					ch, err := s.db.GetChannel(ctx, data.Address)
+					if err != nil {
+						return fmt.Errorf("failed to get channel: %w", err)
+					}
+
+					if ch.Status != db.ChannelStateActive {
+						return nil
 					}
 
 					ctxTx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 					defer cancel()
 
-					if err = s.executeCooperativeCommit(ctxTx, req, ch); err != nil {
+					if err = s.executeCooperativeCommit(ctxTx, &req, ch); err != nil {
 						return fmt.Errorf("failed to execute cooperative close: %w", err)
-					}
-
-					if err = s.db.CreateTask(ctx, PaymentsTaskPool, "increment-state", ch.Address,
-						"increment-state-"+ch.Address+"-"+fmt.Sprint(ch.Our.State.Data.Seqno),
-						db.IncrementStatesTask{
-							ChannelAddress: ch.Address,
-							WantResponse:   true,
-						}, nil, nil,
-					); err != nil {
-						return fmt.Errorf("failed to create increment-state task: %w", err)
 					}
 				default:
 					log.Error().Err(err).Str("type", task.Type).Str("id", task.ID).Msg("unknown task type, skipped")

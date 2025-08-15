@@ -113,12 +113,14 @@ func wrapIDBRequest(req js.Value) js.Value {
 }
 
 type IndexedDB struct {
-	db js.Value
-	m  sync.Mutex
+	db   js.Value
+	m    sync.Mutex
+	name string
 }
 
-func NewIndexedDB() (*IndexedDB, bool, error) {
-	op := js.Global().Get("indexedDB").Call("open", dbName, dbVersion)
+func NewIndexedDB(path string) (*IndexedDB, bool, error) {
+	name := dbName + "-" + path
+	op := js.Global().Get("indexedDB").Call("open", name, dbVersion)
 
 	fresh := false
 	up := js.FuncOf(func(this js.Value, args []js.Value) any {
@@ -160,7 +162,7 @@ func NewIndexedDB() (*IndexedDB, bool, error) {
 		println("[WARNING] Persistent storage denied, db is not safe, use with caution!")
 	}
 
-	return &IndexedDB{db: dbVal}, fresh, nil
+	return &IndexedDB{db: dbVal, name: path}, fresh, nil
 }
 
 func requestPersistentStorage() (bool, error) {
@@ -526,7 +528,7 @@ func (d *IndexedDB) GetExecutor(ctx context.Context) db.Executor {
 }
 
 func (d *IndexedDB) Backup() error {
-	backupName := fmt.Sprintf("%s_backup_%d", dbName, time.Now().UnixMilli())
+	backupName := fmt.Sprintf("%s_backup_%d", d.name, time.Now().UnixMilli())
 
 	openReq := js.Global().Get("indexedDB").Call("open", backupName, dbVersion)
 	up := js.FuncOf(func(this js.Value, args []js.Value) any {

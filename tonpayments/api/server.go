@@ -38,7 +38,7 @@ type Service interface {
 	OpenVirtualChannel(ctx context.Context, with, instructionKey, finalDest ed25519.PublicKey, private ed25519.PrivateKey, chain []transport.OpenVirtualInstruction, vch payments.VirtualChannel, jettonMaster *address.Address, ecID uint32) error
 	OpenChannelWithNode(ctx context.Context, nodeKey ed25519.PublicKey, jettonMaster *address.Address, ecID uint32) (*address.Address, error)
 	TopupChannel(ctx context.Context, ch *db.Channel, amount tlb.Coins) error
-	RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins) error
+	RequestWithdraw(ctx context.Context, addr *address.Address, amount tlb.Coins, doTxOurself bool) error
 	ResolveCoinConfig(jetton string, ecID uint32, onlyEnabled bool) (*config.CoinConfig, error)
 	GetPrivateKey() ed25519.PrivateKey
 }

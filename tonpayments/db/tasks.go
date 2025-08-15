@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"github.com/xssnick/ton-payment-network/tonpayments/transport"
+	"github.com/xssnick/tonutils-go/tvm/cell"
 	"time"
 )
 
@@ -46,6 +47,12 @@ type WithdrawTask struct {
 	Address            string
 	Amount             string
 	ChannelInitiatedAt time.Time
+	Propose            bool
+}
+
+type WithdrawExecuteTask struct {
+	Address       string
+	SignedRequest *cell.Cell
 }
 
 type SettleStepTask struct {

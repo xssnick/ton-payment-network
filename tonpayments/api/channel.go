@@ -147,8 +147,9 @@ func (s *Server) handleTopup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		Address string `json:"address"`
-		Amount  string `json:"amount_nano"`
+		Address            string `json:"address"`
+		Amount             string `json:"amount_nano"`
+		ExecuteOnOtherSide bool   `json:"execute_on_other_side"`
 	}
 
 	if r.Method != "POST" {
@@ -191,7 +192,7 @@ func (s *Server) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "failed to convert amount: "+err.Error())
 	}
 
-	if err = s.svc.RequestWithdraw(r.Context(), addr, amtCoin); err != nil {
+	if err = s.svc.RequestWithdraw(r.Context(), addr, amtCoin, !req.ExecuteOnOtherSide); err != nil {
 		writeErr(w, 500, "failed to request withdraw channel: "+err.Error())
 		return
 	}
