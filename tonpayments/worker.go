@@ -748,6 +748,11 @@ func (s *Service) taskExecutor() {
 						if balance.Sign() > 0 {
 							return fmt.Errorf("channel is not active onchain, and we have balance")
 						}
+
+						ch.Status = db.ChannelStateInactive
+						if err = s.db.UpdateChannel(ctx, ch); err != nil {
+							return fmt.Errorf("failed to update channel: %w", err)
+						}
 						log.Warn().Str("channel", ch.Address).Msg("channel is not active onchain, and we have ne balance on this channel, onchain action skipped")
 					}
 				case "uncooperative-close":
@@ -781,7 +786,21 @@ func (s *Service) taskExecutor() {
 					}
 
 					if !channel.ActiveOnchain {
-						log.Warn().Str("channel", channel.Address).Msg("channel is not active onchain, uncoop close skipped")
+						balance, _, err := channel.CalcBalance(false)
+						if err != nil {
+							return fmt.Errorf("failed to calc balance: %w", err)
+						}
+
+						if balance.Sign() > 0 {
+							return fmt.Errorf("channel is not active onchain, and we have balance")
+						}
+
+						channel.Status = db.ChannelStateInactive
+						if err = s.db.UpdateChannel(ctx, channel); err != nil {
+							return fmt.Errorf("failed to update channel: %w", err)
+						}
+
+						log.Warn().Str("channel", channel.Address).Msg("channel is not active onchain, uncoop onchain close skipped")
 						return nil
 					}
 
