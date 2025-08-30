@@ -36,6 +36,8 @@ var api = func() ton.APIClientWrapped {
 	return ton.NewAPIClient(client).WithRetry()
 }()
 
+var code = PaymentChannelCodes[0]
+
 var _seed = strings.Split(os.Getenv("WALLET_SEED"), " ")
 
 func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
@@ -61,7 +63,7 @@ func TestClient_AsyncChannelFullFlowTon(t *testing.T) {
 	}
 	log.Println("wallet:", w.Address().String())
 
-	body, code, data, err := client.GetDeployAsyncChannelParams(chID, true, aKey, bPubKey, ClosingConfig{
+	body, data, err := client.GetDeployAsyncChannelParams(chID, true, aKey, bPubKey, ClosingConfig{
 		QuarantineDuration:       30,
 		MisbehaviorFine:          tlb.MustFromTON("0.00"),
 		ConditionalCloseDuration: 30,
@@ -418,7 +420,7 @@ func TestClient_AsyncChannelFullFlowJetton(t *testing.T) {
 	}
 	log.Println("wallet:", w.Address().String())
 
-	body, code, data, err := client.GetDeployAsyncChannelParams(chID, true, aKey, bPubKey, ClosingConfig{
+	body, data, err := client.GetDeployAsyncChannelParams(chID, true, aKey, bPubKey, ClosingConfig{
 		QuarantineDuration:       30,
 		MisbehaviorFine:          tlb.MustFromTON("0.00"),
 		ConditionalCloseDuration: 30,
@@ -788,7 +790,7 @@ func TestClient_AsyncChannelFullFlowEC(t *testing.T) {
 	}
 	log.Println("wallet:", w.WalletAddress().String())
 
-	body, code, data, err := client.GetDeployAsyncChannelParams(chID, true, aKey, bPubKey, ClosingConfig{
+	body, data, err := client.GetDeployAsyncChannelParams(chID, true, aKey, bPubKey, ClosingConfig{
 		QuarantineDuration:       30,
 		MisbehaviorFine:          tlb.MustFromTON("0.00"),
 		ConditionalCloseDuration: 30,
