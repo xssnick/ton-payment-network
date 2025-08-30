@@ -749,9 +749,7 @@ func (s *Service) Start() {
 						Str("with", base64.StdEncoding.EncodeToString(channel.TheirOnchain.Key)).
 						Msg("onchain channel closure started")
 
-					// TODO: maybe check only their?
-					if qOur.Seqno < channel.Our.State.Data.Seqno ||
-						qTheir.Seqno < channel.Their.State.Data.Seqno {
+					if qTheir.Seqno != channel.Their.State.Data.Seqno {
 						// something is outdated, challenge state
 						settleAt := time.Unix(int64(upd.Channel.Storage.Quarantine.QuarantineStarts+upd.Channel.Storage.ClosingConfig.QuarantineDuration+1), 0)
 						err = s.db.CreateTask(context.Background(), PaymentsTaskPool, "challenge", channel.Address+"-chain",
