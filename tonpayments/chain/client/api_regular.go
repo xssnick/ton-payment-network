@@ -24,7 +24,7 @@ func NewTON(api ton.APIClientWrapped) *TON {
 }
 
 func (t *TON) GetAccount(ctx context.Context, addr *address.Address) (*Account, error) {
-	block, err := t.api.CurrentMasterchainInfo(ctx)
+	block, err := t.api.GetMasterchainInfo(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current masterchain info: %w", err)
 	}

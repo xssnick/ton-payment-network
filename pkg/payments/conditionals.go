@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
+	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
@@ -17,6 +18,21 @@ type VirtualChannel struct {
 	Fee      *big.Int
 	Prepay   *big.Int
 	Deadline int64
+}
+
+type VirtualChannelUniversal struct {
+	ActionHash []byte
+	Key        ed25519.PublicKey
+	Capacity   *big.Int
+	Fee        *big.Int
+	Prepay     *big.Int
+	Deadline   int64
+}
+
+type ActionSendUniversal struct {
+	AddressA *address.Address
+	AddressB *address.Address
+	Body     *cell.Cell
 }
 
 type VirtualChannelState struct {
@@ -114,6 +130,102 @@ var virtualChannelStaticCode = func() *cell.Cell {
 	return code
 }()
 
+var virtualChannelUniversalStaticCode = func() *cell.Cell {
+	// compiled using code:
+	/*
+		fun conditional_coins(targetActionsInput: dict, condInput: slice, actionHash: int, fee: int, capacity: int, prepaid: int, deadline: int, key: int): dict {
+		    var (actInput, ok) = targetActionsInput.uDictGet(256, actionHash);
+		    if (actInput == null || !ok) {
+		        // we must always have action to execute condition
+		        return targetActionsInput;
+		    }
+
+		    var sign: slice = condInput.loadBits(512);
+		    assert(isSliceSignatureValid(condInput, sign, key) & (deadline >= blockchain.now())) throw 24;
+		    var amount: int = condInput.loadCoins();
+		    assert((amount <= capacity) & (prepaid <= amount)) throw 26;
+
+		    var v = actInput.loadAny<FeeActionInput>();
+		    v.amount += (amount - prepaid) + fee;
+
+		    targetActionsInput.uDictSet(256, actionHash, v.toCell().beginParse());
+
+		    return targetActionsInput;
+		}
+	*/
+
+	data, err := hex.DecodeString("b5ee9c7241010101004900008e53578307f40e6fa1216e92307f93b3c300e2925f08e0078308d7186603f91102f823be12b0f298fa00305203bb5312bbb0f29a04fa003004a1a012a0c801fa02c9d0028307f4164f3d04bc")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	code, err := cell.FromBOC(data)
+	if err != nil {
+		panic(err.Error())
+	}
+	return code
+}()
+
+var actionCoinsUniversalStaticCode = func() *cell.Cell {
+	// compiled using code:
+	/*
+		struct FeeActionInput {
+			amount: coins
+		}
+
+		fun action_coins(actOur: slice, actTheir: slice, isA: bool, addressA: address, addressB: address, body: cell): void {
+			var our = actOur.loadAny<FeeActionInput>();
+			var their = actTheir.loadAny<FeeActionInput>();
+			var amt = our.amount - their.amount;
+
+			if (amt <= 0) {
+				return;
+			}
+
+			createMessage({
+				bounce: false,
+				dest: isA ? addressA : addressB,
+				value: amt,
+				body: body,
+			}).send(SEND_MODE_REGULAR | SEND_MODE_IGNORE_ERRORS);
+		}
+	*/
+
+	data, err := hex.DecodeString("b5ee9c7241010101002700004a05fa003004fa003014a120c101925f05e003e304c8cf8508ce01fa0271cf0b6accc972fb00bcc148bd")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	code, err := cell.FromBOC(data)
+	if err != nil {
+		panic(err.Error())
+	}
+	return code
+}()
+
+func (c *VirtualChannelUniversal) Serialize() *cell.Cell {
+	return cell.BeginCell().
+		MustStoreBuilder(pushIntOP(new(big.Int).SetBytes(c.ActionHash))).
+		MustStoreBuilder(pushIntOP(c.Fee)).
+		MustStoreBuilder(pushIntOP(c.Capacity)).
+		MustStoreBuilder(pushIntOP(c.Prepay)).
+		MustStoreBuilder(pushIntOP(big.NewInt(c.Deadline))).
+		MustStoreBuilder(pushIntOP(new(big.Int).SetBytes(c.Key))).
+		// we pack immutable part of code to ref for better BoC compression and cheaper transactions
+		MustStoreRef(virtualChannelUniversalStaticCode). // implicit jump
+		EndCell()
+}
+
+func (c *ActionSendUniversal) Serialize() *cell.Cell {
+	return cell.BeginCell().
+		MustStoreBuilder(pushSliceRef(cell.BeginCell().MustStoreAddr(c.AddressA).ToSlice())).
+		MustStoreBuilder(pushSliceRef(cell.BeginCell().MustStoreAddr(c.AddressB).ToSlice())).
+		MustStoreBuilder(pushRef(c.Body)).
+		// we pack immutable part of code to ref for better BoC compression and cheaper transactions
+		MustStoreRef(actionCoinsUniversalStaticCode). // implicit jump
+		EndCell()
+}
+
 func (c *VirtualChannel) Serialize() *cell.Cell {
 	return cell.BeginCell().
 		MustStoreBuilder(pushIntOP(c.Fee)).
@@ -208,6 +320,134 @@ func ParseVirtualChannelCond(s *cell.Slice) (*VirtualChannel, error) {
 	}, nil
 }
 
+func ParseActionSendUniversal(s *cell.Slice) (*ActionSendUniversal, error) {
+	slc, err := readSliceOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse addr slice: %w", err)
+	}
+	addrA, err := slc.LoadAddr()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse addr: %w", err)
+	}
+	slc, err = readSliceOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse addr slice: %w", err)
+	}
+	addrB, err := slc.LoadAddr()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse addr: %w", err)
+	}
+
+	body, err := readCellOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse body ref: %w", err)
+	}
+
+	return &ActionSendUniversal{
+		AddressA: addrA,
+		AddressB: addrB,
+		Body:     body,
+	}, nil
+}
+
+func ParseVirtualChannelUniversalCond(s *cell.Slice) (*VirtualChannelUniversal, error) {
+	actHashInt, err := readIntOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse fee: %w", err)
+	}
+
+	fee, err := readIntOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse fee: %w", err)
+	}
+	if fee.BitLen() > 127 {
+		return nil, fmt.Errorf("failed to parse fee: incorrect bits len")
+	}
+	if fee.Sign() < 0 {
+		return nil, fmt.Errorf("failed to parse fee: cannot be negative")
+	}
+
+	capacity, err := readIntOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse capacity: %w", err)
+	}
+	if capacity.BitLen() > 127 {
+		return nil, fmt.Errorf("failed to parse capacity: incorrect bits len")
+	}
+	if capacity.Sign() < 0 {
+		return nil, fmt.Errorf("failed to parse capacity: cannot be negative")
+	}
+
+	prepay, err := readIntOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse prepay: %w", err)
+	}
+	if prepay.BitLen() > 127 {
+		return nil, fmt.Errorf("failed to parse prepay: incorrect bits len")
+	}
+	if prepay.Sign() < 0 {
+		return nil, fmt.Errorf("failed to parse prepay: cannot be negative")
+	}
+
+	deadline, err := readIntOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse deadline: %w", err)
+	}
+	if deadline.BitLen() > 32 {
+		return nil, fmt.Errorf("failed to parse deadline: incorrect bits len")
+	}
+	if deadline.Sign() <= 0 {
+		return nil, fmt.Errorf("failed to parse deadline: cannot be negative or zero")
+	}
+
+	keyInt, err := readIntOP(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse key: %w", err)
+	}
+
+	key := keyInt.Bytes()
+	if len(key) > 32 {
+		return nil, fmt.Errorf("too big key size")
+	}
+
+	if len(key) < 32 {
+		// prepend it with zeroes
+		key = append(make([]byte, 32-len(key)), key...)
+	}
+
+	actHash := actHashInt.Bytes()
+	if len(key) > 32 {
+		return nil, fmt.Errorf("too big act hash size")
+	}
+
+	if len(actHash) < 32 {
+		// prepend it with zeroes
+		actHash = append(make([]byte, 32-len(actHash)), actHash...)
+	}
+
+	code, err := s.LoadRefCell()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse code: %w", err)
+	}
+
+	if !bytes.Equal(code.Hash(), virtualChannelUniversalStaticCode.Hash()) {
+		return nil, fmt.Errorf("incorrect code")
+	}
+
+	if s.BitsLeft() != 0 || s.RefsNum() != 0 {
+		return nil, fmt.Errorf("unexpected data in condition")
+	}
+
+	return &VirtualChannelUniversal{
+		ActionHash: actHash,
+		Key:        key,
+		Capacity:   capacity,
+		Fee:        fee,
+		Prepay:     prepay,
+		Deadline:   int64(deadline.Uint64()),
+	}, nil
+}
+
 // pushIntOP - Took from experimental tonutils tvm impl
 func pushIntOP(val *big.Int) *cell.Builder {
 	bitsSz := val.BitLen() + 1 // 1 bit for sign
@@ -244,6 +484,54 @@ func pushIntOP(val *big.Int) *cell.Builder {
 		return c
 	}
 }
+
+func pushRef(slc *cell.Cell) *cell.Builder {
+	return cell.BeginCell().MustStoreUInt(0x88, 8).MustStoreRef(slc)
+}
+
+func pushSliceRef(slc *cell.Slice) *cell.Builder {
+	return cell.BeginCell().MustStoreUInt(0x89, 8).MustStoreRef(slc.MustToCell())
+}
+
+func readCellOP(code *cell.Slice) (*cell.Cell, error) {
+	v, err := code.LoadUInt(8)
+	if err != nil {
+		return nil, err
+	}
+
+	if v != 0x88 {
+		return nil, fmt.Errorf("incorrect opcode")
+	}
+	return code.LoadRefCell()
+}
+
+func readSliceOP(code *cell.Slice) (*cell.Slice, error) {
+	v, err := code.LoadUInt(8)
+	if err != nil {
+		return nil, err
+	}
+
+	if v != 0x89 {
+		return nil, fmt.Errorf("incorrect opcode")
+	}
+	return code.LoadRef()
+}
+
+// 8Bxsss
+/*func pushSlice(slc *cell.Slice) *cell.Builder {
+	bitsSz := slc.BitsLeft()
+
+	ln := (bitsSz - 4) / 8
+	if ln < 0 {
+		ln = 0
+	} else if (bitsSz-4)%8 != 0 {
+		ln++
+	}
+
+	return cell.BeginCell().MustStoreUInt(0x8B, 8).
+		MustStoreUInt(uint64(ln), 4).
+		MustStoreSlice(slc.MustLoadSlice(bitsSz), 4+uint(ln)*8)
+}*/
 
 func readIntOP(code *cell.Slice) (*big.Int, error) {
 	prefix, err := code.LoadUInt(8)

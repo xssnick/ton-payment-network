@@ -64,8 +64,8 @@ func (c *Client) GetAsyncChannel(ctx context.Context, addr *address.Address, ver
 func (c *Client) ParseAsyncChannel(addr *address.Address, code, data *cell.Cell, verify bool) (*AsyncChannel, error) {
 	if verify {
 		ok := false
-		for _, h := range PaymentChannelCodeHashes {
-			if bytes.Equal(code.Hash(), h) {
+		for _, h := range PaymentChannelCodes {
+			if bytes.Equal(code.Hash(), h.Hash()) {
 				ok = true
 				break
 			}
