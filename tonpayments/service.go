@@ -201,12 +201,12 @@ func NewService(api ChainAPI, database DB, transport, webTransport Transport, wa
 		}
 
 		if conf.WithdrawWhenAmountReached.Nano().Sign() != 0 &&
-			conf.DepositUpToAmount.Nano().Sign() != 0 && conf.WithdrawWhenAmountReached.Compare(&conf.DepositUpToAmount) < 0 {
+			conf.DepositUpToAmount.Nano().Sign() != 0 && conf.WithdrawWhenAmountReached.Compare(conf.DepositUpToAmount) < 0 {
 			return fmt.Errorf("withdraw amount must be greater than deposit amount")
 		}
 
 		if conf.DepositWhenAmountLessThan.Nano().Sign() != 0 &&
-			conf.DepositUpToAmount.Nano().Sign() != 0 && conf.DepositWhenAmountLessThan.Compare(&conf.DepositUpToAmount) > 0 {
+			conf.DepositUpToAmount.Nano().Sign() != 0 && conf.DepositWhenAmountLessThan.Compare(conf.DepositUpToAmount) > 0 {
 			return fmt.Errorf("deposit up to amount must be greater than deposit when amount less than")
 		}
 

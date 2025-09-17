@@ -200,7 +200,7 @@ func (v *Scanner) getNotSeenShards(ctx context.Context, api ton.APIClientWrapped
 		return nil, time.Time{}, fmt.Errorf("get block data: %w", err)
 	}
 
-	parents, err := b.BlockInfo.GetParentBlocks()
+	parents, err := ton.GetParentBlocks(&b.BlockInfo)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("get parent blocks (%d:%x:%d): %w", shard.Workchain, uint64(shard.Shard), shard.Shard, err)
 	}
