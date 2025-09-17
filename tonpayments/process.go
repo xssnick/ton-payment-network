@@ -457,7 +457,7 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 
 			wantFeeInt, _ = new(big.Float).Mul(new(big.Float).SetInt(wantFeeInt), big.NewFloat(wantFeePercent)).Int(wantFeeInt)
 			wantFee := tlb.MustFromNano(wantFeeInt, int(cc.Decimals))
-			if wantFee.Compare(&wantMinFee) < 0 {
+			if wantFee.Compare(wantMinFee) < 0 {
 				wantFee = wantMinFee
 			}
 

@@ -1,16 +1,16 @@
 module github.com/xssnick/ton-payment-network
 
-go 1.23.0
+go 1.24.0
 
-toolchain go1.23.3
+toolchain go1.24.3
 
 require (
 	github.com/natefinch/lumberjack v2.0.0+incompatible
 	github.com/prometheus/client_golang v1.22.0
 	github.com/rs/zerolog v1.34.0
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/xssnick/tonutils-go v1.14.1-0.20250815122038-96b8cda956ee
-	golang.org/x/crypto v0.41.0
+	github.com/xssnick/tonutils-go v1.15.0
+	golang.org/x/crypto v0.42.0
 )
 
 require (
@@ -25,9 +25,8 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
-	github.com/sigurn/crc16 v0.0.0-20240131213347-83fcde1e29d1 // indirect
-	github.com/xssnick/raptorq v1.0.0 // indirect
-	golang.org/x/sys v0.35.0 // indirect
+	github.com/xssnick/raptorq v1.2.0 // indirect
+	golang.org/x/sys v0.36.0 // indirect
 	google.golang.org/protobuf v1.36.5 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
