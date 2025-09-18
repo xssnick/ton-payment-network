@@ -48,6 +48,19 @@ func main() {
 		return js.Null()
 	}))
 
+	js.Global().Set("closeChannel", js.FuncOf(func(this js.Value, args []js.Value) any {
+		if !started {
+			return js.Null()
+		}
+		addr := args[0]
+
+		err := Service.RequestCooperativeClose(context.Background(), addr.String())
+		if err != nil {
+			println(err.Error())
+		}
+		return js.Null()
+	}))
+
 	js.Global().Set("sendTransfer", js.FuncOf(func(this js.Value, args []js.Value) any {
 		promiseCtor := js.Global().Get("Promise")
 
