@@ -1040,6 +1040,21 @@ func (s *Service) ProcessActionRequest(ctx context.Context, key ed25519.PublicKe
 			return nil, fmt.Errorf("incorrect party signature")
 		}
 
+		if !channel.ActiveOnchain {
+			balance, _, err := channel.CalcBalance(false)
+			if err != nil {
+				return nil, fmt.Errorf("failed to calc balance: %w", err)
+			}
+
+			if balance.Sign() > 0 {
+				return nil, fmt.Errorf("channel is not active onchain, and we have balance")
+			}
+
+			// no active contract and balance on our side, set inactive
+			channel.Status = db.ChannelStateInactive
+			// TODO: idempotency (not so critical)
+		}
+
 		channel.AcceptingActions = false
 		if err = s.db.UpdateChannel(ctx, channel); err != nil {
 			return nil, fmt.Errorf("failed to update channel: %w", err)

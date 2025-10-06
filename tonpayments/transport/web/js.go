@@ -284,16 +284,18 @@ func (h *HTTP) subscribeSSE(ctx context.Context, url string, onMsg func(msg []by
 
 	eventSource.Call("addEventListener", "message", onMessage)
 
+	var cancel func()
 	// TODO: better and close peer
 	onError := js.FuncOf(func(this js.Value, args []js.Value) any {
 		js.Global().Get("console").Call("log", args[0])
 
 		log.Error().Msg("sse err")
+		cancel()
 		return nil
 	})
 	eventSource.Call("addEventListener", "error", onError)
 
-	cancel := func() {
+	cancel = func() {
 		onMessage.Release()
 		onError.Release()
 		eventSource.Call("close")
