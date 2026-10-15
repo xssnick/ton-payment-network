@@ -269,21 +269,13 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			return nil, fmt.Errorf("failed to load action state (out): %w", err)
 		}
 
-		var st conditionals.ResolvableState
-		if err = payments.LoadState(&st, data.State); err != nil {
-			return nil, fmt.Errorf("failed to load resolve state: %w", err)
+		newActStateOut, err := executeConditionalSettlement(condOut, actStateOut.MustToCell(), data.State, channel.Our.LockedDeposits)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute condition: %w", err)
 		}
 
-		newActStateOut := actStateOut.MustToCell()
-		if st.Amount.Sign() > 0 {
-			newActStateOut, err = condOut.Execute(actStateOut.MustToCell(), data.State, channel.Our.LockedDeposits)
-			if err != nil {
-				return nil, fmt.Errorf("failed to execute condition: %w", err)
-			}
-
-			if err = channel.Our.Data.ActionStates.Set(actIdOut, newActStateOut); err != nil {
-				return nil, fmt.Errorf("failed to set action state (out): %w", err)
-			}
+		if err = channel.Our.Data.ActionStates.Set(actIdOut, newActStateOut); err != nil {
+			return nil, fmt.Errorf("failed to set action state: %w", err)
 		}
 
 		// Execute Their Linked (if exists)
@@ -390,6 +382,9 @@ func (s *Service) ProcessAction(ctx context.Context, key ed25519.PublicKey, lock
 			if meta.Incoming != nil {
 				if err = s.closeConditional(ctx, meta); err != nil {
 					return fmt.Errorf("failed to close next conditional: %w", err)
+				}
+				if err = s.db.UpdateVirtualChannelMeta(ctx, meta); err != nil {
+					return fmt.Errorf("failed to save closing virtual channel meta: %w", err)
 				}
 			}
 

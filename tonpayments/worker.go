@@ -236,7 +236,7 @@ func (s *Service) taskExecutor() {
 					}
 
 					if err = s.proposeAction(ctx, lockId, data.ChannelAddress, transport.CommitVirtualAction{
-						ID:                 data.VirtualKey,
+						ID:                 meta.Outgoing.Conditional.Hash(),
 						UpdatedConditional: upd.Serialize(),
 					}, nil); err != nil {
 						// reversal is not mandatory, because 'sent amount' is atomic with conditional prepay, and no actual balance change
