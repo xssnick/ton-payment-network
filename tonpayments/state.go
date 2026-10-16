@@ -292,21 +292,13 @@ func (s *Service) updateOurStateWithAction(ctx context.Context, channel *db.Chan
 			return nil, nil, fmt.Errorf("failed to load action state: %w", err)
 		}
 
-		var st conditionals.ResolvableState
-		if err = payments.LoadState(&st, act.State); err != nil {
-			return nil, nil, fmt.Errorf("failed to load resolve state: %w", err)
+		newActState, err := executeConditionalSettlement(cond, actState.MustToCell(), act.State, channel.Their.LockedDeposits)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to execute condition: %w", err)
 		}
 
-		newActState := actState.MustToCell()
-		if st.Amount.Sign() > 0 {
-			newActState, err = cond.Execute(actState.MustToCell(), act.State, channel.Their.LockedDeposits)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to execute condition: %w", err)
-			}
-
-			if err = channel.Their.Data.ActionStates.Set(actId, newActState); err != nil {
-				return nil, nil, fmt.Errorf("failed to set action: %w", err)
-			}
+		if err = channel.Their.Data.ActionStates.Set(actId, newActState); err != nil {
+			return nil, nil, fmt.Errorf("failed to set action state: %w", err)
 		}
 
 		var linkedBalanceDiff map[string]*big.Int
