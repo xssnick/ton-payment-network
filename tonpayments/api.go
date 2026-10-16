@@ -2190,10 +2190,12 @@ func (s *Service) ExecuteTopup(ctx context.Context, channelAddr, balanceId strin
 		return fmt.Errorf("failed to resolve coin config: %w", err)
 	}
 
-	amtTonFeeToCheck := tlb.MustFromTON("0.09")
+	activationAmount := big.NewInt(0)
 	if !channel.Our.ActiveOnchain {
-		amtTonFeeToCheck = tlb.MustFromNano(new(big.Int).Add(amtTonFeeToCheck.Nano(), tlb.MustFromTON("0.25").Nano()), 9)
+		activationAmount.Mul(tlb.MustFromTON(s.cfg.ReplicationMessageAttachAmount).Nano(), big.NewInt(4))
+		activationAmount.Add(activationAmount, tlb.MustFromTON("0.05").Nano())
 	}
+	amtTonFeeToCheck := tlb.FromNanoTON(new(big.Int).Add(tlb.MustFromTON("0.09").Nano(), activationAmount))
 
 	if cc.BalanceID == payments.GetTONBalanceID() {
 		toCheck, err := tlb.FromNano(new(big.Int).Add(amount.Nano(), amtTonFeeToCheck.Nano()), 9)
@@ -2234,12 +2236,9 @@ func (s *Service) ExecuteTopup(ctx context.Context, channelAddr, balanceId strin
 			Code: code,
 		}
 
-		fee := tlb.MustFromTON(s.cfg.ReplicationMessageAttachAmount).Nano()
-		fee.Mul(fee, big.NewInt(4))
-
 		// deploy a contract or activate it
 		messages = append(messages, WalletMessage{
-			Amount:    tlb.FromNanoTON(fee),
+			Amount:    tlb.FromNanoTON(activationAmount),
 			Body:      channel.InitMessageBody,
 			StateInit: state,
 		})
