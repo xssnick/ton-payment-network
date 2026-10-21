@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -31,7 +32,23 @@ type PeerConnection struct {
 
 	queries   map[string]chan tl.Serializable
 	pushQueue chan *Event
+	done      chan struct{}
 	mx        sync.RWMutex
+}
+
+var errPeerClosed = errors.New("web peer connection closed")
+
+func (p *PeerConnection) close() {
+	p.mx.Lock()
+	defer p.mx.Unlock()
+
+	select {
+	case <-p.done:
+		return
+	default:
+		close(p.done)
+		clear(p.queries)
+	}
 }
 
 type HTTP struct {
@@ -523,6 +540,12 @@ func (h *HTTP) pushHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid signature", http.StatusBadRequest)
 		return
 	}
+	select {
+	case <-pk.done:
+		http.Error(w, errPeerClosed.Error(), http.StatusUnauthorized)
+		return
+	default:
+	}
 
 	var req tl.Serializable
 	if _, err := tl.Parse(&req, e.Data, true); err != nil {
@@ -533,6 +556,12 @@ func (h *HTTP) pushHandler(w http.ResponseWriter, r *http.Request) {
 	if e.QueryID != "" {
 		pk.mx.Lock()
 		defer pk.mx.Unlock()
+		select {
+		case <-pk.done:
+			http.Error(w, errPeerClosed.Error(), http.StatusUnauthorized)
+			return
+		default:
+		}
 
 		if resp, ok := pk.queries[e.QueryID]; ok {
 			resp <- req
@@ -645,52 +674,77 @@ func (h *HTTP) sseHandler(w http.ResponseWriter, r *http.Request) {
 		transport: t,
 		queries:   make(map[string]chan tl.Serializable),
 		pushQueue: make(chan *Event, 4),
+		done:      make(chan struct{}),
 	}
 	t.Conn = oc
 
 	h.mx.Lock()
-	if c := h.peers[key]; c != nil {
-		close(c.pushQueue) // close prev subscription
-		_ = h.disconnectHandler(context.Background(), c.transport)
+	previous := h.peers[key]
+	if previous != nil {
+		previous.close()
 	}
 	h.peers[key] = oc
 	h.mx.Unlock()
+	if previous != nil {
+		_ = h.disconnectHandler(context.Background(), previous.transport)
+	}
 
 	defer func() {
+		oc.close()
 		h.mx.Lock()
-		defer h.mx.Unlock()
-
-		if v := h.peers[key]; v == oc {
+		current := h.peers[key] == oc
+		if current {
 			delete(h.peers, key)
+		}
+		h.mx.Unlock()
+		if current {
 			_ = h.disconnectHandler(context.Background(), oc.transport)
 		}
 	}()
 
-	oc.pushQueue <- &Event{Key: oc.transport.ID}
+	writeEvent := func(msg *Event) error {
+		data, err := json.Marshal(msg)
+		if err != nil {
+			return err
+		}
+		if _, err = fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+	if err := writeEvent(&Event{Key: oc.transport.ID}); err != nil {
+		return
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-oc.done:
+			return
 		case msg := <-oc.pushQueue:
-			if msg == nil {
+			select {
+			case <-oc.done:
+				return
+			default:
+			}
+			if err := writeEvent(msg); err != nil {
 				return
 			}
-
-			data, err := json.Marshal(msg)
-			if err != nil {
-				continue
-			}
-
-			if _, err = fmt.Fprintf(w, "data: %s\n\n", string(data)); err != nil {
-				return
-			}
-
-			flusher.Flush()
 		}
 	}
 }
 
 func (p *PeerConnection) Query(ctx context.Context, msg, res tl.Serializable) error {
+	result := reflect.ValueOf(res)
+	if result.Kind() != reflect.Pointer || result.IsNil() {
+		return fmt.Errorf("web query result must be a non-nil pointer")
+	}
+	result = result.Elem()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	data, err := tl.Serialize(msg, true)
 	if err != nil {
 		return err
@@ -706,26 +760,49 @@ func (p *PeerConnection) Query(ctx context.Context, msg, res tl.Serializable) er
 	qid := base64.StdEncoding.EncodeToString(qidData)
 
 	p.mx.Lock()
+	select {
+	case <-p.done:
+		p.mx.Unlock()
+		return errPeerClosed
+	default:
+	}
 	p.queries[qid] = resp
 	p.mx.Unlock()
+	defer func() {
+		p.mx.Lock()
+		delete(p.queries, qid)
+		p.mx.Unlock()
+	}()
 
-	p.pushQueue <- &Event{
+	event := &Event{
 		Key:     p.transport.ID,
 		QueryID: qid,
 		Data:    data,
 	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.done:
+		return errPeerClosed
+	case p.pushQueue <- event:
+	}
 
 	select {
 	case <-ctx.Done():
-		p.mx.Lock()
-		delete(p.queries, qid)
-		p.mx.Unlock()
-
 		return ctx.Err()
+	case <-p.done:
+		return errPeerClosed
 	case val := <-resp:
-		// query removed from map at writer level to protect from repeat
-
-		reflect.ValueOf(res).Elem().Set(reflect.ValueOf(val))
+		select {
+		case <-p.done:
+			return errPeerClosed
+		default:
+		}
+		value := reflect.ValueOf(val)
+		if !value.IsValid() || !value.Type().AssignableTo(result.Type()) {
+			return fmt.Errorf("unexpected web peer response type %T, expected %s", val, result.Type())
+		}
+		result.Set(value)
 	}
 	return nil
 }

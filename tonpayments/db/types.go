@@ -227,7 +227,7 @@ func (s *AgreedData) UnmarshalJSON(bytes []byte) error {
 	return nil
 }
 
-func (s *AgreedData) MarshalJSON() ([]byte, error) {
+func (s AgreedData) MarshalJSON() ([]byte, error) {
 	c := cell.BeginCell().
 		MustStoreDict(s.Conditionals).
 		MustStoreDict(s.ActionStates).

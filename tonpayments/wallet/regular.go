@@ -30,7 +30,12 @@ func InitWallet(apiClient wallet.TonAPI, key ed25519.PrivateKey) (*Wallet, error
 		MessageBuilder: func(ctx context.Context, subWalletId uint32) (id uint32, createdAt int64, err error) {
 			createdAt = time.Now().UTC().Unix() - 30 // something older than last master block, to pass through LS external's time validation
 			// TODO: store seqno in db
-			id = uint32((createdAt%(3*60+30))<<15) | atomic.AddUint32(&walletAbstractSeqno, 1)%(1<<15)
+			seqno := atomic.AddUint32(&walletAbstractSeqno, 1) % (1 << 15)
+			// Position 1023 is outside Highload V3's 1023-bit bitmap.
+			for seqno&1023 == 1023 {
+				seqno = atomic.AddUint32(&walletAbstractSeqno, 1) % (1 << 15)
+			}
+			id = uint32((createdAt%(3*60+30))<<15) | seqno
 			return
 		},
 	})

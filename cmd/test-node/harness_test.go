@@ -76,6 +76,9 @@ type testNodeOptions struct {
 	hedgeWebhookURL      string
 	hedgeWebhookKey      string
 	hedgeWebhookSecret   string
+	privateKey           ed25519.PrivateKey
+	dbPath               string
+	wrapStorage          func(dbpkg.Storage) dbpkg.Storage
 }
 
 func newTestNodeWithOptions(t *testing.T, hub *loopbackHub, idx, port int, opts testNodeOptions) *testNode {
@@ -112,14 +115,25 @@ func newTestNodeWithOptions(t *testing.T, hub *loopbackHub, idx, port int, opts 
 	if err != nil {
 		t.Fatalf("node %d: generate node key failed: %v", idx, err)
 	}
+	if opts.privateKey != nil {
+		priv = opts.privateKey
+		pub = priv.Public().(ed25519.PublicKey)
+	}
 
-	dbPath := filepath.Join(t.TempDir(), fmt.Sprintf("node-%d-db", idx))
+	dbPath := opts.dbPath
+	if dbPath == "" {
+		dbPath = filepath.Join(t.TempDir(), fmt.Sprintf("node-%d-db", idx))
+	}
 	storage, fresh, err := leveldb.NewLevelDB(dbPath)
 	if err != nil {
 		t.Fatalf("node %d: open db failed: %v", idx, err)
 	}
 
-	database := dbpkg.NewDB(storage, pub)
+	var nodeStorage dbpkg.Storage = storage
+	if opts.wrapStorage != nil {
+		nodeStorage = opts.wrapStorage(storage)
+	}
+	database := dbpkg.NewDB(nodeStorage, pub)
 	if fresh {
 		if err = database.SetMigrationVersion(context.Background(), len(dbpkg.Migrations)); err != nil {
 			t.Fatalf("node %d: set migration version failed: %v", idx, err)
@@ -1067,6 +1081,7 @@ type loopbackNet struct {
 	mu                sync.RWMutex
 	queryHandler      func(ctx context.Context, peer *transport.Peer, msg any) (any, error)
 	disconnectHandler func(ctx context.Context, peer *transport.Peer) error
+	afterQuery        func(msg, response any) error
 }
 
 func newLoopbackNet(hub *loopbackHub, pub ed25519.PublicKey, port int) *loopbackNet {
@@ -1125,6 +1140,7 @@ func (c *loopbackConn) Query(ctx context.Context, msg, res tl.Serializable) erro
 
 	c.remote.mu.RLock()
 	h := c.remote.queryHandler
+	afterQuery := c.remote.afterQuery
 	c.remote.mu.RUnlock()
 	if h == nil {
 		return fmt.Errorf("remote loopback query handler is not set")
@@ -1133,6 +1149,11 @@ func (c *loopbackConn) Query(ctx context.Context, msg, res tl.Serializable) erro
 	out, err := h(ctx, c.peerAtRemote, msg)
 	if err != nil {
 		return err
+	}
+	if afterQuery != nil {
+		if err := afterQuery(msg, out); err != nil {
+			return err
+		}
 	}
 
 	if res == nil || out == nil {

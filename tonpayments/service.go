@@ -2106,23 +2106,24 @@ func (s *Service) AcquireChannel(ctx context.Context, addr string, id ...int64) 
 	} else {
 		l.id = id[0]
 	}
+	lockID := l.id
 
-	log.Debug().Str("channel", addr).Bool("master", channel.WeLeft).Int64("id", l.id).Msg("acquiring lock")
+	log.Debug().Str("channel", addr).Bool("master", channel.WeLeft).Int64("id", lockID).Msg("acquiring lock")
 
 	s.lockerMx.Unlock()
 
 	// left side is lock master, negative means lock from other side (master locks us)
-	if channel.WeLeft || l.id < 0 {
-		return channel, l.id, func() {
+	if channel.WeLeft || lockID < 0 {
+		return channel, lockID, func() {
 			l.mx.Unlock()
 
-			log.Debug().Str("channel", addr).Int64("id", l.id).Msg("local lock released")
+			log.Debug().Str("channel", addr).Int64("id", lockID).Msg("local lock released")
 		}, nil
 	}
 
 	// l.pending = true
 	theirChAddr := address.MustParseAddr(channel.Their.Address)
-	res, err := s.getTransport(channel).RequestChannelLock(ctx, channel.Their.OnchainInfo.Key, theirChAddr, l.id, true)
+	res, err := s.getTransport(channel).RequestChannelLock(ctx, channel.Their.OnchainInfo.Key, theirChAddr, lockID, true)
 	// l.pending = false
 	if err != nil {
 		l.mx.Unlock()
@@ -2133,21 +2134,21 @@ func (s *Service) AcquireChannel(ctx context.Context, addr string, id ...int64) 
 	if !res.Agreed {
 		l.mx.Unlock()
 
-		log.Debug().Str("channel", addr).Int64("id", l.id).Str("reason", res.Reason).Msg("external lock not obtained")
+		log.Debug().Str("channel", addr).Int64("id", lockID).Str("reason", res.Reason).Msg("external lock not obtained")
 
 		return nil, 0, nil, db.ErrChannelBusy
 	}
 
-	return channel, l.id, func() {
+	return channel, lockID, func() {
 		l.mx.Unlock()
 
-		res, err := s.getTransport(channel).RequestChannelLock(ctx, channel.Their.OnchainInfo.Key, theirChAddr, l.id, false)
+		res, err := s.getTransport(channel).RequestChannelLock(ctx, channel.Their.OnchainInfo.Key, theirChAddr, lockID, false)
 		if err != nil {
-			log.Warn().Str("channel", addr).Int64("id", l.id).Err(err).Msg("external lock release failed, but state can be fetched by another party, no worries")
+			log.Warn().Str("channel", addr).Int64("id", lockID).Err(err).Msg("external lock release failed, but state can be fetched by another party, no worries")
 		} else if !res.Agreed {
-			log.Warn().Str("channel", addr).Int64("id", l.id).Str("reason", res.Reason).Msg("external lock release failed, not accepted by party")
+			log.Warn().Str("channel", addr).Int64("id", lockID).Str("reason", res.Reason).Msg("external lock release failed, not accepted by party")
 		} else {
-			log.Debug().Str("channel", addr).Int64("id", l.id).Msg("external lock released")
+			log.Debug().Str("channel", addr).Int64("id", lockID).Msg("external lock released")
 		}
 	}, nil
 }
