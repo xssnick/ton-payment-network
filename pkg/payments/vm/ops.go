@@ -32,9 +32,14 @@ func PushIntOP(val *big.Int) *cell.Builder {
 			MustStoreUInt(0x82, 8).
 			MustStoreUInt(l, 5)
 
-		if x > 256 {
-			c.MustStoreUInt(0, uint(x-256))
-			x = 256
+		if x > 257 {
+			// PUSHINT rounds the payload up to 259 bits; preserve the sign.
+			padding := int64(0)
+			if val.Sign() < 0 {
+				padding = -1
+			}
+			c.MustStoreInt(padding, uint(x-257))
+			x = 257
 		}
 
 		c.MustStoreBigInt(val, uint(x))
@@ -76,7 +81,7 @@ func ReadCellOrNullOP(code *cell.Slice) (*cell.Cell, error) {
 	if v != 0x88 && v != 0x6D {
 		return nil, fmt.Errorf("incorrect opcode")
 	}
-	
+
 	if v == 0x6D {
 		return nil, nil
 	}
